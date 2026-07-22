@@ -1,0 +1,2 @@
+qemu-system-i386 -drive file=VeaOS.img,format=raw -serial stdio -d int -D log_interrupt.txt -m 128M -s -S 
+
