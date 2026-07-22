@@ -1,0 +1,6 @@
+build/
+.cache/
+run_img
+VeaOS.img
+compile_commands.json
+log.txt
