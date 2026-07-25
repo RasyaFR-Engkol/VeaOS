@@ -1,21 +1,21 @@
 # CODING STYLE
 
-Per tanggal 25 Juli 2026, VeaOS resmi menetapkan penentuan cara untuk mengoding project dengan cara yang benar. Tujuan diberadakannya CODING STYLE ini untuk:
+As of July 25, 2026, VeaOS has officially established the proper coding style for the project. The purpose of this CODING STYLE is to:
 
-1. Menciptakan kode yang source-nya mudah dibaca.
-2. Memberikan informasi seputar file.
-3. Agar kode tidak mudah berserakan di Repository tanpa alasan yang jelas.
+1. Create code with easily readable source.
+2. Provide information regarding the files.
+3. Prevent code from being scattered in the Repository without a clear reason.
 
-Terima kasih untuk Linux dan ReactOS atas inspirasinya untuk menetapkan CODING STYLE.
+Thank you to Linux and ReactOS for the inspiration in establishing this CODING STYLE.
 
 ---
 
-## 1. Penulisan Indentasi
-Indentasi wajib digunakan untuk memperjelas hierarki dan keterbacaan *source code*.
+## 1. Indentation Formatting
+Indentation must be used to clarify the hierarchy and readability of the source code.
 
-*   **Lebar Identasi:** Gunakan 4 spasi untuk setiap tingkat (level) indentasi. (Dilarang mencampur Tab dan Spasi secara acak).
+*   **Indentation Width:** Use 4 spaces for each indentation level. (Randomly mixing Tabs and Spaces is strictly prohibited).
 
-    **Benar:**
+    **Correct:**
     ```c
     VOID
     VEAPI
@@ -25,21 +25,21 @@ Indentasi wajib digunakan untuk memperjelas hierarki dan keterbacaan *source cod
     }
     ```
 
-    **Salah:**
+    **Incorrect:**
     ```c
     VOID 
     VEAPI
     Foo(VOID)
     {
     DoSomething();
-       AtauIndentasiSepertiIniSalah();
-                   TidakBolehSejauhIniDariTingkatan();
+       OrIndentationLikeThisIsWrong();
+                   MustNotBeThisFarFromTheLevel();
     }
     ```
 
-*   **Brace Style:** Menggunakan *Allman Style*. Setiap *braces* `{` dan `}` wajib memiliki barisnya tersendiri.
+*   **Brace Style:** Use *Allman Style*. Each brace `{` and `}` must have its own line.
 
-    **Benar:**
+    **Correct:**
     ```c
     VOID
     VEAPI
@@ -53,31 +53,31 @@ Indentasi wajib digunakan untuk memperjelas hierarki dan keterbacaan *source cod
     }
     ```
 
-    **Salah:**
+    **Incorrect:**
     ```c
     VOID
     VEAPI
     Foo(VOID) {
-        // linux style sangat DILARANG
+        // Linux style is strictly PROHIBITED
         if (SOME){
-         // ^^ apalagi braces tertempel dengan kurung kurawal
+         // ^^ especially braces attached to parentheses
         }
     }
     ```
 
-*   **Maksimal Level Kedalaman:** VeaOS mewajibkan maksimal 4 kedalaman level indentasi untuk setiap fungsi kode yang ada. Jika kode Anda ternyata memerlukan lebih dari 4 kedalaman level, segera pecah kode itu menjadi *helper*, atau kecilkan fungsi Anda, atau perbaiki logika kodenya.
+*   **Maximum Depth Level:** VeaOS strictly mandates a maximum of 4 indentation levels for any code function. If your code requires more than 4 levels of depth, immediately break the code down into helpers, reduce your function size, or improve the code logic.
 
 ---
 
-## 2. Cara Penulisan
-Penulisan yang benar membuat kode menjadi jauh lebih nyaman untuk dibaca.
+## 2. Writing Style
+Proper writing makes the code much more comfortable to read.
 
-*   **PascalCase:** Setiap kode mulai dari *Variable* dan *Function* (`typedef variable` wajib menggunakan `ALL_UPPERCASE`) wajib menggunakan `PascalCase` supaya kode lebih nyaman dibaca dan yang pasti tidak membuat keyboard Anda cepat panas :p.
-    *Style yang wajib dihindari:*
+*   **PascalCase:** Every code element, from Variables to Functions (`typedef` variables must use `ALL_UPPERCASE`), must use `PascalCase` to make the code more comfortable to read and certainly to keep your keyboard from heating up too fast :p.
+    *Styles to avoid:*
     1. `camelCase`
     2. `snake_case`
 
-    **Benar:**
+    **Correct:**
     ```c
     VOID
     VEAPI
@@ -90,62 +90,62 @@ Penulisan yang benar membuat kode menjadi jauh lebih nyaman untuk dibaca.
     }
     ```
 
-    **Salah:**
+    **Incorrect:**
     ```c
     void veapi aku_cinta_hatsune_miku(int aku, int miku)
     {
-        // Walau identasi sudah benar dan braces sesuai, ini masih dilarang
+        // Even though indentation and braces are correct, this is still prohibited
         ini_salah(aku, miku)
     }
     ```
 
-*   **Pendefinisian Variable:** Definisi *Variable* wajib memiliki lebih dari 2 huruf. Dan *Variable* tersebut harus memiliki nama yang jelas sesuai dengan tujuan awal kenapa *Variable* tersebut dibuat. Terlebih juga, harus mengikuti `PascalCase`.
+*   **Variable Definition:** Variable definitions must be longer than 2 letters. And the Variable must have a clear name according to the initial purpose of why the Variable was created. Furthermore, it must follow `PascalCase`.
 
-    **Benar:**
+    **Correct:**
     ```c
     BOOLEAN DidSend;
     INT TotalSend;
     ```
 
-    **Salah:**
+    **Incorrect:**
     ```c
-    BOOLEAN A // <- DILARANG
-    BOOLEAN bA // <- TETAP DILARANG WALAU 2 HURUF TAPI camelCase
+    BOOLEAN A // <- PROHIBITED
+    BOOLEAN bA // <- STILL PROHIBITED EVEN IF 2 LETTERS DUE TO camelCase
     ```
 
-*   **Pendefinisian Fungsi:** Pendefinisian Fungsi juga memiliki aturan tertulisnya.
+*   **Function Definition:** Function definitions also have their own written rules.
     
-    *Tanpa Argumen (`VOID`):*
+    *Without Arguments (`VOID`):*
     ```c
     RETURN_TYPE
     CALLING_CONVENTION
-    NamaFungsi(VOID); // <- WAJIB TARO VOID JIKA TIDAK MENERIMA ARGUMEN/VARIABLE
+    FunctionName(VOID); // <- MUST PUT VOID IF IT DOES NOT ACCEPT ARGUMENTS/VARIABLES
     ```
     
-    *Dengan 1 Argumen:*
+    *With 1 Argument:*
     ```c
     RETURN_TYPE
     CALLING_CONVENTION
-    NamaFungsi(IN INT Awalan); // <- 1 Fungsi tetap harus ditaro di line yang sama dengan nama fungsi
+    FunctionName(IN INT Prefix); // <- 1 argument must still be placed on the same line as the function name
     ```
     
-    *Dengan 2 atau lebih argumen:*
+    *With 2 or more arguments:*
     ```c
     RETURN_TYPE
     CALLING_CONVENTION
-    NamaFungsi(
-        IN INT Budi, // <- Ini juga kena newline jika 2 variable
-        OUT INT Santoso // <- Wajib newline setiap variable
+    FunctionName(
+        IN INT Budi, // <- This also requires a newline if there are 2 variables
+        OUT INT Santoso // <- Mandatory newline for each variable
     );
     ```
 
-*   **Macro Preprocessor:** Macro Preprocessor seperti `#define` wajib memiliki aturan penamaan sebagai berikut:
-    1. DILARANG menggunakan `PascalCase`. Wajib `ALL_UPPER_CASE`.
-    2. DILARANG menempatkan Macro Preprocessor di dalam fungsi (WAJIB DI LUAR FUNGSI).
-    3. GUNAKAN penamaan yang jelas dan bermakna ketika membuat Macro Preprocessor.
-    4. Jika membuat 2 Macro yang saling berdampingan dengan line sebelahnya, samakan indentasi MACRO EXPAND-nya dengan MACRO EXPAND di sebelahnya.
+*   **Macro Preprocessor:** Macro Preprocessors like `#define` must follow these naming rules:
+    1. PROHIBITED from using `PascalCase`. Must be `ALL_UPPER_CASE`.
+    2. PROHIBITED from placing Macro Preprocessors inside functions (MUST BE OUTSIDE FUNCTIONS).
+    3. USE clear and meaningful naming when creating a Macro Preprocessor.
+    4. If creating 2 Macros adjacent to each other, align their MACRO EXPAND indentation with the MACRO EXPAND next to it.
 
-    **Contoh:**
+    **Example:**
     ```c
     #define APIC_EOI                0xB0
     #define APIC_REG_TPR            0x080
@@ -158,30 +158,30 @@ Penulisan yang benar membuat kode menjadi jauh lebih nyaman untuk dibaca.
     #define APIC_REG_EOI            0x0B0
     ```
 
-*   **Komentar:** Komentar adalah dokumentasi mini yang ditempatkan di dalam kode agar orang yang ingin membacanya tidak kebingungan dengan apa maksud kode itu.
+*   **Comments:** Comments are mini-documentation placed in the code so that people who want to read it will not be confused about what the code means.
     
-    *Aturan dasar:*
-    1. Gunakan `//` untuk single line atau multi line.
-    2. Atau bisa menggunakan `/* KOMENTAR */` juga.
-    3. DILARANG mengkomentari dead-code. Jika ada dead-code, HAPUS! Jangan dibiarkan disana.
-    4. Setiap blok kode yang memiliki maksud di dalam sebuah fungsi, WAJIB diberikan komentar agar orang lain tahu maksudnya apa. Pastikan komentarnya itu jelas dan tidak menimbulkan banyak pertanyaan.
-    5. Dilarang mengulang redundansi komen yang padahal sudah jelas.
+    *Basic rules:*
+    1. Use `//` for single line or multi-line.
+    2. Or you can also use `/* COMMENT */`.
+    3. PROHIBITED from commenting out dead-code. If there is dead-code, DELETE IT! Do not leave it there.
+    4. Every code block that serves a purpose within a function MUST be given a comment so that others know its intent. Ensure the comments are clear and do not raise many questions.
+    5. Do not repeat redundant comments that state the obvious.
 
-    **Benar:**
+    **Correct:**
     ```c
     VOID
     VEAPI
     ApicEnableLapic(VOID)
     {
-        // Check apakah Base Address LAPIC sudah di-map ke Virtual Memory
+        // Check if the LAPIC Base Address has been mapped to Virtual Memory
         if (ApicLapicBase == NULL)
         {
-            KdPrintf("HCT: LAPIC Base Address belum di-map!\n\r");
+            KdPrintf("HCT: LAPIC Base Address has not been mapped!\n\r");
             return;
         }
 
         /* 
-         * Konfigurasi Spurious Interrupt Vector Register (SIVR):
+         * Spurious Interrupt Vector Register (SIVR) Configuration:
          * - Bit 8   : APIC Software Enable
          * - Bit 0-7 : Spurious Vector (0xFF / 255)
          */
@@ -190,12 +190,12 @@ Penulisan yang benar membuat kode menjadi jauh lebih nyaman untuk dibaca.
         Sivr |= 0x0FF;
         ApicLapicBase[LAPIC_SIVR_OFFSET / 4] = Sivr;
 
-        // Reset TPR ke 0 agar hardware menerima semua Interrupt Level (IRQL PASSIVE_LEVEL)
+        // Reset TPR to 0 so the hardware receives all Interrupt Levels (IRQL PASSIVE_LEVEL)
         ApicLapicBase[LAPIC_TPR_OFFSET / 4] = 0;
     }
     ```
 
-    **Salah:**
+    **Incorrect:**
     ```c
     VOID
     VEAPI
@@ -203,37 +203,37 @@ Penulisan yang benar membuat kode menjadi jauh lebih nyaman untuk dibaca.
     {
         if (ApicLapicBase == NULL)
         {
-            return; // Tidak ada penjelasan kenapa fungsi langsung return
+            return; // No explanation why the function immediately returns
         }
 
-        // ApicLapicBase[0] = 0; <-- DILARANG: Dead code dibiarkan ter-comment! HAPUS!
+        // ApicLapicBase[0] = 0; <-- PROHIBITED: Dead code left commented out! DELETE IT!
 
-        ULONG Sivr = ApicLapicBase[LAPIC_SIVR_OFFSET / 4]; // Ambil Sivr <-- DILARANG: Komentar redundan/mengulang apa yang terlihat di kode
+        ULONG Sivr = ApicLapicBase[LAPIC_SIVR_OFFSET / 4]; // Get Sivr <-- PROHIBITED: Redundant comment/repeating what is obvious in the code
 
-        Sivr |= 0x100; // Set bit ke 100 hex <-- Komentar tidak menjelaskan TUJUAN (kenapa di-set 0x100?)
+        Sivr |= 0x100; // Set bit to 100 hex <-- Comment does not explain the PURPOSE (why is it set to 0x100?)
         ApicLapicBase[LAPIC_SIVR_OFFSET / 4] = Sivr;
 
-        // OldApicDisableLogic(); <-- DILARANG: Jangan tinggalkan sisa uji coba kode lama
+        // OldApicDisableLogic(); <-- PROHIBITED: Do not leave remnants of old test code
     }
     ```
 
-*   **Pointer Style:** Pointer style yang benar adalah ditempel di sebelah kanan *Variable Name*.
+*   **Pointer Style:** The correct pointer style is attached to the *Variable Name*.
 
-    **Benar:**
+    **Correct:**
     ```c
     VOID *Ajl;
     PVOID *AhciInterruptRoutine;
     ```
 
-    **Salah:**
+    **Incorrect:**
     ```c
-    VOID* AduhSalah; // <- SALAH
-    PVOID * HarusnyaSalah; // <- SALAH JUGA
+    VOID* AduhSalah; // <- WRONG
+    PVOID * HarusnyaSalah; // <- ALSO WRONG
     ```
 
-*   **Penamaan Struct dan Enumeration:** Nama struct wajib di-`typedef` ke nama `UPPER_CASE` dan struct wajib diberikan namanya dengan awalan `_` di awal sebagai tanda agar tidak bentrok, dan enum juga sama. Setiap variable yang ada di dalam struct wajib diberikan variable `PascalCase`, sama dengan aturan `PascalCase` yang dibilang di atas.
+*   **Struct and Enumeration Naming:** Struct names must be `typedef`-ed to `UPPER_CASE` and the struct name must be prefixed with `_` as a mark to avoid conflicts, and the same goes for enums. Every variable inside the struct must be a `PascalCase` variable, same as the `PascalCase` rule mentioned above.
 
-    **Benar:**
+    **Correct:**
     ```c
     typedef struct _VEA_DRIVER_OBJECT
     {
@@ -250,19 +250,19 @@ Penulisan yang benar membuat kode menjadi jauh lebih nyaman untuk dibaca.
     } HARDWARE_STATE, *PHARDWARE_STATE;
     ```
 
-    **Salah:**
+    **Incorrect:**
     ```c
-    // DILARANG: Tag tidak diawali '_', typedef tidak ALL_UPPER_CASE, dan field pakai camelCase/snake_case
+    // PROHIBITED: Tag does not start with '_', typedef is not ALL_UPPER_CASE, and fields use camelCase/snake_case
     typedef struct vea_driver_object
     {
-        ulong driver_size;     // SALAH: Tipe data & nama field snake_case
-        BOOLEAN isInitialized; // SALAH: Field pakai camelCase
+        ulong driver_size;     // WRONG: Data type & field name are snake_case
+        BOOLEAN isInitialized; // WRONG: Field uses camelCase
     } vea_driver_object;
     ```
 
-*   **Tipe Dasar dalam Bahasa C:** Selalu menggunakan tipe dasar yang *explicit* seperti `ULONG`, `PULONG`, `VOID`, `PVOID`, `ULONG64`, `PULONG64`, dsb. Dilarang menggunakan tipe bawaan C biasa karena berpotensi rawan kesalahan jika VeaOS di-port ke mesin lain.
+*   **Basic Types in C Language:** Always use explicit basic types such as `ULONG`, `PULONG`, `VOID`, `PVOID`, `ULONG64`, `PULONG64`, etc. Prohibited from using standard C built-in types because it is prone to errors if VeaOS is ported to another machine.
 
-    **Benar:**
+    **Correct:**
     ```c
     VOID
     VEAPI
@@ -276,23 +276,23 @@ Penulisan yang benar membuat kode menjadi jauh lebih nyaman untuk dibaca.
     }
     ```
 
-    **Salah:**
+    **Incorrect:**
     ```c
     void
     veapi
     ProcessBuffer(
-        void *bufferAddress,    // DILARANG: Pakai void* bawaan C
-        unsigned long bufferSize // DILARANG: Pakai unsigned long bawaan C
+        void *bufferAddress,     // PROHIBITED: Using standard C void*
+        unsigned long bufferSize // PROHIBITED: Using standard C unsigned long
     )
     {
-        bool isValid = true;    // DILARANG: Pakai bool C99
-        int index = 0;          // DILARANG: Pakai int biasa
+        bool isValid = true;    // PROHIBITED: Using C99 bool
+        int index = 0;          // PROHIBITED: Using standard int
     }
     ```
 
-*   **IN, OUT, OPTIONAL:** Fungsi yang menerima argumen, wajib menambahkan `IN`, `OUT`, `IN OUT`, atau `OPTIONAL` jika argumen yang dimasukkan ke fungsi diotak-atik oleh dalaman fungsi tersebut.
+*   **IN, OUT, OPTIONAL:** Functions that accept arguments must add `IN`, `OUT`, `IN OUT`, or `OPTIONAL` if the argument passed into the function is modified by the inside of the function.
 
-    **Benar:**
+    **Correct:**
     ```c
     RETURN_TYPE
     CALLING_CONVENTION
@@ -303,73 +303,55 @@ Penulisan yang benar membuat kode menjadi jauh lebih nyaman untuk dibaca.
     );
     ```
 
-    **Salah:**
+    **Incorrect:**
     ```c
     RETURN_TYPE
     CALLING_CONVENTION
     ApicReadRegister(
-        ULONG RegisterOffset,   // SALAH: Tidak ada penanda IN / OUT
-        PULONG RegisterValue,  // SALAH: Tidak jelas apakah variabel ini cuma dibaca atau diisi
-        PVOID ExtraContext     // SALAH: Tidak ada penanda OPTIONAL
+        ULONG RegisterOffset,   // WRONG: No IN / OUT marker
+        PULONG RegisterValue,   // WRONG: Unclear whether this variable is only read or written to
+        PVOID ExtraContext      // WRONG: No OPTIONAL marker
     );
     ```
 
-*   **Bagian Atas File C dan H:**
-    1. **SPDX License:** Wajib menaruh *license* dengan format berikut:
+*   **Top Section of C and H Files:**
+    1. **SPDX License:** Must place the license with the following format:
        ```c
        /* VeaOS SPDX License ----------------------------------------------------
          SPDX-License-Identifier: GPL-2.0-only
          LICENSE     : GNU General Public License v2.0
-         FILE        : [NamaFile.c / NamaFile.h]
-         CREATOR     : [Nama / Username Pembuat]
-         MAINTAINER  : [Nama / Tim Pemelihara Kode
-                        BISA NEW LINE. TAPI HARAP DIBUAT LIST DENGAN -]
-         PURPOSE     : [Penjelasan singkat fungsi file ini. BISA NEW LINE]
+         FILE        : [FileName.c / FileName.h]
+         CREATOR     : [Creator Name / Username]
+         MAINTAINER  : [Maintainer Name / Team
+                        CAN BE NEW LINE. BUT PLEASE MAKE IT A LIST WITH -]
+         PURPOSE     : [Brief explanation of this file's purpose. CAN BE NEW LINE]
         ----- Effective since MM-YYYY til FOREVER ------------------------------- */
        ```
     2. **Header:** 
-       Untuk `.c`/`.cpp`, Header yang paling wajib untuk ditambah di atas adalah `veakrnl.h`. Lalu setelah itu, kalian bebas menambahkan Header yang kalian butuhkan.
-       Untuk `.h`/`.hpp`, Header yang paling wajib ditambah di atas adalah `#pragma once` terlebih dahulu, loncat 1 line ke bawah, lalu `#include <procbind.h>` atau `#include "procbind.h"`, setelah itu tambahkan Header yang kalian butuhkan.
+       For `.c`/`.cpp`, the most mandatory Header to add at the top is `veakrnl.h`. After that, you are free to add any Headers you need.
+       For `.h`/`.hpp`, the most mandatory Header to add at the top is `#pragma once` first, skip 1 line down, then `#include <procbind.h>` or `#include "procbind.h"`, after that add any Headers you need.
        
-       **Contoh:**
+       **Example:**
        *.C:*
        ```c
        #include <veakrnl.h>
-       #include <headergwganteng.h>
+       #include <mycoolheader.h>
        ```
        *.H:*
        ```c
        #pragma once
        
        #include "procbind.h"
-       #include "keterserahankalian.h"
+       #include "whateveryouwant.h"
        ```
-    3. **Revision History:** Wajib menaruh Revision History di bawah header dengan format wajib sebagai berikut:
+    3. **Revision History:** Must place Revision History below the header with the following mandatory format:
        ```c
        /* Revision History ------------------------------------------------------
-        * Tanggal       : 26-07-2026
-        * Nama Pengubah : Dev Ganteng
-        * Revisi        : Menambahkan resetting TPR ke IRQL PASSIVE_LEVEL
+        * Date          : 26-07-2026
+        * Author        : Cool Dev
+        * Revision      : Added resetting TPR to IRQL PASSIVE_LEVEL
         *
-        * Tanggal       : 25-07-2026
-        * Nama Pengubah : VeaOS Team
-        * Revisi        : Inisialisasi awal fungsi ApicEnableLapic
+        * Date          : 25-07-2026
+        * Author        : VeaOS Team
+        * Revision      : Initial initialization of ApicEnableLapic function
         * --------------------------------------------------------------------- */
-       ```
-
----
-
-## 3. Aturan Formatting Ulang Kesalahan Format
-Seandainya terdapat kesalahan *formatting* di file yang di-push (dari kalian), maka kalian wajib membenarkannya, ikuti pedoman *style coding* ini, dan *push* ulang dengan format ini:
-
-`MODULE: FORMATTING | Pesan Commit`
-
----
-
-## 4. Akhir Kata
-File CODING STYLE ini berlaku mulai Sabtu 25 Juli 2026. File yang dibuat sebelum tanggal ini tidak wajib mengikuti aturan baku ini. Tetapi jika file yang dibuat sebelum tanggal 25 Juli 2026 direvisi seperti penambahan fungsi atau perubahan nama variable, harap terapkan aturan CODING STYLE ini ke revisi yang kalian lakukan, dan kalian tidak perlu mengubah/merevisi keseluruhan file.
-
-Mudah-mudahan dengan penerapan CODING STYLE ini, *Source Code* VeaOS jadi lebih mudah dipahami dan dapat dicerna oleh orang awam.
-
-Salam Hangat,
-**#VEAOSTEAM**
