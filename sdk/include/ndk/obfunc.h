@@ -10,6 +10,7 @@ VEAPI
 ObAllocateObject(
     POBJECT_TYPE ObjectType,
     POBJECT_ATTRIBUTES ObjectAttr,
+    ULONG ObjectSize,
     PVOID *ReturnedObject // Output: Pointer ke badan objek
 );
 
@@ -128,15 +129,23 @@ VEASTATUS
 ObInitializeLookupContext(
     POB_LOOKUP_CONTEXT LookupContext,
     POBJECT_ATTRIBUTES ObjectAttributes,
-    POBJECT_TYPE ExpectedType
+    POBJECT_TYPE ExpectedType,
+    ACCESS_MASK DesiredAccess,      // <-- PARAMETER BARU
+    KPROCESSOR_MODE AccessMode      // <-- PARAMETER BARU (biar AccessMode terisi juga)
 );
 
 VEASTATUS
 VEAPI
 ObCreateObject(
-    POBJECT_TYPE ObjectType,
-    POBJECT_ATTRIBUTES ObjectAttributes,
-    PVOID *ReturnedObject
+    IN KPROCESSOR_MODE ProcessorMode,
+    IN POBJECT_TYPE ObjectType,
+    IN POBJECT_ATTRIBUTES ObjectAttributes,
+    IN KPROCESSOR_MODE OwnershipMode,
+    IN OUT PVOID ParseContext OPTIONAL,
+    IN ULONG ObjectSize,
+    IN ULONG PagedPoolCharge,
+    IN ULONG NonPagedPoolCharge,
+    OUT PVOID *ReturnedObject
 );
 
 VEASTATUS
@@ -150,6 +159,7 @@ VEASTATUS
 VEAPI
 ObioCreateNewDevice(
     PDRIVER_OBJECT DriverObject,
+    ULONG DeviceExtSize,
     PCHAR DeviceName,         // Contoh: "serial0"
     ULONG DeviceType,
     PDEVICE_OBJECT *NewDevice // Output pointer
@@ -166,7 +176,8 @@ VEASTATUS
 VEAPI
 ObioCreateDriver(
     PCHAR DriverName,                  // Contoh: "Serial"
-    PDRIVER_INITIALIZE InitializationFunction
+    PDRIVER_INITIALIZE InitializationFunction,
+    OUT PDRIVER_OBJECT *DriverObject
 );
 
 VEASTATUS
@@ -240,4 +251,70 @@ ObOpenObjectByName(
     KPROCESSOR_MODE AccessMode,
     ULONG DesiredAccess,
     PHANDLE ReturnedHandle
+);
+
+BOOLEAN
+VEAPI
+ObioInitSystem1(VOID);
+
+VOID
+VEAPI
+ObioInitGroupOrderLoad(VOID);
+
+VEASTATUS
+VEAPI
+ObioOpenVeaKey(
+    OUT PHANDLE Handle, 
+    IN PANSI_STRING KeyName,
+    IN ACCESS_MASK DesiredAccess
+);
+
+VEASTATUS
+VEAPI
+ObioCreateVeaKey(
+    IN HANDLE RootDirectory OPTIONAL,   // *** BARU ***
+    IN PANSI_STRING StringKey,
+    IN ULONG Option,
+    IN ACCESS_MASK DesiredAccess,
+    OUT PULONG Disposition,
+    OUT PHANDLE Handle
+);
+
+VEASTATUS
+VEAPI
+ObioInitializePnPService(VOID);
+
+VOID
+VEAPI
+ObioPnpChangeState(
+    IN PDEVICE_NODE DeviceNode,
+    IN DEVNODE_STATE DeviceNodeState
+);
+
+PDEVICE_NODE
+VEAPI
+ObioCreateDeviceNode(IN PDEVICE_OBJECT Pdo);
+
+VEASTATUS
+VEAPI
+ObioPnpRootDriverEntry(PDRIVER_OBJECT DriverObject);
+
+VOID
+VEAPI
+ObioDetachObject(
+    IN PVOID Object
+);
+
+PVOID
+VEAPI
+ObioAttachObject(
+    IN PVOID SourceObject,
+    IN PVOID TargetObject
+);
+
+VEASTATUS
+VEAPI
+ObioRegisterRootDeviceNode(
+    IN PDEVICE_OBJECT Pdo,
+    IN PCSTR HardwareId        // <--- Masukkan HardwareID sebagai parameter!
 );

@@ -1,36 +1,26 @@
 #pragma once
 
+#include "internal/x86.h"
 #include "procbind.h"
 #include <ldrtypes.h>
 #include "hctintrinsic.h"
 
-/* KPCR */
-typedef struct _KPCR {
-    // NT_TIB (Thread Information Block) - Biasanya wajib ada di awal buat kompatibilitas user-mode
-    struct _KPCR *SelfPcr;     // Offset 0x00: Pointer ke dirinya sendiri (WAJIB)
-    PVOID CurrentThread;       // Offset 0x04: Thread yang lagi jalan di Core ini
-    
-    // Identitas CPU
-    UCHAR ProcessorNumber;     // Offset 0x08: Core 0, Core 1, dst.
-    UCHAR Irql;                // Offset 0x09: IRQL saat ini (buat Lazy IRQL)
-    USHORT Padding;            // Offset 0x0A: Biar rata 4 byte
-    
-    // Tabel Hardware
-    PVOID IDT;                 // Offset 0x0C: Interrupt Descriptor Table CPU ini
-    PVOID GDT;                 // Offset 0x10: Global Descriptor Table CPU ini
-    PVOID TSS;                 // Offset 0x14: Task State Segment CPU ini
-    
-    // Ekstra buat HCT / HAL
-    ULONG HalReserved[16];     // Ruang buat naruh data spesifik hardware (kayak alamat LAPIC)
-} KPCR, *PKPCR;
+#define KPCR_SELF_PCR          0x00
+#define KPCR_CURRENT_THREAD    0x04
+#define KPCR_PROCESSOR_NUMBER  0x08
+#define KPCR_IRQL              0x09
 
 VOID
 VEAPI
-HctInitializeProcessor(PBLOCK_BOOT_1 BlockBoot, ULONG ProcessorNumber);
+HctInitializeProcessor(PBLOCK_BOOT_2 BlockBoot, ULONG ProcessorNumber);
 
 VOID
 VEAPI
 HctpSetupProcessorIdentity(ULONG ProcessorNumber);
+
+VOID
+VEAPI
+AcpiCachingTableToHct(PBLOCK_BOOT_2 BlockBoot);
 
 /* APIC */
 #define IA32_APIC_BASE_MSR        0x1B
@@ -39,3 +29,60 @@ HctpSetupProcessorIdentity(ULONG ProcessorNumber);
 VOID
 VEAPI
 ApicInitializeSubsystem(VOID);
+
+static inline PKPCR KeGetPcr(VOID)
+{
+    PKPCR Pcr;
+    __asm__ volatile("movl %%fs:0x1C, %0" : "=r"(Pcr));
+    return Pcr;
+}
+
+static inline PKPRCB KeGetCurrentPrcb(VOID)
+{
+    PKPRCB Prcb;
+    // Baca langsung pointer Prcb dari offset 0x20 di segment FS
+    __asm__ volatile("movl %%fs:0x20, %0" : "=r"(Prcb));
+    return Prcb;
+}
+
+// IRQL LEVEL
+#define PASSIVE_LEVEL       0   // Normal user/kernel execution
+#define APC_LEVEL           1   // Asynchronous Procedure Calls
+#define DISPATCH_LEVEL      2   // Thread Scheduler & DPCs
+
+// DIRQL (Device IRQLs) berada di rentang 3 - 11
+#define DIRQL_MIN           3
+#define DIRQL_MAX           11
+
+#define PROFILE_LEVEL       12  // Profiling timer
+#define CLOCK_LEVEL         13  // System Clock/Timer Interrupt
+#define IPI_LEVEL           14  // Inter-Processor Interrupt (SMP)
+#define HIGH_LEVEL          15  // Interrupts disabled / Critical
+
+VOID
+VEAPI
+HctEndSystemInterrupt(KIRQL OldIrql);
+
+KIRQL
+VEAPI
+HctRaiseIrql(KIRQL NewIrql);
+
+VOID
+VEAPI
+HctLowerIrql(KIRQL NewIrql);
+
+BOOLEAN
+VEAPI
+HctInitSystem(ULONG BootPhase);
+
+BOOLEAN
+VEAPI
+HctBeginSystemInterrupt(
+    KIRQL VectorIrql,
+    ULONG Vector,
+    KIRQL *Irql
+);
+
+VOID
+VEAPI
+HctRequestSoftwareInterrupt(IN KIRQL Irql);

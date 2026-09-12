@@ -32,8 +32,8 @@
 #define MI_WRITE_INVALID_PTE(PointerPte) (*(ULONG*)(PointerPte) = 0)
 
 /* FUNCTION */
-BOOLEAN VEAPI MmInitialize(PBLOCK_BOOT_1 BlockBoot);
-BOOLEAN VEAPI MmInitializePip(PBLOCK_BOOT_1 BlockBoot);
+BOOLEAN VEAPI MmInitialize(PBLOCK_BOOT_2 BlockBoot);
+BOOLEAN VEAPI MmInitializePip(PBLOCK_BOOT_2 BlockBoot);
 BOOLEAN VEAPI MmMapPip(VOID);
 BOOLEAN 
 VEAPI 
@@ -124,3 +124,21 @@ MmMapIoSpace(
 #define POOL_PREV_BLOCK(Entry) ((PPOOL_HEADER)(Entry) - (Entry)->PreviousSize)
 #define POOL_NEXT_BLOCK(Entry) ((PPOOL_HEADER)(Entry) + (Entry)->BlockSize)
 #define PAGE_ALIGN(Va)         ((PVOID)((ULONG_PTR)(Va) & ~(POOL_PAGE_SIZE - 1)))
+
+#define PAGE_SIZE 0x1000
+
+PVOID
+VEAPI
+MiGetSystemPageDirectoryTableBase(VOID);
+
+VOID
+VEAPI
+MmpInitializeCowScratch(VOID);
+
+BOOLEAN 
+VEAPI
+MmAccessFault(
+    ULONG FaultingAddress, 
+    BOOLEAN WriteFault, 
+    BOOLEAN WasPresent
+);

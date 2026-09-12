@@ -1,7 +1,7 @@
 #pragma once
 
 #include <stdarg.h>
-#include <procbind.h>
+#include "procbind.h"
 
 /* TYPES */
 
@@ -9,6 +9,7 @@
 typedef struct _RTL_BALANCED_NODE {
     struct _RTL_BALANCED_NODE *Left;
     struct _RTL_BALANCED_NODE *Right;
+    struct _RTL_BALANCED_NODE* Parent;
     LONG Balance;
 } RTL_BALANCED_NODE, *PRTL_BALANCED_NODE;
 
@@ -20,6 +21,7 @@ typedef LONG VEAPI (*PRTL_AVL_COMPARE_ROUTINE)(
 typedef struct _RTL_AVL_TREE {
     PRTL_BALANCED_NODE Root;
     PRTL_AVL_COMPARE_ROUTINE CompareRoutine;
+    PRTL_BALANCED_NODE Leftmost;
 } RTL_AVL_TREE, *PRTL_AVL_TREE;
 
 #define AVL_MAX(a, b)           ((a) > (b) ? (a) : (b))
@@ -43,6 +45,45 @@ VOID RtlZeroMemory(
 VOID RtlCopyMemory(PVOID Dest, PVOID Src, SIZE_T N);
 LONG RtlRawStringLength(const char *string);
 PCHAR RtlCopyRawString(char *dst, const char *src);
+LONG RtlRawStringCompareN(const char *string, const char *string2, int n);
+
+#define RTL_CONSTANT_ANSI_STRING(s) \
+{ \
+    sizeof(s) - sizeof((s)[0]), \
+    sizeof(s), \
+    (PCHAR)(s) \
+}
+
+PCHAR
+VEAPI
+RtlRawStringString(
+    IN PCSTR Haystack,
+    IN PCSTR Needle
+);
+
+BOOLEAN
+VEAPI
+RtlGetBootArgumentValue(
+    IN PCSTR BootArgs,
+    IN PCSTR Key,
+    OUT PSTR Buffer,
+    IN ULONG BufferSize
+);
+
+BOOLEAN
+VEAPI
+RtlGetBootArgumentULong(
+    IN PCSTR BootArgs,
+    IN PCSTR Key,
+    OUT PULONG Value
+);
+
+BOOLEAN
+VEAPI
+RtlCheckBootFlag(
+    IN PCSTR BootArgs,
+    IN PCSTR Flag
+);
 
 // AVL Specific
 
@@ -53,6 +94,17 @@ RtlInsertElementAvl(PRTL_AVL_TREE Tree, PRTL_BALANCED_NODE NewNode);
 VOID 
 VEAPI 
 RtlDeleteElementAvl(PRTL_AVL_TREE Tree, PRTL_BALANCED_NODE TargetNode);
+
+PRTL_BALANCED_NODE
+VEAPI
+RtlLookupElementAvl(
+    PRTL_AVL_TREE Tree, 
+    PRTL_BALANCED_NODE TargetNode
+);
+
+PRTL_BALANCED_NODE 
+VEAPI 
+RtlGetNextNodeAvl(PRTL_BALANCED_NODE Node) ;
 
 // Linked list specific
 
@@ -211,3 +263,61 @@ VOID
 VEAPI 
 RtlFreeAnsiString(PANSI_STRING AnsiString);
 
+PCHAR RtlCopyRawStringN(char *dst, const char *src, int n);
+
+// RBT SPECIFIC
+#define RTL_RB_BLACK 0
+#define RTL_RB_RED   1
+
+#define RTL_RB_COLOR(Node)           ((Node)->Balance)
+#define RTL_RB_SET_COLOR(Node, C)    ((Node)->Balance = (C))
+
+typedef LONG VEAPI (*PRTL_RB_COMPARE_ROUTINE)(
+    PRTL_BALANCED_NODE NodeA, 
+    PRTL_BALANCED_NODE NodeB
+);
+
+typedef struct _RTL_RB_TREE {
+    PRTL_BALANCED_NODE Root;
+    PRTL_RB_COMPARE_ROUTINE CompareRoutine;
+    PRTL_BALANCED_NODE Leftmost; // Penting untuk CFS: O(1) akses vruntime terkecil
+} RTL_RB_TREE, *PRTL_RB_TREE;
+
+VOID 
+VEAPI 
+RtlInsertElementRb(PRTL_RB_TREE Tree, PRTL_BALANCED_NODE NewNode);
+
+VOID 
+VEAPI 
+RtlDeleteElementRb(PRTL_RB_TREE Tree, PRTL_BALANCED_NODE TargetNode);
+
+PRTL_BALANCED_NODE 
+VEAPI 
+RtlGetNextNodeRb(PRTL_BALANCED_NODE Node);
+
+#define RtlGetLeftmostNodeRb(Tree) ((Tree)->Leftmost)
+
+VOID 
+VEAPI 
+RtlInitializeRbTree(
+    PRTL_RB_TREE Tree, 
+    PRTL_RB_COMPARE_ROUTINE CompareRoutine
+);
+
+PRTL_BALANCED_NODE 
+VEAPI 
+RtlLookupElementRb(
+    PRTL_RB_TREE Tree, 
+    PRTL_BALANCED_NODE SearchNode
+);
+
+PRTL_BALANCED_NODE 
+VEAPI 
+RtlGetNextNodeRb(PRTL_BALANCED_NODE Node);
+
+LONG
+VEAPI
+PtCfsCompareRoutine(
+    PRTL_BALANCED_NODE NodeA, 
+    PRTL_BALANCED_NODE NodeB
+);

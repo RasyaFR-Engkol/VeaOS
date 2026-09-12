@@ -1,7 +1,7 @@
 #pragma once
 
 #include "procbind.h"
-#include <rtl.h>
+#include "rtl.h"
 
 /* PIP Flags */
 #define PIP_STATE_FREE      0  // Halaman kosong, siap dialokasikan
@@ -10,14 +10,10 @@
 #define PIP_STATE_ZEROED    3  // Halaman kosong dan isinya udah di-nol-kan (aman untuk keamanan)
 
 /* PIP */
-typedef struct _PIP
-{
-    union
-    {
-        ULONG NextPip;
-        ULONG PteAddress;
-    } Flink;
-
+typedef struct _PIP {
+    union { ULONG NextPip; } Flink;   // Flink murni buat free-list, jangan overload lagi
+    PVOID PteAddress;                  // backpointer beneran, field sendiri
+    USHORT ShareCount;                 // BARU — berapa PTE nunjuk ke page ini
     USHORT ReferenceCount;
     UCHAR State;
     UCHAR Flags;
@@ -37,7 +33,8 @@ typedef union _PAGE_ENTRY {
         ULONG dirty         : 1; // Bit 6: Diset CPU kalau memori ditulis
         ULONG ps_or_pat     : 1; // Bit 7: Page Size (PDE) / PAT (PTE)
         ULONG global        : 1; // Bit 8: Global page (nggak di-flush dari TLB)
-        ULONG available     : 3; // Bit 9-11: Kosong, OS bebas pake buat apa aja!
+        ULONG COW           : 1; // Bit 9: Copy-on-Write untuk OS
+        ULONG available     : 2; // Bit 10-11: Kosong, OS bebas pake buat apa aja!
         ULONG frame         : 20;// Bit 12-31: Physical Address >> 12
     } bits;
 } PAGE_ENTRY;
@@ -136,3 +133,13 @@ typedef enum _MEMORY_CACHING_TYPE {
   MmUSWCCached,
   MmMaximumCacheType
 } MEMORY_CACHING_TYPE;
+
+typedef struct _WORKING_SET {
+    ULONG PageFaultCount;       // Berapa kali proses ini kena Page Fault
+    ULONG PeakWorkingSetSize;   // Memori fisik maksimal yang pernah dipakai (dalam bytes)
+    ULONG WorkingSetSize;       // Memori fisik yang DIPAKAI SAAT INI (dalam bytes)
+    LIST_ENTRY WorkingSetList;  // Daftar halaman memori (VAD/PTE) yang saat ini aktif di RAM
+} WORKING_SET, *PWORKING_SET;
+
+extern ULONG MmScratchSrcVa;
+extern ULONG MmScratchDstVa;
