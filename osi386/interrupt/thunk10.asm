@@ -30,7 +30,7 @@ pm16_vga:
     mov ss, cx
 
     mov ecx, cr0
-    and ecx, ~1     
+    and ecx, 0x7FFFFFFE   
     mov cr0, ecx
 
     ; The RETF Trick buat nembus LLD
@@ -65,7 +65,7 @@ real_mode_vga:
     lgdt [dword temp_gdtr] 
 
     mov ecx, cr0
-    or ecx, 1       
+    or ecx, 0x80000001    
     mov cr0, ecx
 
     jmp dword 0x08:pm32_vga

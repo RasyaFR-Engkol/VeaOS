@@ -39,6 +39,21 @@ char wait_for_keypress(void)
     return (char)(status & 0xFF);
 }
 
+SHORT
+GetKeycode(VOID)
+{
+    ULONG Raw = _INT16_CALL(0x0000);
+    UCHAR Ascii = (UCHAR)(Raw & 0xFF);
+    UCHAR Scancode = (UCHAR)((Raw >> 8) & 0xFF);
+
+    if(Ascii != 0x00 && Ascii != 0xE0)
+    {
+        return (USHORT)Ascii;
+    }
+
+    return (USHORT)(Scancode << 8);
+}
+
 static inline void outb(uint16_t port, uint8_t val) {
     __asm__ volatile ( "outb %0, %1" : : "a"(val), "Nd"(port) );
 }

@@ -223,3 +223,91 @@ int cstrlen(const char *string)
 
     return count;
 }
+
+char* cinttoascii(int num, char *str)
+{
+    int i = 0;
+    int is_negative = 0;
+    int start, end;
+    char temp;
+
+    // Handle angka 0 secara eksplisit
+    if (num == 0) {
+        str[i++] = '0';
+        str[i] = '\0';
+        return str;
+    }
+
+    // Handle angka negatif
+    if (num < 0) {
+        is_negative = 1;
+        num = -num; // Jadikan positif sementara
+    }
+
+    // Ekstrak digit satu per satu dari belakang
+    while (num != 0) {
+        int rem = num % 10;
+        str[i++] = rem + '0'; // Ubah angka (0-9) jadi karakter ('0'-'9')
+        num = num / 10;
+    }
+
+    // Tambahkan tanda minus kalau aslinya negatif
+    if (is_negative) {
+        str[i++] = '-';
+    }
+
+    str[i] = '\0'; // Tutup string-nya
+
+    // Karena digitnya terbalik (dari belakang ke depan), kita harus reverse string-nya
+    start = 0;
+    end = i - 1;
+    while (start < end) {
+        temp = str[start];
+        str[start] = str[end];
+        str[end] = temp;
+        start++;
+        end--;
+    }
+
+    return str;
+}
+
+char* chextoascii(unsigned int num, char *str)
+{
+    int i = 0;
+    int start, end;
+    char temp;
+
+    // Handle angka 0 secara eksplisit
+    if (num == 0) {
+        str[i++] = '0';
+        str[i] = '\0';
+        return str;
+    }
+
+    // Ekstrak digit hex satu per satu dari belakang
+    while (num != 0) {
+        int rem = num % 16;
+        if (rem < 10) {
+            str[i++] = rem + '0'; // Untuk 0-9
+        } else {
+            str[i++] = (rem - 10) + 'A'; // Untuk A-F (kalau mau huruf kecil, ganti 'A' jadi 'a')
+        }
+        num = num / 16;
+    }
+
+    str[i] = '\0'; // Tutup string-nya
+
+    // Reverse string-nya karena digit didapat dari belakang
+    start = 0;
+    end = i - 1;
+    while (start < end) {
+        temp = str[start];
+        str[start] = str[end];
+        str[end] = temp;
+        start++;
+        end--;
+    }
+
+    return str;
+}

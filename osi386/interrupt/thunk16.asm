@@ -25,7 +25,7 @@ pm16_kbd:
     mov ss, cx
 
     mov ecx, cr0
-    and ecx, ~1     
+    and ecx, 0x7FFFFFFE    
     mov cr0, ecx
 
     mov ecx, real_mode_kbd  
@@ -57,7 +57,7 @@ real_mode_kbd:
     lgdt [dword temp_gdtr]
 
     mov ecx, cr0
-    or ecx, 1       
+    or ecx, 0x80000001   
     mov cr0, ecx
 
     jmp dword 0x08:pm32_kbd

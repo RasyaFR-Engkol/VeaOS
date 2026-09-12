@@ -34,7 +34,7 @@ pm16_step1:
     mov ss, ax
 
     mov eax, cr0
-    and eax, ~1     
+    and eax, 0x7FFFFFFE   
     mov cr0, eax
 
     ; ========================================================
@@ -72,7 +72,7 @@ real_mode_entry:
 
     ; 7. NAIK GIGI LAGI KE 32-BIT PROTECTED MODE
     mov eax, cr0
-    or eax, 1       
+    or eax, 0x80000001    
     mov cr0, eax
 
     ; 8. FAR JUMP KE 32-BIT CODE (Paksa 32-bit offset)
