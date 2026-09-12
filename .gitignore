@@ -1,6 +1,13 @@
 build/
 .cache/
 run_img
+run_img_gdb
+log_interupt.txt
 VeaOS.img
 compile_commands.json
 log.txt
+.vscode
+VeaOS.vhd
+SYSTEM
+serial_log.txt
+.clangd
