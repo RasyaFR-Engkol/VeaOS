@@ -28,8 +28,9 @@ VOID
 VEAPI 
 ApicEnableLapic(VOID)
 {
-    if (ApicLapicBase == NULL) {
-        kdp_print("HCT: LAPIC Base Address belum di-map!\n\r");
+    if (ApicLapicBase == NULL) 
+    {
+        KdPrintf("HCT: LAPIC Base Address belum di-map!\n\r");
         return;
     }
 
@@ -73,9 +74,8 @@ ApicInitializeSubsystem(VOID)
 {
     ULONG PhysicalAddr = ApicFindLapicAddress();
     
-    // Map physical address ke virtual address
-    // (Asumsi lu pake fungsi mapping Mm lu, atau di-cast langsung kalo identity mapped)
-    ApicLapicBase = (volatile PULONG)MmMapIoSpace(PhysicalAddr, 4096, MmNonCached);
+    // The virtual is already mapped
+    ApicLapicBase = (volatile PULONG)PhysicalAddr;
 
     if(ApicLapicBase == NULL)
     {

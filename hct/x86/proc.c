@@ -1,6 +1,6 @@
 #include <veakrnl.h>
 
-#define MAX_PROCESSORS 32
+#define MAX_PROCESSORS MAX_CPU
 #define GDT_ENTRIES 8
 
 KPCR HctpProcessorRegisters[MAX_PROCESSORS];
@@ -39,38 +39,6 @@ VOID
 VEAPI
 HctpSetupProcessorIdentity(ULONG ProcessorNumber)
 {
-    PKPCR Pcr = &HctpProcessorRegisters[ProcessorNumber];
-    PKGDTENTRY32 CpuGdt = HctpGdt[ProcessorNumber];
-
-    Pcr->SelfPcr = Pcr;
-    Pcr->ProcessorNumber = (UCHAR)ProcessorNumber;
-    Pcr->Irql = 0; // PASSIVE_LEVEL default
-    Pcr->CurrentThread = NULL;
-
-    HctpSetGdtEntry(CpuGdt, 1, 0x00000000, 0xFFFFF, 0x9A, 0xC0);
-    HctpSetGdtEntry(CpuGdt, 2, 0x00000000, 0xFFFFF, 0x92, 0xC0);
-    HctpSetGdtEntry(CpuGdt, 6, (ULONG)Pcr, sizeof(KPCR) - 1, 0x92, 0xC0);
-
-    KDESCRIPTOR NewGdtDesc;
-    NewGdtDesc.Limit = (sizeof(KGDTENTRY32) * GDT_ENTRIES) - 1;
-    NewGdtDesc.Base = (ULONG)CpuGdt;
-    __asm__ volatile("lgdt %0" : : "m"(NewGdtDesc));
-
-    KDESCRIPTOR IdtDesc;
-    __asm__ volatile("sidt %0" : "=m"(IdtDesc));
-    Pcr->GDT = (PVOID)CpuGdt;
-    Pcr->IDT = (PVOID)IdtDesc.Base;
-
-    __asm__ volatile(
-        "mov $0x10, %%ax \n"
-        "mov %%ax, %%ds \n"
-        "mov %%ax, %%es \n"
-        "mov %%ax, %%ss \n"
-        "mov $0x30, %%ax \n"
-        "mov %%ax, %%fs \n"
-        // Far jump ke CS (0x08) buat nge-flush pipeline instruction cache
-        "ljmp $0x08, $1f \n" 
-        "1: \n"
-        : : : "eax"
-    );
+    // Nothing. there is nothing
+    return;
 }
