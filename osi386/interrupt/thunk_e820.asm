@@ -32,7 +32,7 @@ pm16_e820:
     mov ax, bp
 
     mov esi, cr0
-    and esi, ~1
+    and esi, 0xFFFFFFFE
     mov cr0, esi
 
     mov esi, real_mode_e820

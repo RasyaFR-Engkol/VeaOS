@@ -2,9 +2,13 @@
 #include <fat32intrnl.h>
 #include <elf_ldr.h>
 
-char *g_kernel_p = NULL;
-void prepare_boot_block_and_boot(void);
-_Bool vbe_active = 0;
+void LdrPrepareBlockBootAndBoot(
+    IN PAGE_ENTRY *Pde,
+    IN PCHAR StringOption,
+    IN BOOLEAN Chainload
+);
+BOOLEAN vbe_active = 0;
+PAGE_ENTRY *LmPde;
 
 void restart_n_message(void)
 {
@@ -43,130 +47,334 @@ void printA(int* i)
     (*i)++;
 }
 
-void main(void)
+BOOLEAN
+VEAPI
+LdrLoadVeakrnl(OUT PUCHAR *BufferToKernel)
 {
-    // debugging purpose
-    volatile char *vga = (char*)0xB8000;
-    int i = 0;
-    printA(&i);
+    VFS_FILE_INFO FileInfo;
+    cmemset(&FileInfo, 0, sizeof(FileInfo));
 
-    bios_print_char('O');
-    bios_print_char('K');
-    bios_print_char('!');
-
-    bios_print_string("well.\n\r");
-    printA(&i);
-
-    mbr_detect();
-    printA(&i);
-
-    //
-    // inisialisasi FAT32
-    //
-    if(fat32_init() < 0)
+    if(FsLookupFileInformation("/veakrnl.elf", &FileInfo) < 0)
     {
-        bios_print_string("ERROR: FAT32 is not available, or the structure is broken"
-                                " and corrupted\r\n");
-        restart_n_message();
-        
-    }
-    else
-    {
-        bios_print_string("MODE: FAT32\r\n");
-        printA(&i);
-    }
-
-    //
-    // find the kernel
-    //
-    
-    FAT32_DirEntry kernel_entry;
-
-    if(fat32_find_entry(root_cluster, "veakrnl.elf", &kernel_entry) < 0)
-    {
-        bios_print_string("ERROR: No operating system found in your storage system.\n\r");
-        restart_n_message();
+        LdrError(STATUS_FILE_NOT_FOUND);
     }
     
-    char *kernel_p = (char*)KERNEL_SAFE_PLACE;
-    unsigned long bytes_read;
-
-    cmemset(kernel_p, 0, kernel_entry.size);
-
-    bytes_read = fat32_read_file(&kernel_entry, (unsigned char*)kernel_p);
-    if(bytes_read == 0)
+    PVOID Buffer = LmAllocatePool(LdrUnreclaimablePool, FileInfo.FileSize);
+    if(!Buffer)
     {
-        bios_print_string("ERROR: Disk read error.\n\r");
-        restart_n_message();
+        LdrError(STATUS_INSUFFICIENT_RESOURCES);
     }
 
-    g_kernel_p = kernel_p;
+    ULONG BytesReaded = 0;
+    BytesReaded = FsReadFile(&FileInfo, Buffer);
+    if(BytesReaded == 0)
+    {
+        LdrError(STATUS_READ_DISK_ERROR);
+    }
 
-    prepare_boot_block_and_boot();
+    *BufferToKernel = (PUCHAR)Buffer;
+    return TRUE;
 }
 
-void prepare_boot_block_and_boot(void)
+VOID
+VEAPI
+LdrSelectionMenu(VOID);
+
+VOID
+VEAPI
+LdrAdvancedMode(VOID)
 {
-    BLOCK_BOOT_1 *block_boot = (BLOCK_BOOT_1*)BLOCK_BOOT_1_ADDR;
+    BvRerenderLayout();
+    LdrInfo("Now you're in advanced mode. Now go fuck yourself.\n");
+    LdrInfo("Or, Preff F8 again to go back to Selection Menu.\n");
+    while(1)
+    {
+        ULONG KeyCode = GetKeycode();
+        if(KeyCode == KEY_F8)
+        {
+            LdrSelectionMenu();
+        }
+    }
+}
+
+VOID
+VEAPI
+LdrSelectionMenu(VOID)
+{
+    BvRerenderLayout();
+
+    VEA_FOOTER_KEY MenuKeys[] = {
+        { "ENTER=Choose" },
+        { "UP/DOWN=Choose Option" },
+        {"F8=Advanced Mode"}
+    };
+    BvSetFooterKeyCombination(MenuKeys, sizeof(MenuKeys) / sizeof(MenuKeys[0]));
+
+    BvPrintLog("Please choose available OS based on this entry:\n");
+
+    static const OSI386_BOOT_OPTION BootOptions[] = 
+    {
+        { "VeaOS 32 bit",         "",             FALSE },
+        { "VeaOS 32 bit (DEBUG)", "/DEBUG", FALSE },
+        { "Ubuntu Linux (GRUB)",  "/boot/grub/grub.cfg",              TRUE  }
+    };
+    ULONG SizeOfList = sizeof(BootOptions) / sizeof(BootOptions[0]);
+    PCHAR DisplayNames[SizeOfList];
+    for (ULONG i = 0; i < SizeOfList; i++)
+    {
+        DisplayNames[i] = BootOptions[i].BootName;
+    }
+    PBV_LIST_OPTION ListOption = BvCreateListOption(DisplayNames, SizeOfList, 400);
+    ULONG CurrentIndex = 0;
+
+    BvDownListOption(ListOption, 0, 0);
+
+    BvPrintLog("Or press F8 for advanced mode.\n");
+
+    while(TRUE)
+    {
+        USHORT KeyCode = GetKeycode();
+        
+        switch (KeyCode)
+        {
+            case KEY_UP:
+            {
+                if(CurrentIndex == 0) 
+                {
+                    break;
+                }
+
+                ULONG OldIndex = CurrentIndex;
+                CurrentIndex--;
+
+                BvUpListOption(ListOption, OldIndex, CurrentIndex);
+                break;
+            }
+            case KEY_DOWN:
+            {
+                if(CurrentIndex >= SizeOfList - 1) 
+                {
+                    break;
+                }
+
+                ULONG OldIndex = CurrentIndex;
+                CurrentIndex++;
+
+                BvDownListOption(ListOption, OldIndex, CurrentIndex);
+                break;
+            }
+            case KEY_ENTER:
+            {
+                goto BootNow;
+            }
+            case KEY_F8:
+            {
+                goto AdvancedMode;
+            }
+            default:
+            {
+                break;
+            }
+        }
+    }
+
+BootNow:
+    {
+        CHAR BootArguments[128];
+        BOOLEAN IsBootChainload = BootOptions[CurrentIndex].Chainloading;
+
+        cmemset(BootArguments, 0, 128);
+        cstrcpy(BootArguments, BootOptions[CurrentIndex].ArgumentLineOptions);
+
+        LdrPrepareBlockBootAndBoot(LmPde, BootArguments, IsBootChainload);
+
+        if(IsBootChainload)
+        {
+            LdrError(STATUS_BOOTING_CHAINLOADING_FAILURE);
+        }
+        else
+        {
+            LdrError(STATUS_BOOTING_FAILED);
+        }
+    }
+
+AdvancedMode: 
+    {
+        LdrAdvancedMode();
+    }
+}
+
+void main(void)
+{
+    PAGE_ENTRY *Pde = LmInitSystem();
+    if(!Pde)
+    {
+        LdrError(STATUS_LOADER_MEMORY_FAILURE);
+        while(1) asm("hlt");
+    }
+
+    LmPde = Pde;
+    LdrInfo("HELLO FROM OSI386\n");
+
+    FsInitialize();
+    BvInitScreen();
+    LdrSelectionMenu();
+}
+
+void LdrPrepareBlockBootAndBoot(
+    IN PAGE_ENTRY *Pde,
+    IN PCHAR StringOption,
+    IN BOOLEAN Chainload
+)
+{
+    if(Chainload)
+    {
+        // TODO: Chainload
+        return;
+    }
+
+    BLOCK_BOOT_2 *block_boot = (BLOCK_BOOT_2*)LmAllocateVirtualPages(0xC0090000, 1);
+
+    if (block_boot == NULL)
+    {
+        LdrError(STATUS_INSUFFICIENT_RESOURCES);
+    }
 
     //
     // cari video buffer
     //
-    extract_vbe_info(block_boot);
+    BvMoveVideoInfoToBootBlock(block_boot);
+
+    //
+    // cari VeaKey SYSTEM
+    //
+    LdrLoadSystemHive(block_boot);
+
+    //
+    // cari ACPI
+    //
+    extern void* AcpiMapRsdpPointer(LPRSDP physical_rsdp);
+    static ACPI_RSDP_EXTENDED g_WritableRsdp;
 
     LPRSDP acpi_rsdp = find_acpi_rsdp();
     if(acpi_rsdp != NULL) {
-        block_boot->AcpiTable = (void*)acpi_rsdp;
+        // 1. Copy RSDP dari BIOS ROM (Read-Only) ke RAM Writable kita
+        cmemcpy(&g_WritableRsdp, acpi_rsdp, sizeof(ACPI_RSDP_EXTENDED));
+        
+        // 2. Set BootBlock nunjuk ke RSDP di RAM kita
+        block_boot->AcpiTable = &g_WritableRsdp;
         block_boot->AcpiTableByteSize = 0xFFFF;
+
+        // 3. SEKARANG BISA DI-OVERWRITE DENGAN AMAN!
+        AcpiMapExtendedPointer((LPRSDP)block_boot->AcpiTable);
     } else {
         block_boot->AcpiTable = NULL;
         block_boot->AcpiTableByteSize = 0;
     }
 
+    //
+    // Create first Kernel Initial Thread and
+    // process
+    //
+    if(!LdrCreateInitialThreadAndProcess(block_boot))
+    {
+        LdrError(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    // 
+    // Get information to SMBIOS
+    //
+    if(!LdrGetSmbiosInformation(block_boot))
+    {
+        LdrWarning("Can't get SMBIOS Information.\n\r");
+    }
+
+    //
+    // Create FS segment base (Note: we need to set Thread and Process from BlockBoot
+    // to PRCB inside kernel)
+    //
+    LdrBuildProcessorControlBlock(block_boot);
+
+    //
+    // Should we extract our disk information?
+    //
+    LdrExtractDiskInformation(block_boot);
+
+    //
+    // Copy our StringOption booting, But we need to allocate them first.
+    // It's fine to be permanent
+    //
+    ULONG StringLength = cstrlen(StringOption);
+    block_boot->VeaBootArgument = (PSTR)LmAllocatePool(LdrUnreclaimablePool, StringLength + 1);
+    if(!block_boot->VeaBootArgument)
+    {
+        LdrError(STATUS_INSUFFICIENT_RESOURCES);
+    }
+
+    cmemset(block_boot->VeaBootArgument, 0, StringLength + 1);
+    cstrcpy(block_boot->VeaBootArgument, StringOption);
+
+    //
+    // Read the veakrnl ELF File
+    //
+    PUCHAR BufferToVeaKrnl = NULL;
+    if(!LdrLoadVeakrnl(&BufferToVeaKrnl))
+    {
+        LdrError(STATUS_FILE_NOT_FOUND);
+    }
+
+    /* Save it to global so we can resolve BootDriver */
+    LdrBufferToKernel = BufferToVeaKrnl;
+    
+    //
+    // Parse VeaKey to find each import resolve
+    //
+    LdrLoadBootDriver(block_boot);
+
+    //
+    // Extract memory map
+    //
     extract_memory_map(block_boot);
 
-    // eksekusi buat cr3 disini harusnya
-    PAGE_ENTRY *page_entry;
-    BLOCK_BOOT_1 *v_block_boot = NULL;
-
-    page_entry = make_cr3_higher_half();
-    if(page_entry == NULL)
-    {
-        bios_print_string("ERROR: Failed to make new CR3\n\r");
-        restart_n_message();
-    }
-    else
-    {
-        v_block_boot = relocate_block_boot_to_higher_half(block_boot, page_entry);
-    }
+    //
+    // We need to save our pointer, load our boot driver here
+    // TODO
+    //
+    /* if(!LdrLoadBootDriver(block_boot))
+       {
+        LdrError(STATUS_INSUFFICIENT_RESOURCES);
+       }
+    */
     
-    // eksekusi elf disini harusnya
-
-    if(validate_elf(g_kernel_p) != 0)
+    //
+    // eksekusi elf 
+    //
+    if(validate_elf(BufferToVeaKrnl) != 0)
     {
-        bios_print_string("ERROR: Invalid Kernel ELF!\n\r");
-        restart_n_message();
+        LdrError(STATUS_FILE_EXECUTABLE_INVALID);
     }
 
-    if(map_elf_to_cr3(g_kernel_p, page_entry) < 0)
+    if(map_elf_to_cr3(BufferToVeaKrnl, Pde) < 0)
     {
         bios_print_string("ERROR: Failed to map ELF to memory!\n\r");
         restart_n_message();
     }
 
-    uint32_t entry_point_addr = get_elf_entry_point(g_kernel_p);
+    uint32_t entry_point_addr = get_elf_entry_point(BufferToVeaKrnl);
     if(entry_point_addr == 0)
     {
         bios_print_string("ERROR: Entry point not found!\n\r");
         restart_n_message();
     }
 
-    typedef void (*KernelMain)(BLOCK_BOOT_1*);
+    typedef void (*KernelMain)(BLOCK_BOOT_2*);
     KernelMain kernel_entry = (KernelMain)entry_point_addr;
 
-    load_cr3_and_enable_paging(page_entry);
-
-    kernel_entry(v_block_boot);
+    //
+    // Loncat ke kernel (say bye)
+    //
+    BvClearScreen();
+    kernel_entry(block_boot);
 
     while(1)
     {

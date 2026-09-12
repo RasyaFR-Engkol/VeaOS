@@ -1,5 +1,5 @@
 #include <stdint.h>
-#include <elf.h>
+#include <elf_ldr.h>
 #include <osi386.h>
 
 int validate_elf(void *elf_buffer)

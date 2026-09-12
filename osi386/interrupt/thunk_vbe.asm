@@ -33,7 +33,7 @@ pm16_vbe:
     mov ax, bp
 
     mov esi, cr0
-    and esi, ~1
+    and esi, 0x7FFFFFFE  ; Matikan bit 31 (PG) dan bit 0 (PE) sekaligus
     mov cr0, esi
 
     mov esi, real_mode_vbe
@@ -72,7 +72,7 @@ real_mode_vbe:
     lgdt [dword temp_gdtr]
 
     mov eax, cr0
-    or eax, 1
+    or eax, 0x80000001   ; Nyalakan bit 31 (PG) dan bit 0 (PE) sekaligus
     mov cr0, eax
 
     jmp dword 0x08:pm32_vbe
