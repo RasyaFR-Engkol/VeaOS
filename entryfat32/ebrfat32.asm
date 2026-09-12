@@ -1,10 +1,6 @@
 BITS 16
 ORG 0x8000
 
-; =====================================================================
-; POINTER KE BPB (Berada di VBR Sektor 2048 / 0x7C00)
-; Kita ambil variabel langsung dari RAM biar gak makan tempat.
-; =====================================================================
 %define BPB_SectorsPerCluster 0x7C0D
 %define BPB_ReservedSectors   0x7C0E
 %define BPB_FatCount          0x7C10
@@ -13,54 +9,64 @@ ORG 0x8000
 %define BPB_RootCluster       0x7C2C
 
 extended_boot_start:
+    ; -----------------------------------------------------------------
+    ; 1. INISIALISASI SEGMENT & REGISTERS
+    ; -----------------------------------------------------------------
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    cld 
+    
     ; Print pesan awal
     mov si, msg_loading
     call print_string
 
     ; -----------------------------------------------------------------
-    ; 1. HITUNG LBA AWAL DATA REGION
-    ; Rumus: HiddenSectors + ReservedSectors + (FatCount * SectorsPerFat32)
+    ; 2. HITUNG FAT START LBA & DATA SECTOR LBA
     ; -----------------------------------------------------------------
+    ; FatStartLBA = HiddenSectors + ReservedSectors
     mov eax, [BPB_HiddenSectors]
     xor ebx, ebx
     mov bx, [BPB_ReservedSectors]
     add eax, ebx
+    mov [FatStartLBA], eax
 
+    ; DataSectorLBA = FatStartLBA + (FatCount * SectorsPerFat32)
     xor ecx, ecx
     mov cl, [BPB_FatCount]
     mov ebx, [BPB_SectorsPerFat32]
     imul ebx, ecx
     add eax, ebx
-    mov [DataSectorLBA], eax  ; Simpan hasil ke memori
+    mov [DataSectorLBA], eax
 
     ; -----------------------------------------------------------------
-    ; 2. LOAD SEKTOR ROOT DIRECTORY KE BUFFER 0x0900:0000 (0x9000)
+    ; 3. LOAD ROOT DIRECTORY TO 0x0900:0000 (0x9000)
     ; -----------------------------------------------------------------
     mov eax, [BPB_RootCluster]
     call load_cluster_to_buffer
 
     ; -----------------------------------------------------------------
-    ; 3. PARSING ROOT DIRECTORY UNTUK MENCARI "OSI386     "
+    ; 4. PARSING ROOT DIRECTORY UNTUK MENCARI "OSI386   "
     ; -----------------------------------------------------------------
     mov ax, 0x0900
     mov es, ax
-    xor di, di       ; ES:DI = 0x0900:0000 (Buffer Root Directory)
-    mov cx, 16       ; Cek 16 entri pertama aja (karena ini file pertama)
+    xor di, di
+    mov cx, 128        ; Cari di 128 entry pertama (1 cluster root dir)
 
 .search_loop:
     push cx
-    mov cx, 11               ; Panjang nama file (8 nama + 3 ekstensi)
-    mov si, filename         ; DS:SI = "OSI386     "
+    mov cx, 11
+    mov si, filename
     push di
-    rep cmpsb                ; Bandingkan string memori
+    cld 
+    rep cmpsb
     pop di
-    je .file_found           ; Kalau cocok, lompat!
+    je .file_found
     
     pop cx
-    add di, 32               ; Geser 32 byte ke entri file berikutnya
+    add di, 32
     loop .search_loop
 
-    ; Kalau file tidak ditemukan
     mov si, msg_error
     call print_string
     jmp halt_cpu
@@ -68,56 +74,102 @@ extended_boot_start:
 .file_found:
     pop cx
     ; -----------------------------------------------------------------
-    ; 4. AMBIL NOMOR CLUSTER FILE OSI386
+    ; 5. AMBIL NOMOR FIRST CLUSTER FILE OSI386
     ; -----------------------------------------------------------------
-    ; Di struktur direktori FAT32, Cluster High di offset 0x14, Low di 0x1A
-    mov dx, [es:di + 0x14]
+    mov dx, [es:di + 0x14] ; Cluster High (2 bytes)
     shl edx, 16
-    mov dx, [es:di + 0x1A]
+    mov dx, [es:di + 0x1A] ; Cluster Low (2 bytes)
     mov [FileCluster], edx
 
     ; -----------------------------------------------------------------
-    ; 5. LOAD FILE OSI386 KE 0x1000:0000 (Alamat Fisik 0x10000)
+    ; 6. LOAD FILE OSI386 DENGAN TRAVERSAL FAT TABLE (SELESAIKAN FRAGMENTASI)
     ; -----------------------------------------------------------------
     mov ax, 0x1000
     mov es, ax
-    xor bx, bx       ; ES:BX = 0x1000:0000 (Tujuan File)
+    xor bx, bx        ; ES:BX = 0x1000:0000 (Alamat Fisik 0x10000)
 
     mov eax, [FileCluster]
-    mov cx, 32
 
 .load_file_loop:
+    ; Cek apakah EAX adalah Marker EOF (End of File >= 0x0FFFFFF8) atau Invalid Cluster (< 2)
+    cmp eax, 0x0FFFFFF8
+    jae .load_finished
+
+    cmp eax, 2
+    jb .load_finished
+
+    ; Baca cluster saat ini ke ES:BX
+    push eax
     call load_cluster_to_es_bx
-    inc eax          ; Karena file pertama di disk kosong, cluster PASTI berurutan
-    
-    ; Geser pointer memori ES:BX untuk nampung cluster berikutnya
+    pop eax
+
+    ; Dapatkan nomor cluster BERIKUTNYA dari FAT Table
+    call get_next_cluster ; Mengembalikan Next Cluster ID di EAX
+
+    ; Geser Segment ES sebesar (SectorsPerCluster * 512) / 16
     xor dx, dx
     mov dl, [BPB_SectorsPerCluster]
-    shl dx, 9        ; Kalikan dengan 512 (Bytes per sector)
-    add bx, dx
-    loop .load_file_loop
+    shl dx, 5         ; Multiply 32 (Sectors * 512 / 16)
+    mov cx, es
+    add cx, dx
+    mov es, cx        ; ES bertambah tanpa menyentuh BX!
 
+    jmp .load_file_loop
+
+.load_finished:
     ; -----------------------------------------------------------------
-    ; 6. PERSIAPAN JUMP KE LOADER (OSI386)
+    ; 7. PERSIAPAN JUMP KE LOADER (OSI386)
     ; -----------------------------------------------------------------
     mov si, msg_ok
     call print_string
     
-    ; Samakan Segment Data dengan Segment Kode Loader
     mov ax, 0x1000
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
     
-    ; Far Jump ke Entry Point OSI386 (0x1000:0000)
+    ; Jump ke Entry Point OSI386 (0x1000:0x0000)
     jmp 0x1000:0x0000
 
 ; =====================================================================
-; FUNGSI BANTUAN DISK (LBA TO CHS & INT 13H)
+; FUNGSI BANTUAN DISK & FAT PARSER
 ; =====================================================================
 
-; Load ke buffer sementara Root Dir (0x9000)
+; Input: EAX = Cluster ID saat ini
+; Output: EAX = Next Cluster ID dari FAT Table
+get_next_cluster:
+    push es
+    push bx
+    push ecx
+    push edx
+
+    mov ecx, eax        ; Simpan Cluster ID
+
+    ; Sector Offset dalam FAT = Cluster / 128 (karena 1 sektor 512 byte berisi 128 entry @ 4 byte)
+    shr eax, 7
+    add eax, [FatStartLBA] ; EAX = LBA Sektor FAT Table yang berisi cluster entry ini
+
+    ; Read 1 sektor FAT ke buffer temporary 0x0900:0000
+    mov bx, 0x0900
+    mov es, bx
+    xor bx, bx
+    call read_single_sector
+
+    ; Byte Offset dalam Sektor = (Cluster % 128) * 4
+    and ecx, 0x7F
+    shl ecx, 2          ; ECX = Byte offset di dalam buffer sektor
+
+    ; Read 32-bit entry dari FAT
+    mov eax, [es:ecx]
+    and eax, 0x0FFFFFFF ; FAT32 cuma pakai 28-bit (4 bit atas reserved)
+
+    pop edx
+    pop ecx
+    pop bx
+    pop es
+    ret
+
 load_cluster_to_buffer:
     pusha
     mov bx, 0x0900
@@ -125,34 +177,58 @@ load_cluster_to_buffer:
     xor bx, bx
     jmp do_load_cluster
 
-; Load langsung ke alamat ES:BX yang ditentukan
 load_cluster_to_es_bx:
     pusha
 
 do_load_cluster:
-    ; Rumus LBA Cluster: LBA = DataRegionLBA + ((Cluster - 2) * SectorsPerCluster)
     sub eax, 2
     xor ecx, ecx
     mov cl, [BPB_SectorsPerCluster]
     imul eax, ecx
     add eax, [DataSectorLBA]
 
-    ; Setup Disk Address Packet (DAP) di Stack
-    push dword 0        ; Upper 32-bit LBA (0)
-    push eax            ; Lower 32-bit LBA
+    ; Setup DAP (Disk Address Packet) untuk INT 13h AH=42h
+    push dword 0        ; LBA High (32-bit) = 0
+    push eax            ; LBA Low (32-bit)
     push es             ; Target Segment
     push bx             ; Target Offset
-    push cx             ; Jumlah sektor yang dibaca (SectorsPerCluster)
-    push word 16        ; Ukuran DAP
+    push cx             ; Number of sectors (SectorsPerCluster)
+    push word 16        ; DAP Size (16 bytes)
 
     mov ah, 0x42
-    mov dl, 0x80        ; Fix harddisk ID
+    mov dl, 0x80
     mov si, sp
     int 0x13
-    add sp, 16          ; Clean up stack
-    
+    jc disk_error       ; FIX: Menggunakan global label disk_error
+
+    add sp, 16
     popa
     ret
+
+read_single_sector:
+    pusha
+    push dword 0
+    push eax
+    push es
+    push bx
+    push word 1         ; Cuma baca 1 sektor FAT
+    push word 16
+
+    mov ah, 0x42
+    mov dl, 0x80
+    mov si, sp
+    int 0x13
+    jc disk_error       ; FIX: Menggunakan global label disk_error
+
+    add sp, 16
+    popa
+    ret
+
+; FIX: Dijadikan global label (tanpa titik di depan)
+disk_error:
+    mov si, msg_disk_err
+    call print_string
+    jmp halt_cpu
 
 print_string:
     mov ah, 0x0E
@@ -173,13 +249,12 @@ halt_cpu:
 ; =====================================================================
 ; VARIABEL & DATA
 ; =====================================================================
-; Nama file di FAT32 WAJIB 11 byte. (8 Byte Nama + 3 Byte Ekstensi tanpa titik)
-; Kalau nama kurang dari 8, pad pakai spasi.
-filename      db "OSI386     "   
+filename     db "OSI386     "   
+msg_loading  db "Mencari OSI386... ", 0
+msg_ok       db "Ketemu! Booting Loader...", 13, 10, 0
+msg_error    db "ERROR: OSI386 tidak ditemukan!", 13, 10, 0
+msg_disk_err db "ERROR: Gagal membaca disk (INT 13h)!", 13, 10, 0
 
-msg_loading   db "Mencari OSI386... ", 0
-msg_ok        db "Ketemu! Booting Loader...", 13, 10, 0
-msg_error     db "ERROR: OSI386 tidak ada!", 0
-
+FatStartLBA   dd 0
 DataSectorLBA dd 0
 FileCluster   dd 0
