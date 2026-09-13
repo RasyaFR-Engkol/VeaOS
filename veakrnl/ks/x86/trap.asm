@@ -14,12 +14,14 @@ isr_common_stub:
     mov ax, 0x10            ; Load Kernel Data Segment Selector kamu
     mov ds, ax
     mov es, ax
+
+    ; reset other segment register
+    mov ax, 30h
     mov fs, ax
     mov gs, ax
 
     push esp                ; ESP sekarang jadi pointer ke KREGISTER_FRAME
     call ksi_dispatch_exception
-    add esp, 4              ; Bersihkan argumen pointer ESP tadi
 
     pop gs                  ; Restore Segment Registers
     pop fs
