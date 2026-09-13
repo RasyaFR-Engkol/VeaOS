@@ -20,7 +20,7 @@ ObpInitializeObjectManager(
     InitializeListHead(&ObpTypeObjectList);
 
     // Alokasi memori mentah dari pool untuk Header + Body dari ObpTypeObjectType
-    ULONG TypeObjSize = sizeof(OBJECT_HEADER) + sizeof(OBJECT_TYPE);
+    ULONG TypeObjSize = sizeof(OBJECT_HEADER_NAME_INFO) + sizeof(OBJECT_HEADER) + sizeof(OBJECT_TYPE);
     PVOID RawTypeMem = UlAllocatePoolWithTag(NonPagedPool, TypeObjSize, 'TpOj');
     RtlZeroMemory(RawTypeMem, TypeObjSize);
 
@@ -28,6 +28,7 @@ ObpInitializeObjectManager(
     POBJECT_HEADER TypeHeader = (POBJECT_HEADER)RawTypeMem;
     TypeHeader->ReferenceCount = 1;
     TypeHeader->StackDepth = 1;
+    TypeHeader->Flags = OB_FLAG_HAS_NAME_INFO;
     
     // PENTING: Solusi ayam & telur. Type dari "Type" adalah dirinya sendiri!
     POBJECT_TYPE TypeBody = (POBJECT_TYPE)(TypeHeader + 1);
@@ -41,8 +42,17 @@ ObpInitializeObjectManager(
     TypeBody->TotalObjectCount = 1;
     InitializeListHead(&TypeBody->TypeList);
 
+    // Isi info nama untuk objek tipe
+    POBJECT_HEADER_NAME_INFO NameInfo = OBJECT_HEADER_TO_NAME_INFO(TypeHeader);
+    NameInfo->Name.Length = 4;
+    NameInfo->Name.MaximumLength = 5;
+    NameInfo->Name.Buffer = UlAllocatePoolWithTag(PagedPool, 5, 'NmOb');
+    RtlCopyMemory(NameInfo->Name.Buffer, "Type", 5);
+
     // Simpan ke pointer global
     ObpTypeObjectType = TypeBody;
+
+    InsertTailList(&ObpTypeObjectList, &TypeBody->TypeList);
     
     OBJECT_TYPE_INITIALIZER DirInitializer;
     RtlZeroMemory(&DirInitializer, sizeof(OBJECT_TYPE_INITIALIZER));

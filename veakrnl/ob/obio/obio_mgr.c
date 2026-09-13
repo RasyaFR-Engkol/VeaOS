@@ -1,9 +1,12 @@
 #include <veakrnl.h>
 
+KSPIN_LOCK ObioMgrSpinLock = 0;
+
 VEASTATUS
 VEAPI
 ObioCreateNewDevice(
     PDRIVER_OBJECT DriverObject,
+    ULONG DeviceExtensionSize,
     PCHAR DeviceName,         // Contoh: "serial0"
     ULONG DeviceType,
     PDEVICE_OBJECT *NewDevice // Output pointer
@@ -11,6 +14,7 @@ ObioCreateNewDevice(
 {
     if(!DriverObject || !NewDevice)
     {
+        DPRINT("ERROR: DriverObject: %p, NewDevice: %p.\n", DriverObject, NewDevice);
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -18,6 +22,7 @@ ObioCreateNewDevice(
     VEASTATUS Status;
     ANSI_STRING NameAnsi;
     OBJECT_ATTRIBUTES Attr;
+    ULONG TotalBodySize = sizeof(DEVICE_OBJECT) + DeviceExtensionSize;
 
     if (DeviceName != NULL) {
         // Hitung panjang string manual
@@ -35,13 +40,26 @@ ObioCreateNewDevice(
     }
 
     Status = ObCreateObject(
+        KernelMode,
         ObpDeviceObjectType, 
-        (DeviceName != NULL) ? &Attr : NULL, // Bisa bikin unnamed device kalau DeviceName NULL
+        (DeviceName != NULL) ? &Attr : NULL,
+        KernelMode,
+        NULL,
+        TotalBodySize, // <--- KUNCI: Pass TotalBodySize di sini!
+        0,
+        0,
         (PVOID*)&CreatedDevice
     );
 
     if (Status != STATUS_SUCCESS) {
+        DPRINT("ERROR: Status: 0x%x.\n", Status);
         return Status;
+    }
+
+    if (DeviceExtensionSize > 0) {
+        CreatedDevice->DeviceExtension = (PVOID)(CreatedDevice + 1);
+    } else {
+        CreatedDevice->DeviceExtension = NULL;
     }
 
     CreatedDevice->DriverObject = DriverObject;
@@ -65,6 +83,7 @@ ObioCreateNewDevice(
         if (Status != STATUS_SUCCESS) {
             // Kalau gagal insert (misal nama "serial0" udah ada), 
             // fungsi ObInsertObject otomatis nge-dereference (hancurin) objeknya.
+            DPRINT("ERROR: Status: 0x%x.\n", Status);
             *NewDevice = NULL;
             return Status;
         }
@@ -79,7 +98,8 @@ VEASTATUS
 VEAPI
 ObioCreateDriver(
     PCHAR DriverName,                  // Contoh: "Serial"
-    PDRIVER_INITIALIZE InitializationFunction
+    PDRIVER_INITIALIZE InitializationFunction,
+    OUT PDRIVER_OBJECT *DriverObject
 )
 {
     if (!DriverName || !InitializationFunction) {
@@ -104,16 +124,29 @@ ObioCreateDriver(
     Attr.Attributes = OBJ_CASE_INSENSITIVE;
 
     // 2. Buat Objek (Fase Alokasi)
-    Status = ObCreateObject(ObpDriverObjectType, &Attr, (PVOID*)&NewDriver);
-    if (Status != STATUS_SUCCESS) {
+    Status = ObCreateObject(
+        KernelMode,
+        ObpDriverObjectType,
+        &Attr,
+        KernelMode,
+        NULL,
+        sizeof(DRIVER_OBJECT), // ObjectSize (atau 0)
+        0,                     // PagedPoolCharge
+        0,                     // NonPagedPoolCharge
+        (PVOID*)&NewDriver
+    );
+
+    if (!VEA_SUCCESS(Status)) {
         return Status;
     }
 
-    // 3. Inisialisasi dasar DRIVER_OBJECT
+    RtlZeroMemory(NewDriver, sizeof(DRIVER_OBJECT));
+
+    // Inisialisasi dasar DRIVER_OBJECT
     NewDriver->DeviceObject = NULL;
     NewDriver->DriverStart = (PVOID)InitializationFunction; // Anggap ini base address-nya
 
-    // 4. Masukkan ke dalam Object Tree (/Driver/Serial)
+    // Masukkan ke dalam Object Tree (/Driver/Serial)
     Status = ObInsertObject(NewDriver, &Attr);
     if (Status != STATUS_SUCCESS) {
         return Status;
@@ -127,6 +160,12 @@ ObioCreateDriver(
         // Jika driver gagal inisialisasi, cabut lagi dari sistem
         ObDereferenceObject(NewDriver);
         return Status;
+    }
+    
+    /* Attach them again */
+    if(DriverObject != NULL)
+    {
+        *DriverObject = NewDriver;
     }
 
     return STATUS_SUCCESS;
@@ -145,6 +184,9 @@ ObioAttachInterruptToThisObject(
 
     POBJECT_HEADER Header = OBJECT_TO_OBJECT_HEADER(Object);
 
+    /* FIXME: Now we only support stacking Device and Driver object type
+       to another object. But our architectural of VeaOS say any object
+       can be attached and have it's own Interrupt Handler */
     if (Header->Type == ObpDeviceObjectType) {
         PDEVICE_OBJECT Device = (PDEVICE_OBJECT)Object;
         Device->InterruptHandler = CustomHandler;
@@ -157,4 +199,103 @@ ObioAttachInterruptToThisObject(
     }
 
     return STATUS_OBJECT_TYPE_MISMATCH;
+}
+
+PVOID
+VEAPI
+ObioAttachObject(
+    IN PVOID SourceObject,
+    IN PVOID TargetObject
+)
+{
+    if (!SourceObject || !TargetObject) return NULL;
+
+    /* Acquire Spinlock */
+    KIRQL OldIrql;
+    KsAcquireSpinLock(&ObioMgrSpinLock, &OldIrql);
+
+    POBJECT_HEADER SourceHeader = OBJECT_TO_OBJECT_HEADER(SourceObject);
+    POBJECT_HEADER TargetHeader = OBJECT_TO_OBJECT_HEADER(TargetObject);
+
+    if (!SourceHeader->Type || !SourceHeader->Type->AllowAttachByDefault ||
+        !TargetHeader->Type || !TargetHeader->Type->AllowAttachByDefault)
+    {
+        kdp_print("OBIO: Cannot attach object! ObjectType does not allow attachment.\n\r");
+        return NULL;
+    }
+
+    if (SourceHeader->LowerAttachedObject != NULL)
+    {
+        // Source udah nempel di object lain -- gak boleh attach dobel
+        KsReleaseSpinLock(&ObioMgrSpinLock, OldIrql);
+        return NULL;
+    }
+
+    // Cari puncak stack TargetObject sekarang (mungkin TargetObject
+    // sendiri udah ada yang numpuk di atasnya)
+    PVOID CurrentTop = TargetObject;
+    POBJECT_HEADER CurrentTopHeader = TargetHeader;
+
+    while (CurrentTopHeader->UpperAttachedObject != NULL)
+    {
+        CurrentTop = CurrentTopHeader->UpperAttachedObject;
+        CurrentTopHeader = OBJECT_TO_OBJECT_HEADER(CurrentTop);
+    }
+
+    SourceHeader->LowerAttachedObject = CurrentTop;
+    CurrentTopHeader->UpperAttachedObject = SourceObject;
+
+    SourceHeader->StackDepth = CurrentTopHeader->StackDepth + 1;
+
+    ObReferenceObject(CurrentTop);
+
+    KsReleaseSpinLock(&ObioMgrSpinLock, OldIrql);
+
+    return CurrentTop;
+}
+
+VOID
+VEAPI
+ObioDetachObject(
+    IN PVOID Object
+)
+{
+    if (!Object) return;
+
+    KIRQL OldIrql;
+    PVOID LowerObjectToDereference = NULL;
+
+    KsAcquireSpinLock(&ObioMgrSpinLock, &OldIrql);
+
+    POBJECT_HEADER Header = OBJECT_TO_OBJECT_HEADER(Object);
+
+    // SAFETY CHECK: Pastikan tidak ada objek di atasnya
+    if (Header->UpperAttachedObject != NULL)
+    {
+        kdp_print("OBIO FATAL: Attempting to detach an object that still has attached upper devices!\n\r");
+        KsReleaseSpinLock(&ObioMgrSpinLock, OldIrql);
+        KsBugCheckEx(INVALID_DEVICE_DETACH, (ULONG_PTR)Object, 0, 0, 0); 
+        return;
+    }
+
+    if (Header->LowerAttachedObject != NULL)
+    {
+        POBJECT_HEADER LowerHeader = OBJECT_TO_OBJECT_HEADER(Header->LowerAttachedObject);
+        LowerHeader->UpperAttachedObject = NULL;
+
+        // Simpan pointer untuk di-dereference NANTI di luar lock
+        LowerObjectToDereference = Header->LowerAttachedObject;
+        Header->LowerAttachedObject = NULL;
+    }
+
+    Header->StackDepth = 1; // balik jadi standalone
+
+    // Lepas Spinlock DULUAN!
+    KsReleaseSpinLock(&ObioMgrSpinLock, OldIrql);
+
+    // Sekarang aman untuk dereference di luar Spinlock
+    if (LowerObjectToDereference != NULL)
+    {
+        ObDereferenceObject(LowerObjectToDereference);
+    }
 }

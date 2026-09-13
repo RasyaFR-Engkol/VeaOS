@@ -81,9 +81,15 @@ ObReferenceObjectByName(
 VEASTATUS
 VEAPI
 ObCreateObject(
-    POBJECT_TYPE ObjectType,
-    POBJECT_ATTRIBUTES ObjectAttributes,
-    PVOID *ReturnedObject
+    IN KPROCESSOR_MODE ProcessorMode,
+    IN POBJECT_TYPE ObjectType,
+    IN POBJECT_ATTRIBUTES ObjectAttributes,
+    IN KPROCESSOR_MODE OwnershipMode,
+    IN OUT PVOID ParseContext OPTIONAL,
+    IN ULONG ObjectSize,
+    IN ULONG PagedPoolCharge,
+    IN ULONG NonPagedPoolCharge,
+    OUT PVOID *ReturnedObject
 )
 {
     if (!ObjectType || !ReturnedObject) {
@@ -92,7 +98,7 @@ ObCreateObject(
 
     PVOID ObjectBody = NULL;
 
-    VEASTATUS AllocStatus = ObAllocateObject(ObjectType, ObjectAttributes, &ObjectBody);
+    VEASTATUS AllocStatus = ObAllocateObject(ObjectType, ObjectAttributes, ObjectSize, &ObjectBody);
     if(!VEA_SUCCESS(AllocStatus))
     {
         return STATUS_INSUFFICIENT_MEMORY;
@@ -139,7 +145,13 @@ ObInsertObject(
     
     // Asumsi lu udah ngubah ObInitializeLookupContext buat nerima 3 parameter 
     // seperti di obmanager.c yang lu kasih sebelumnya
-    ObInitializeLookupContext(&LookupContext, ObjectAttributes, NULL); 
+    ObInitializeLookupContext(
+        &LookupContext, 
+        ObjectAttributes, 
+        Header->Type,     // Tipe Objek diambil dari Header
+        0,               // DesiredAccess = 0 (karena hanya insert, bukan buka handle)
+        AccessMode                     // AccessMode pemanggil
+    );
     LookupContext.InsertMode = TRUE; // Aktifkan mode penanaman
 
     PVOID FoundObject = NULL;
@@ -316,7 +328,13 @@ ObOpenObjectByName(
 
     // Inisialisasi Lookup Context
     OB_LOOKUP_CONTEXT LookupContext;
-    ObInitializeLookupContext(&LookupContext, ObjectAttributes, ExpectedType);
+    ObInitializeLookupContext(
+        &LookupContext, 
+        ObjectAttributes, 
+        ExpectedType, 
+        DesiredAccess, 
+        AccessMode
+    );
     LookupContext.AccessMode = AccessMode;
 
     // Eksekusi Pencarian Objek via Path String
@@ -327,8 +345,30 @@ ObOpenObjectByName(
         return Status; // Objek gak ketemu / type mismatch / path invalid
     }
 
-    // Catatan: ObpLookupObjectName SUDAH otomatis memanggil ObReferenceObject 
-    // jika objek berhasil ditemukan.
+    POBJECT_HEADER Header = OBJECT_TO_OBJECT_HEADER(FoundObject);
+    ULONG GrantedAccess = 0;
+
+    if(AccessMode == UserMode)
+    {
+        PVEA_TOKEN ClientToken = PtGetCurrentProcess()->Token;
+
+        BOOLEAN AccessAllowed = SfAccessCheck(
+            Header->SecurityDescriptor,
+            ClientToken,
+            DesiredAccess,
+            &Header->Type->GenericMapping,
+            &GrantedAccess
+        );
+
+        if (!AccessAllowed) {
+            ObDereferenceObject(FoundObject);
+            return STATUS_ACCESS_DENIED; // AKSED DITOLAK BY SF!
+        }
+    }
+    else
+    {
+        GrantedAccess = DesiredAccess;
+    }
 
     // Daftarkan Objek ke Handle Table untuk Menerbitkan HANDLE
     HANDLE NewHandle = UlCreateHandle(Table, FoundObject, DesiredAccess);

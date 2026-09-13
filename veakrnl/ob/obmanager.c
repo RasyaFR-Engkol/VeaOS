@@ -5,6 +5,7 @@ VEAPI
 ObAllocateObject(
     POBJECT_TYPE ObjectType,
     POBJECT_ATTRIBUTES ObjectAttributes,
+    ULONG ObjectSize,
     PVOID *ReturnedObject // Output: Pointer ke badan objek
 )
 {
@@ -21,7 +22,8 @@ ObAllocateObject(
         HasName = TRUE;
     }
 
-    ULONG TotalSize = NameInfoSize + sizeof(OBJECT_HEADER) + ObjectType->ObjectSize;
+    ULONG BodySize = (ObjectSize > 0) ? ObjectSize : ObjectType->ObjectSize;
+    ULONG TotalSize = NameInfoSize + sizeof(OBJECT_HEADER) + BodySize;
 
     PVOID RawMemory = UlAllocatePoolWithTag(NonPagedPool, TotalSize, ObjectType->PoolTag);
     if (!RawMemory) {
@@ -31,6 +33,15 @@ ObAllocateObject(
     RtlZeroMemory(RawMemory, TotalSize);
 
     POBJECT_HEADER Header = (POBJECT_HEADER)((PUCHAR)RawMemory + NameInfoSize);
+
+    if(ObjectAttributes && ObjectAttributes->SecurityDescriptor)
+    {
+        Header->SecurityDescriptor = ObjectAttributes->SecurityDescriptor;
+    }
+    else  
+    {
+        Header->SecurityDescriptor = SfCreateNormalSecurityDescriptor();
+    }
 
     Header->ReferenceCount = 1;        // Baru lahir, yang megang 1 (Sistem)
     Header->Type = ObjectType;
@@ -98,10 +109,22 @@ ObCreateObjectType(
     POBJECT_TYPE NewType = NULL;
     LONG Status;
 
-    Status = ObAllocateObject(ObpTypeObjectType, &Attr, (PVOID*)&NewType);
+    Status = ObAllocateObject(
+        ObpTypeObjectType, 
+        &Attr, 
+        sizeof(OBJECT_TYPE), // ObjectSize untuk struct OBJECT_TYPE itu sendiri
+        (PVOID*)&NewType
+    );
+    
     if (Status != 0) {
         return Status;
     }
+
+    RtlCopyMemory(
+        &NewType->GenericMapping,
+        &Initializer->GenericMapping,
+        sizeof(GENERIC_MAPPING)
+    );
 
     NewType->TypeId = ObpNextTypeId++;
     NewType->TotalObjectCount = 0; // Belum ada instansinya
@@ -116,7 +139,7 @@ ObCreateObjectType(
     NewType->PoolTag = Initializer->PoolTag;
     NewType->ObjectSize = Initializer->ObjectSize;
     NewType->AllowAttachByDefault = Initializer->AllowAttachByDefault;
-
+    NewType->ValidAccessMask = Initializer->ValidAccessMask;
     NewType->InterruptHandler = Initializer->InterruptHandler;
     NewType->CreateRoutine = Initializer->CreateRoutine;
     NewType->DeleteRoutine = Initializer->DeleteRoutine;
@@ -148,17 +171,21 @@ VEASTATUS
 ObInitializeLookupContext(
     POB_LOOKUP_CONTEXT LookupContext,
     POBJECT_ATTRIBUTES ObjectAttributes,
-    POBJECT_TYPE ExpectedType
+    POBJECT_TYPE ExpectedType,
+    ACCESS_MASK DesiredAccess,      // <-- PARAMETER BARU
+    KPROCESSOR_MODE AccessMode      // <-- PARAMETER BARU (biar AccessMode terisi juga)
 )
 {
     if (!LookupContext || !ObjectAttributes || !ObjectAttributes->ObjectName) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    LookupContext->ExpectedType = ExpectedType;
-    LookupContext->ReparseCount = 0;
-    LookupContext->CaseInsensitive = (ObjectAttributes->Attributes & OBJ_CASE_INSENSITIVE) != 0;
-    LookupContext->RootDirectory = ObjectAttributes->RootDirectory;
+    LookupContext->ExpectedType     = ExpectedType;
+    LookupContext->DesiredAccess    = DesiredAccess; 
+    LookupContext->AccessMode       = AccessMode;    
+    LookupContext->ReparseCount     = 0;
+    LookupContext->CaseInsensitive  = (ObjectAttributes->Attributes & OBJ_CASE_INSENSITIVE) != 0;
+    LookupContext->RootDirectory    = ObjectAttributes->RootDirectory;
 
     // Set awal CurrentDirectory berdasarkan RootDirectory
     if (ObjectAttributes->RootDirectory) {

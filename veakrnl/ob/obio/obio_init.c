@@ -3,6 +3,9 @@
 POBJECT_TYPE ObpDriverObjectType = NULL;
 POBJECT_TYPE ObpDeviceObjectType = NULL;
 PVOID ObpFileSystemDirectoryObject = NULL; // Folder baru buat File System
+PBLOCK_BOOT_2 ObioBlockBoot = NULL;
+PANSI_STRING ObioGroupOrderTable = NULL;
+ULONG ObioGroupOrderount = 0;
 
 VEASTATUS
 VEAPI
@@ -10,183 +13,6 @@ ObioDummyInterruptHandler(
     PVOID Object,
     POIP Oip
 );
-
-/* EXAMPLE DRIVER*/
-
-VOID 
-VEAPI
-SerialWrite(char c)
-{
-    while ((inb(COM1_PORT + 5) & 0x20) == 0) {
-        // CPU nunggu (bisa dikasih instruksi 'pause' di x86 buat efisiensi)
-        __asm__ volatile("pause");
-    }
-    // Tembak karakternya ke port data!
-    outb(COM1_PORT, c);
-}
-
-BOOLEAN
-VEAPI
-SerialProcessInterrupt(PVOID Object, POIP Oip)
-{
-    PDEVICE_OBJECT Device = (PDEVICE_OBJECT)Object;
-
-    POIP_STACK Stack = Oip->CurrentStackLocation;
-    VEASTATUS Status = STATUS_SUCCESS;
-
-    if (!Stack) {
-        Oip->IoStatus = STATUS_INVALID_PARAMETER;
-        return FALSE; // Gagal proses
-    }
-
-    switch (Stack->MajorFunction) {
-        
-        case OIP_MJ_CREATE:
-            // Aplikasi memanggil CreateFile("/Device/serial0")
-            kdp_print("SERIAL: Membuka koneksi ke port serial...\n\r");
-            Oip->Information = 0;
-            break;
-
-        case OIP_MJ_CLOSE:
-            // Aplikasi menutup handle file
-            kdp_print("SERIAL: Menutup koneksi port serial...\n\r");
-            Oip->Information = 0;
-            break;
-
-        case OIP_MJ_READ:
-            // Aplikasi memanggil ReadFile
-            KdPrintf("SERIAL: Membaca %d bytes dari serial port...\n\r", Stack->Parameters.ReadWrite.Length);
-            
-            // TODO: Tambahkan logika baca dari Port I/O hardware (misal: inb)
-            // Simpan data ke Oip->SystemBuffer (atau Oip->UserBuffer tergantung tipe I/O)
-            
-            // Lapor berapa byte yang sukses dibaca
-            Oip->Information = Stack->Parameters.ReadWrite.Length; 
-            break;
-
-        case OIP_MJ_WRITE:
-            // Aplikasi memanggil WriteFile
-            KdPrintf("SERIAL: Menulis %d bytes ke serial port...\n\r", Stack->Parameters.ReadWrite.Length);
-            
-            PCHAR WriteBuffer = (PCHAR)Oip->SystemBuffer;
-            ULONG WriteLength = Stack->Parameters.ReadWrite.Length;
-            ULONG BytesWritten = 0;
-
-            if (WriteBuffer != NULL && WriteLength > 0) {
-                
-                // 3. Tembak karakternya satu per satu pakai fungsi lu
-                for (ULONG i = 0; i < WriteLength; i++) {
-                    SerialWrite(WriteBuffer[i]);
-                    BytesWritten++;
-                }
-                
-                Status = STATUS_SUCCESS;
-            } else {
-                Status = STATUS_INVALID_PARAMETER;
-            }
-            
-            // Lapor berapa byte yang sukses ditulis
-            Oip->Information = BytesWritten;
-            break;
-
-        case OIP_MJ_DEVICE_CONTROL:
-            // Aplikasi memanggil DeviceIoControl (misal set Baud Rate)
-            KdPrintf("SERIAL: Menerima IOCTL code: 0x%X\n\r", Stack->Parameters.DeviceControl.IoControlCode);
-            Oip->Information = 0;
-            break;
-
-        default:
-            // Perintah tidak didukung oleh driver serial
-            KdPrintf("SERIAL: Operasi tidak dikenal (Major: 0x%X)\n\r", Stack->MajorFunction);
-            Status = STATUS_INVALID_DEVICE_REQUEST;
-            Oip->Information = 0;
-            break;
-    }
-
-    // Update status akhir paket OIP
-    Oip->IoStatus = Status;
-
-    ObioCompleteRequest(Oip);
-
-    // Return TRUE menandakan interrupt/OIP ini milik kita dan sukses ditangani
-    return TRUE;
-}
-
-VEASTATUS
-VEAPI
-SerialDriverEntry(PDRIVER_OBJECT DriverObject)
-{
-    PDEVICE_OBJECT SerialDevice0 = NULL;
-    VEASTATUS Status;
-
-    kdp_print("SERIAL: DriverEntry dipanggil! Mempersiapkan driver...\n\r");
-
-    // 1. Buat Device dan namai "serial0" agar masuk ke /Device/serial0
-    // Anggap 3 adalah konstanta untuk tipe FILE_DEVICE_SERIAL_PORT
-    Status = ObioCreateNewDevice(DriverObject, "serial0", 3, &SerialDevice0);
-    if (Status != STATUS_SUCCESS) {
-        kdp_print("SERIAL: Gagal membuat objek device serial0!\n\r");
-        return Status;
-    }
-
-    // 2. Tancapkan Custom OIP/Interrupt Handler ke Device yang baru dibuat
-    Status = ObioAttachInterruptToThisObject(SerialDevice0, SerialProcessInterrupt);
-    if (Status != STATUS_SUCCESS) {
-        kdp_print("SERIAL: Gagal menancapkan OIP handler ke serial0!\n\r");
-        return Status;
-    }
-
-    kdp_print("SERIAL: Driver siap! Device /Device/serial0 berhasil dibuat dan di-routing.\n\r");
-    return STATUS_SUCCESS;
-}
-
-VOID
-VEAPI
-TestSerialOutput(VOID)
-{
-    // 1. Cari Device "/Device/serial0" di Object Tree
-    ANSI_STRING DevPath;
-    DevPath.Buffer = "/Device/serial0";
-    DevPath.Length = 15;
-    DevPath.MaximumLength = 16;
-
-    OBJECT_ATTRIBUTES Attr;
-    Attr.Length = sizeof(OBJECT_ATTRIBUTES);
-    Attr.RootDirectory = NULL;
-    Attr.ObjectName = &DevPath;
-    Attr.Attributes = OBJ_CASE_INSENSITIVE;
-
-    PDEVICE_OBJECT SerialDevice = NULL;
-    
-    // Resolve nama path menjadi Pointer Body Device
-    VEASTATUS Status = ObReferenceObjectByName(
-        &Attr, 
-        ObpDeviceObjectType, 
-        (PVOID*)&SerialDevice
-    );
-
-    if (Status != STATUS_SUCCESS) {
-        kdp_print("TEST: Gagal menemukan /Device/serial0!\n\r");
-        return;
-    }
-
-    // 2. Data yang ingin ditulis ke Serial Port
-    char *Pesan = "Halo dari VeaOS Paket OIP!\r\n";
-    ULONG PesanLen = 28;
-
-    // 3. Kirim Paket OIP!
-    kdp_print("TEST: Mengirim OIP Write ke Serial...\n\r");
-    Status = ObioSendWriteRequest(SerialDevice, Pesan, PesanLen);
-
-    if (Status == STATUS_SUCCESS) {
-        kdp_print("TEST: OIP Berhasil diproses oleh Driver Serial!\n\r");
-    }
-
-    // 4. Lepas referensi device setelah selesai dipakai
-    ObDereferenceObject(SerialDevice);
-}
-
-/* END OF EXAMPLE DRIVER*/
 
 BOOLEAN
 VEAPI
@@ -198,47 +24,227 @@ ObioInitSubsystem(
     OBJECT_ATTRIBUTES Attr;
     ANSI_STRING NameAnsi;
 
+    // 1. Register "Driver" Object Type
     RtlZeroMemory(&TypeInit, sizeof(OBJECT_TYPE_INITIALIZER));
     TypeInit.Length = sizeof(OBJECT_TYPE_INITIALIZER);
     TypeInit.PoolTag = 'Driv';
     TypeInit.ObjectSize = sizeof(DRIVER_OBJECT);
-    TypeInit.InterruptHandler = ObioDummyInterruptHandler; // <--- Tancapkan OIP Receiver
+    TypeInit.InterruptHandler = ObioDummyInterruptHandler;
 
     ObCreateObjectType("Driver", &TypeInit, &ObpDriverObjectType);
 
+    // 2. Register "Device" Object Type
     RtlZeroMemory(&TypeInit, sizeof(OBJECT_TYPE_INITIALIZER));
     TypeInit.Length = sizeof(OBJECT_TYPE_INITIALIZER);
     TypeInit.PoolTag = 'Devc';
     TypeInit.ObjectSize = sizeof(DEVICE_OBJECT);
-    TypeInit.InterruptHandler = ObioDummyInterruptHandler; // <--- Tancapkan OIP Receiver
+    TypeInit.InterruptHandler = ObioDummyInterruptHandler;
 
     ObCreateObjectType("Device", &TypeInit, &ObpDeviceObjectType);
 
-    // FIX: Bikin /FileSystem dengan standar arsitektur baru (pakai Object Attributes)
-    NameAnsi.Buffer = "FileSystem";
-    NameAnsi.Length = 10;
-    InitializeObjectAttributes(&Attr, &NameAnsi, 0, ObpRootDirectoryObject, NULL);
+    // 3. Bikin /FileSystem Directory Node
+    RtlInitAnsiString(&NameAnsi, "FileSystem");
+    InitializeObjectAttributes(&Attr, &NameAnsi, OBJ_CASE_INSENSITIVE, ObpRootDirectoryObject, NULL);
 
-    // 1. Alokasi memori (sekarang sudah ada slot untuk NameInfo di belakang layar)
-    ObAllocateObject(ObpDirectoryObjectType, &Attr, &ObpFileSystemDirectoryObject);
+    // Updated ObAllocateObject (4 parameters: ObjectType, Attr, ObjectSize=0, ReturnedObject)
+    ObAllocateObject(ObpDirectoryObjectType, &Attr, 0, &ObpFileSystemDirectoryObject);
     
-    // 2. Inisialisasi list kepala direktori
+    // Inisialisasi list kepala direktori
     InitializeListHead(&((POBJECT_DIRECTORY)ObpFileSystemDirectoryObject)->Head);
     
-    // 3. Masukkan ke object tree (Otomatis mengisi NameInfo & insert ke Root)
+    // Masukkan ke object tree
     ObInsertObject(ObpFileSystemDirectoryObject, &Attr);
 
     kdp_print("OBIO: I/O Subsystem successfully initialized!\n\r");
 
-    VEASTATUS Status = ObioCreateDriver("Serial0", SerialDriverEntry);
+    return TRUE;
+}
+
+//
+// Initialize Group Order Load
+//
+VOID
+VEAPI
+ObioInitGroupOrderLoad(VOID)
+{
+    HANDLE KeyHandle;
+    VEASTATUS Status;
+    PANSI_STRING GroupOrderTable;
+    ULONG Count;
+    ANSI_STRING GroupOrderLocation = 
+        RTL_CONSTANT_ANSI_STRING("/REGISTRY/MACHINE/SYSTEM/CurrentControlSet"
+                                "/Control/ServiceGroupOrder");
+    ANSI_STRING GroupListString = RTL_CONSTANT_ANSI_STRING("List");
+    OBJECT_ATTRIBUTES ObjAttr;  
+    ULONG ResultLength;       
+    PVOID Buffer;
     
-    if (Status == STATUS_SUCCESS) {
-        kdp_print("KERNEL: Driver 'Serial' sukses dimuat dan beroperasi.\n\r");
-    } else {
-        KdPrintf("KERNEL: Gagal memuat driver 'Serial' (Status: 0x%X).\n\r", Status);
+    /* Read ServiceGroupOrder key */
+    InitializeObjectAttributes(&ObjAttr, &GroupOrderLocation, 0, NULL, NULL);
+    Status = VeaCreateKey(&KeyHandle, KEY_READ, &ObjAttr, 0, NULL, 0, NULL);
+    if(!VEA_SUCCESS(Status))
+    {
+        /* Why the hell does this fail? */
+        return;
     }
 
-    TestSerialOutput();
+    /* Enumerate List */
+    Status = VeaQueryValueKey(KeyHandle, &GroupListString, NULL, NULL, 0, &ResultLength);
+    if(Status == STATUS_BUFFER_TOO_SMALL)
+    {
+
+        /* We must allocate buffer with size of ResultLength */
+        Buffer = (PVOID)UlAllocatePoolZero(NonPagedPool, ResultLength, 'Obio');
+        if(!Buffer)
+        {
+            /* No buffer */
+            return;
+        }
+
+        /* Reread the key */
+        Status = VeaQueryValueKey(KeyHandle, &GroupListString, NULL, Buffer, ResultLength, &ResultLength);
+        if(!VEA_SUCCESS(Status))
+        {
+            /* Cleaup */
+            goto Cleanup;
+        }
+    }
+    else if(!VEA_SUCCESS(Status))
+    {
+        /* Key is NOT THERE */
+        goto Cleanup;
+    }
+
+    /* Lets init them into TABLE */
+    PUCHAR Ptr = (PUCHAR)Buffer;
+    Count = 1; 
+
+    for (ULONG i = 0; i < ResultLength; i++)
+    {
+        /* VKEY: \n in MultiSZ is new line */
+        /* One string done */
+        if (Ptr[i] == '\n')
+        {
+            Count++;
+        }
+    }
+
+    /* Lets allocate the memory */
+    ObioGroupOrderTable = (PANSI_STRING)UlAllocatePoolZero(NonPagedPool, Count * sizeof(ANSI_STRING), 'Obio');
+    if (!ObioGroupOrderTable)
+    {
+        Status = STATUS_INSUFFICIENT_MEMORY;
+        goto Cleanup;
+    }
+    ObioGroupOrderount = Count;
+
+    /* Now we gotta parse and insert them */
+    ULONG CurrentIndex = 0;
+    PUCHAR StartPtr = Ptr;
+    ULONG CurrentLength = 0;
+
+    for (ULONG i = 0; i < ResultLength; i++)
+    {
+        // Jika ketemu pemisah (\n) atau null terminator di akhir hexdump
+        if (Ptr[i] == '\n' || Ptr[i] == '\0')
+        {
+            // Mutasi buffer: ubah \n menjadi \0 agar setiap string C-style null-terminated
+            Ptr[i] = '\0';
+            
+            ObioGroupOrderTable[CurrentIndex].Buffer = (PCHAR)StartPtr;
+            ObioGroupOrderTable[CurrentIndex].Length = (USHORT)CurrentLength;
+            ObioGroupOrderTable[CurrentIndex].MaximumLength = (USHORT)(CurrentLength + 1);
+            
+            CurrentIndex++;
+            StartPtr = &Ptr[i + 1];
+            CurrentLength = 0;
+        }
+        else
+        {
+            CurrentLength++;
+        }
+    }
+
+    Buffer = NULL;
+    Status = STATUS_SUCCESS;
+
+Cleanup:
+    if (Status != STATUS_SUCCESS) DPRINT("[Obio] ERROR | GroupOrderLoad fail. Status: 0x%x\n", Status);
+    if(Buffer) UlFreePoolWithTag(Buffer, 'Obio');
+    return;
+}
+
+/* DevNode tree dump helpers */
+VOID
+VEAPI
+ObioDumpDeviceNodeRecursive(
+    IN PDEVICE_NODE Node,
+    IN ULONG Depth
+)
+{
+    if (!Node) return;
+
+    for (ULONG i = 0; i < Depth; i++) {
+        kdp_print("    ");
+    }
+
+    if (Node->InstancePath.Buffer) {
+        KdPrintf("|-- %s [State=%u Flags=0x%x]\n\r", Node->InstancePath.Buffer, Node->State, Node->Flags);
+    } else {
+        KdPrintf("|-- (Unnamed) [State=%u Flags=0x%x]\n\r", Node->State, Node->Flags);
+    }
+
+    PDEVICE_NODE Child = Node->Child;
+    while (Child) {
+        ObioDumpDeviceNodeRecursive(Child, Depth + 1);
+        Child = Child->Sibling;
+    }
+}
+
+VOID
+VEAPI
+ObioDumpDeviceTree(VOID)
+{
+    kdp_print("\n\r=== DevNode Tree Dump ===\n\r");
+    if (ObioRootDeviceNode) {
+        ObioDumpDeviceNodeRecursive(ObioRootDeviceNode, 0);
+    } else {
+        kdp_print("(no root devnode)\n\r");
+    }
+    kdp_print("=========================\n\r");
+}
+
+//
+// Initialize oure System IO
+//
+BOOLEAN
+VEAPI
+ObioInitSystem1(VOID)
+{
+    VEASTATUS Status;
+    /* Save our BlockBoot */
+    ObioBlockBoot = KsLoaderBlock;
+
+    /* Initialize Pnp */
+    Status = ObioInitializePnPService();
+    if(!VEA_SUCCESS(Status))
+    {
+        /* BugCheck */
+        KsBugCheckEx(IO1_INITIALIZATION_FAILED, Status, 0, 0, 0);
+    }
+
+    /* It should initialize ACPI_HCT by itself (read ACPI, more) */
+    HctInitializePnp();
+
+    /* Dump current DevNode tree to help debugging */
+    // ObioDumpDeviceTree();
+
+    /* So we can initialize BootDrivers now (it must SUCCESS) */
+    // if(!ObioInitializeBootDriver())
+    // {
+    //     /* Bugcheck then if it's not success */
+    //     KsBugCheckEx(IO1_INITIALIZATION_FAILED, 0x1, 0, 0, 0);
+    // }
 
     return TRUE;
 }
