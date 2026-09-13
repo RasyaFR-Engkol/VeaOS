@@ -100,33 +100,53 @@ ObpCreateRootStructure(VOID)
     OBJECT_ATTRIBUTES Attr;
     ANSI_STRING NameAnsi;
     
-    // Bikin Root Object "/"
-    ObAllocateObject(ObpDirectoryObjectType, NULL, &ObpRootDirectoryObject);
+    // 1. Bikin Root Object "/" (ObjectSize = 0)
+    ObAllocateObject(ObpDirectoryObjectType, NULL, 0, &ObpRootDirectoryObject);
     InitializeListHead(&((POBJECT_DIRECTORY)ObpRootDirectoryObject)->Head);
     
-    // Bikin sub-direktori "/Device"
+    // 2. Bikin sub-direktori "/Device"
     RtlInitAnsiString(&NameAnsi, "Device");
-    InitializeObjectAttributes(&Attr, &NameAnsi, 0, ObpRootDirectoryObject, NULL);
+    InitializeObjectAttributes(&Attr, &NameAnsi, OBJ_CASE_INSENSITIVE, ObpRootDirectoryObject, NULL);
 
-    ObAllocateObject(ObpDirectoryObjectType, &Attr, &ObpDeviceDirectoryObject);
+    ObAllocateObject(ObpDirectoryObjectType, &Attr, 0, &ObpDeviceDirectoryObject);
     InitializeListHead(&((POBJECT_DIRECTORY)ObpDeviceDirectoryObject)->Head);
     ObInsertObject(ObpDeviceDirectoryObject, &Attr);
     
-    // Bikin sub-direktori "/Driver"
+    // 3. Bikin sub-direktori "/Driver"
     RtlInitAnsiString(&NameAnsi, "Driver");
-    InitializeObjectAttributes(&Attr, &NameAnsi, 0, ObpRootDirectoryObject, NULL);
+    InitializeObjectAttributes(&Attr, &NameAnsi, OBJ_CASE_INSENSITIVE, ObpRootDirectoryObject, NULL);
 
-    ObAllocateObject(ObpDirectoryObjectType, &Attr, &ObpDriverDirectoryObject);
+    ObAllocateObject(ObpDirectoryObjectType, &Attr, 0, &ObpDriverDirectoryObject);
     InitializeListHead(&((POBJECT_DIRECTORY)ObpDriverDirectoryObject)->Head);
     ObInsertObject(ObpDriverDirectoryObject, &Attr);
 
-    // Bikin sub-direktori "/Types" (Buat nyimpen daftar OBJECT_TYPE)
+    // 4. Bikin sub-direktori "/Types"
     RtlInitAnsiString(&NameAnsi, "Types");
-    InitializeObjectAttributes(&Attr, &NameAnsi, 0, ObpRootDirectoryObject, NULL);
+    InitializeObjectAttributes(&Attr, &NameAnsi, OBJ_CASE_INSENSITIVE, ObpRootDirectoryObject, NULL);
 
-    ObAllocateObject(ObpDirectoryObjectType, &Attr, &ObpTypesDirectoryObject);
+    ObAllocateObject(ObpDirectoryObjectType, &Attr, 0, &ObpTypesDirectoryObject);
     InitializeListHead(&((POBJECT_DIRECTORY)ObpTypesDirectoryObject)->Head);
     ObInsertObject(ObpTypesDirectoryObject, &Attr);
+
+    // Insert semua registered OBJECT_TYPE ke /Types directory
+    PLIST_ENTRY Curr = ObpTypeObjectList.Flink;
+    while (Curr != &ObpTypeObjectList) 
+    {
+        POBJECT_TYPE TypeObj = CONTAINING_RECORD(Curr, OBJECT_TYPE, TypeList);
+        POBJECT_HEADER Header = OBJECT_TO_OBJECT_HEADER(TypeObj);
+
+        // Hanya masukkan objek yang memiliki NameInfo
+        if (Header->Flags & OB_FLAG_HAS_NAME_INFO) 
+        {
+            POBJECT_HEADER_NAME_INFO NameInfo = OBJECT_HEADER_TO_NAME_INFO(Header);
+            NameInfo->Directory = ObpTypesDirectoryObject;
+            
+            // Masukkan ke folder /Types
+            ObpInsertDirectory(ObpTypesDirectoryObject, TypeObj);
+        }
+
+        Curr = Curr->Flink;
+    }
     
     kdp_print("OB: Root tree structure (/, /Device, /Driver, /Types) created!\n\r");
 }
@@ -159,7 +179,7 @@ ObCreateSymbolicLink(
     LONG Status;
 
     // Alokasi Objek Symlink
-    Status = ObAllocateObject(ObpSymbolicLinkObjectType, &Attr, &SymlinkObject);
+    Status = ObAllocateObject(ObpSymbolicLinkObjectType, &Attr, sizeof(OBJECT_SYMBOLIC_LINK), &SymlinkObject);
     if (Status != 0) {
         return Status;
     }
@@ -300,10 +320,10 @@ ObpDumpObjectTreeRecursive(
         }
 
         for (ULONG i = 0; i < Depth; i++) {
-            kdp_print("  | ");
+            kdp_print("    ");
         }
 
-        KdPrintf("|-- %s [%s]\n\r", ObjectName, TypeName);
+        KdPrintf("|--/ %s [%s]\n\r", ObjectName, TypeName);
 
         if (Header && Header->Type == ObpDirectoryObjectType) {
             ObpDumpObjectTreeRecursive(Entry->Object, Depth + 1);
@@ -588,7 +608,18 @@ VeaCreateDirectoryNamespace(POBJECT_ATTRIBUTES ObjectAttributes)
     VEASTATUS Status;
     PVOID ReturnedObject;
 
-    Status = ObCreateObject(ObpDirectoryObjectType, ObjectAttributes, &ReturnedObject);
+    Status = ObCreateObject(
+        KernelMode,
+        ObpDirectoryObjectType,
+        ObjectAttributes,
+        KernelMode,
+        NULL,
+        0, // 0 = Fallback ke ObpDirectoryObjectType->ObjectSize (sizeof(OBJECT_DIRECTORY))
+        0,
+        0,
+        &ReturnedObject
+    );
+
     if(!VEA_SUCCESS(Status))
     {
         return Status;
