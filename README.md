@@ -1,5 +1,4 @@
 # VeaOS
 ---
-## Tentang VeaOS
-VeaOS merupakan sebuah OS 32 bit yang arsitektur nya terinspirasi dari NT (bisa dibilang Windows). Tujuan saya membuat VeaOS ini
-karena saya ingin berkreasi dan menumpahkan ide saya di dalam OS. 
+## About VeaOS
+VeaOS is a 32-bit operating system. It is inspired by Windows because its creator enjoys the complexity of Windows architecture. Additionally, VeaOS is designed to run both Windows and Linux applications directly on the OS without using WINE compatibility layers.
