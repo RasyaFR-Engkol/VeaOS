@@ -2,7 +2,7 @@
 
 BOOLEAN 
 VEAPI 
-MmInitializePip(PBLOCK_BOOT_1 BlockBoot)
+MmInitializePip(PBLOCK_BOOT_2 BlockBoot)
 {
 #define KERNEL_PHYS_BASE 0x1000000              // 16MB (Tempat kernel ditaruh)
 #define KERNEL_RESERVE_SIZE (50 * 1024 * 1024)  // 50MB (Area aman untuk kernel)
@@ -196,7 +196,7 @@ MmAllocatePhysicalPage(VOID)
 
     MmPipDatabase[AllocatedIndex].State = PIP_STATE_ACTIVE;
     MmPipDatabase[AllocatedIndex].ReferenceCount = 1;
-    MmPipDatabase[AllocatedIndex].Flink.PteAddress = 0;
+    MmPipDatabase[AllocatedIndex].PteAddress = 0;
 
     return (AllocatedIndex * 4096);
 }
@@ -222,6 +222,12 @@ MmFreePhysicalPage(ULONG PhysicalAddress)
         return;
     }
 
+    if (MmPipDatabase[Index].ShareCount > 1) {
+        MmPipDatabase[Index].ShareCount--;
+        return;   // masih dipegang proses lain, jangan dibebasin
+    }
+
+    MmPipDatabase[Index].ShareCount = 0;
     MmPipDatabase[Index].State = PIP_STATE_FREE;
     MmPipDatabase[Index].ReferenceCount = 0;
 
@@ -252,7 +258,7 @@ MmAllocateContiguousPhysicalPages(ULONG PageCount)
                 for (ULONG j = start_index; j < start_index + PageCount; j++) {
                     MmPipDatabase[j].State = PIP_STATE_ACTIVE;
                     MmPipDatabase[j].ReferenceCount = 1;
-                    MmPipDatabase[j].Flink.PteAddress = 0;
+                    MmPipDatabase[j].PteAddress = 0;
                 }
 
                 // Bangun ulang rantai Free List karena ada halaman di tengah yang dicabut

@@ -60,42 +60,53 @@ PMM_VAD
 VEAPI
 MmpFindVadByVpn(PRTL_BALANCED_NODE Node, ULONG Vpn)
 {
-    if (!Node) return NULL;
+    while (Node != NULL) {
+        PMM_VAD Vad = (PMM_VAD)Node;
+        
+        // Cek apakah VPN berada di dalam rentang VAD ini
+        if (Vpn >= Vad->StartingVpn && Vpn <= Vad->EndingVpn) {
+            return Vad; 
+        }
+        
+        // Telusuri ke kiri atau ke kanan
+        if (Vpn < Vad->StartingVpn) {
+            Node = Node->Left;
+        } else {
+            Node = Node->Right;
+        }
+    }
     
-    PMM_VAD Vad = (PMM_VAD)Node;
-    if (Vpn >= Vad->StartingVpn && Vpn <= Vad->EndingVpn) return Vad;
-    
-    if (Vpn < Vad->StartingVpn)
-        return MmpFindVadByVpn(Node->Left, Vpn);
-    else
-        return MmpFindVadByVpn(Node->Right, Vpn);
+    return NULL;
 }
 
 static 
 ULONG 
 VEAPI
-MmpFindFreeVirtualGap(PRTL_BALANCED_NODE Node, ULONG PageCount, ULONG* LastVpnChecked)
+MmpFindFreeVirtualGap(ULONG PageCount, ULONG* LastVpnChecked)
 {
-    if (!Node) return 0;
-
-    // 1. Susuri anak kiri (Virtual Address lebih rendah)
-    ULONG FoundVa = MmpFindFreeVirtualGap(Node->Left, PageCount, LastVpnChecked);
-    if (FoundVa != 0) return FoundVa;
-
-    // 2. Cek celah antara batas pencarian terakhir dengan VAD saat ini
-    PMM_VAD Vad = (PMM_VAD)Node;
-    ULONG GapPages = Vad->StartingVpn - *LastVpnChecked;
+    // Mulai dari node dengan alamat virtual terendah (Cached Leftmost)
+    PRTL_BALANCED_NODE CurrentNode = MmKernelVadTree.Leftmost;
     
-    if (GapPages >= PageCount) {
-        // Celah ditemukan!
-        return (*LastVpnChecked) << 12; 
+    while (CurrentNode != NULL) {
+        PMM_VAD Vad = (PMM_VAD)CurrentNode;
+        
+        // Hitung celah antara batas terakhir dan awal VAD saat ini
+        ULONG GapPages = Vad->StartingVpn - *LastVpnChecked;
+        
+        if (GapPages >= PageCount) {
+            // Celah ditemukan!
+            return (*LastVpnChecked) << 12; 
+        }
+        
+        // Geser batas pengecekan ke akhir VAD ini
+        *LastVpnChecked = Vad->EndingVpn + 1;
+        
+        // Maju ke node VAD berikutnya secara berurutan (In-Order)
+        CurrentNode = RtlGetNextNodeAvl(CurrentNode);
     }
-
-    // 3. Geser batas pencarian ke akhir VAD ini
-    *LastVpnChecked = Vad->EndingVpn + 1;
-
-    // 4. Susuri anak kanan (Virtual Address lebih tinggi)
-    return MmpFindFreeVirtualGap(Node->Right, PageCount, LastVpnChecked);
+    
+    // Jika loop selesai dan tidak ketemu celah, berarti taruh di ujung kanan
+    return 0;
 }
 
 ULONG 
@@ -111,7 +122,7 @@ MmAllocateVirtualRange(ULONG PageCount)
         AllocatedVa = StartingKva;
     } else {
         // Cari celah di antara node
-        AllocatedVa = MmpFindFreeVirtualGap(MmKernelVadTree.Root, PageCount, &LastVpnChecked);
+        AllocatedVa = MmpFindFreeVirtualGap(PageCount, &LastVpnChecked);
         
         // Jika tidak ada celah di tengah, taruh di ujung paling kanan
         if (AllocatedVa == 0) {

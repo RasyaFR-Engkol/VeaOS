@@ -6,7 +6,7 @@ ULONG MmFirstFreePip = 0xFFFFFFFF;
 
 BOOLEAN 
 VEAPI
-MmInitialize(PBLOCK_BOOT_1 BlockBoot)
+MmInitialize(PBLOCK_BOOT_2 BlockBoot)
 {
     if(!MmInitializePip(BlockBoot))
     {
@@ -16,6 +16,8 @@ MmInitialize(PBLOCK_BOOT_1 BlockBoot)
     MmInitializeVmm();
 
     UlInitializePools();
+
+    MmpInitializeCowScratch();
 
     kdp_print("MmInitialization Done.\n\r");
 
