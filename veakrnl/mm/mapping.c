@@ -92,3 +92,13 @@ MmUnmapIoSpace(
     // Triknya: Panggil MmFreeVirtualRange setelah PTE-nya sudah di-wipe (karena bits.present sudah 0, dia tidak akan memanggil MmFreePhysicalPage)
     MmFreeVirtualRange(BaseVa);
 }
+
+PVOID
+VEAPI
+MiGetSystemPageDirectoryTableBase(VOID)
+{
+    ULONG Cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(Cr3));
+
+    return (PVOID)Cr3;
+}   

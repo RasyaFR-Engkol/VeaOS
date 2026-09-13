@@ -86,7 +86,7 @@ VOID VEAPI UlpCheckLinks(PLIST_ENTRY ListHead)
         (UlpDecode(UlpDecode(ListHead->Blink)->Flink) != ListHead))
     {
         // BugCheck kalau pointer corrupt / kena buffer overflow
-        KsBugCheck(BAD_POOL_HEADER, 3, (ULONG_PTR)ListHead,
+        KsBugCheckEx(BAD_POOL_HEADER, 3, (ULONG_PTR)ListHead,
                      (ULONG_PTR)UlpDecode(UlpDecode(ListHead->Flink)->Blink),
                      (ULONG_PTR)UlpDecode(UlpDecode(ListHead->Blink)->Flink));
     }
