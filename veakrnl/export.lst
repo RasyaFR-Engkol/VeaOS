@@ -1,0 +1,14 @@
+export KsInitializeSpinlock
+export KsAcquireSpinLock
+export KsReleaseSpinLock
+export ObioGoInterruptObject
+export ObioCreateDriver
+export ObioCreateNewDevice
+export KdPrintf
+export UlAllocatePoolWithTag
+export UlFreePoolWithTag
+export UlAllocatePoolZero
+export RtlUnicodeStringToAnsiString
+export RtlInitAnsiString
+export RtlInitUnicodeString
+export RtlAnsiStringToUnicodeString
