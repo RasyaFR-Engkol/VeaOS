@@ -127,7 +127,6 @@ VkpMountSystemHive(VOID)
     OBJECT_ATTRIBUTES ObjAttr;
     ANSI_STRING SystemPath;
     PVK_KEY_OBJECT SystemKeyObject = NULL;
-    HANDLE KeyHandle = NULL;
 
     // Basic Validation
     if (!VkSystemHive || !VkSystemHive->BaseBlock)
@@ -164,7 +163,7 @@ VkpMountSystemHive(VOID)
         sizeof(VK_KEY_OBJECT),
         0,
         0,
-        (PVOID)&SystemKeyObject
+        (PVOID*)&SystemKeyObject
     );
 
     if (!VEA_SUCCESS(Status))
@@ -175,15 +174,19 @@ VkpMountSystemHive(VOID)
 
     // Fill our VK_KEY_OBJECT with abstraction
     RtlZeroMemory(SystemKeyObject, sizeof(VK_KEY_OBJECT));
-    SystemKeyObject->HiveBase    = VkSystemHive;
-    SystemKeyObject->KeyNode     = RootNode;
+    SystemKeyObject->HiveBase  = VkSystemHive;
+    SystemKeyObject->KeyNode   = RootNode;
     SystemKeyObject->KeyOffset = (ULONG)((PUCHAR)RootNode - (PUCHAR)VkSystemHive->BaseAddress);
     RtlInitAnsiString(&SystemKeyObject->FullKeyPath, "/REGISTRY/MACHINE/SYSTEM");
 
-    // Insert it
+    // Insert ke Object Tree dengan 6 parameter
     Status = ObInsertObject(
-        (PVOID)SystemKeyObject,
-        &ObjAttr
+        SystemKeyObject,
+        NULL,   // AccessState
+        0,      // DesiredAccess
+        0,      // ObjectPointerBias
+        NULL,   // NewObject
+        NULL    // Handle
     );
 
     if (!VEA_SUCCESS(Status))
@@ -218,6 +221,7 @@ VkCreateSymlinkCCS(VOID)
     RtlInitAnsiString(&LinkPath, "/REGISTRY/MACHINE/SYSTEM/CurrentControlSet");
     RtlZeroMemory(&ObjAttr, sizeof(OBJECT_ATTRIBUTES));
     ObjAttr.ObjectName = &LinkPath;
+    ObjAttr.Attributes = OBJ_PERMANENT;
 
     // 2. Buat Volatile Key
     Status = VeaCreateKey(&LinkHandle, KEY_ALL_ACCESS, &ObjAttr, 0, NULL,
@@ -225,7 +229,7 @@ VkCreateSymlinkCCS(VOID)
     
     if(!VEA_SUCCESS(Status))
     {
-        KdPrintf("[Vk] ERROR | Failed to create Key.\n");
+        DPRINT("Failed to create CCS Volatile Key: 0x%x\n", Status);
         return;
     }
 
@@ -248,17 +252,23 @@ VkCreateSymlinkCCS(VOID)
             KdPrintf("[Vk] INVALID HANDLE: 0x%x\n", LinkHandle);
         }
 
-        //VeaClose(LinkHandle);
+        VeaClose(LinkHandle);
         return;
     }
 
     // -------------------------------------------------------------------------
     // 4. BARU PASANG FLAG KEY_DIR_SYMLINK SETELAH VALUE TERPASANG
     // -------------------------------------------------------------------------
-    ObReferenceObjectByHandle(CurrentProcess->ObjectTable, LinkHandle, 0x10000, VkKeyObjectType, KernelMode, (PVOID*)&LinkKeyObject);
-    if(!LinkKeyObject)
+    Status = ObReferenceObjectByHandle(
+        LinkHandle,
+        0x10000,
+        VkKeyObjectType,
+        KernelMode,
+        (PVOID*)&LinkKeyObject
+    );
+    if (!VEA_SUCCESS(Status))
     {
-        KdPrintf("[Vk] ERROR | Failed to flagging key at %Z.\n", &TargetPath);
+        KdPrintf("[Vk] ERROR | Failed to flagging key at %Z. Status: %x\n", &TargetPath, Status);
         return;
     }
 
@@ -269,7 +279,7 @@ VkCreateSymlinkCCS(VOID)
     VkpMarkCellDirty(LinkKeyObject->HiveBase, LinkKeyObject->KeyOffset);
 
     ObDereferenceObject(LinkKeyObject);
-    //VeaClose(LinkHandle);
+    VeaClose(LinkHandle);
 }
 
 BOOLEAN
@@ -301,24 +311,31 @@ VkInitSystem1(IN PBLOCK_BOOT_2 BlockBoot)
     // Make our Object Directory
     OBJECT_ATTRIBUTES DirectoryAttributes;
     ANSI_STRING DirectoryName;
+    HANDLE DirHandle;
 
     RtlZeroMemory(&DirectoryAttributes, sizeof(OBJECT_ATTRIBUTES));
     RtlInitAnsiString(&DirectoryName, "/REGISTRY");
     DirectoryAttributes.ObjectName = &DirectoryName;
-    Status = VeaCreateDirectoryNamespace(&DirectoryAttributes);
+    DirectoryAttributes.Attributes |= OBJ_PERMANENT;
+    Status = VeaCreateDirectoryNamespace(DirHandle, 0x10000, &DirectoryAttributes);
     if(!VEA_SUCCESS(Status))
     {
         return FALSE;
     }
 
+    VeaClose(DirHandle);
+
     RtlZeroMemory(&DirectoryAttributes, sizeof(OBJECT_ATTRIBUTES));
     RtlInitAnsiString(&DirectoryName, "/REGISTRY/MACHINE");
     DirectoryAttributes.ObjectName = &DirectoryName;
-    Status = VeaCreateDirectoryNamespace(&DirectoryAttributes);
+    DirectoryAttributes.Attributes |= OBJ_PERMANENT;
+    Status = VeaCreateDirectoryNamespace(DirHandle, 0x10000, &DirectoryAttributes);
     if(!VEA_SUCCESS(Status))
     {
         return FALSE;
     }
+
+    VeaClose(DirHandle);
 
     // We need to initialize our System HIVE
     if(BlockBoot->SystemHiveBase && BlockBoot->SystemHiveLength > 0)
@@ -348,3 +365,317 @@ VkInitSystemPhase1(VOID)
 
     return TRUE;
 }
+
+static
+ULONG
+VkpGetGroupOrderIndex(
+    IN PCHAR GroupListBuffer,
+    IN ULONG GroupListSize,
+    IN PCHAR DriverGroup
+)
+{
+    if (!GroupListBuffer || GroupListSize == 0 || !DriverGroup || DriverGroup[0] == '\0')
+    {
+        return 0xFFFFFFFF;
+    }
+
+    PCHAR Cursor = GroupListBuffer;
+    PCHAR End = GroupListBuffer + GroupListSize;
+    ULONG Index = 0;
+
+    while (Cursor < End && *Cursor != '\0')
+    {
+        ULONG SubLen = (ULONG)RtlRawStringLength(Cursor);
+        
+        if (RtlRawStringCompareN(Cursor, DriverGroup, SubLen) == 0 &&
+            DriverGroup[SubLen] == '\0')
+        {
+            return Index;
+        }
+
+        Cursor += SubLen + 1;
+        Index++;
+    }
+
+    return 0xFFFFFFFF;
+}
+
+PANSI_STRING*
+VEAPI
+VkGetSystemDriverList(VOID)
+{
+    HANDLE ServicesHandle = NULL;
+    HANDLE GroupOrderHandle = NULL;
+    OBJECT_ATTRIBUTES ObjAttr;
+    ANSI_STRING ServicesPath, GroupOrderPath;
+    PVK_KEY_OBJECT ServicesKeyObject = NULL;
+    PVK_HIVE Hive;
+    PKEY_DIRECTORY_NODE ServicesNode;
+    ANSI_STRING StartValueName, GroupValueName;
+    PANSI_STRING *DriverList = NULL;
+    PVK_DRIVER_ORDER_ENTRY DriverEntries = NULL;
+    ULONG ServiceOffset;
+    ULONG DriverCount = 0;
+    ULONG Index = 0;
+    VEASTATUS Status;
+
+    CHAR GroupListBuffer[1024];
+    ULONG GroupListSize = 0;
+
+    RtlZeroMemory(GroupListBuffer, sizeof(GroupListBuffer));
+    RtlInitAnsiString(&GroupOrderPath, "/REGISTRY/MACHINE/SYSTEM/CurrentControlSet/Control/ServiceGroupOrder");
+    RtlZeroMemory(&ObjAttr, sizeof(OBJECT_ATTRIBUTES));
+    ObjAttr.ObjectName = &GroupOrderPath;
+
+    Status = ObOpenObjectByName(&ObjAttr, VkKeyObjectType, KernelMode, KEY_READ_ACCESS, NULL, &GroupOrderHandle);
+    if (VEA_SUCCESS(Status))
+    {
+        ANSI_STRING ListValName;
+        ULONG Type = 0;
+        RtlInitAnsiString(&ListValName, "List");
+
+        VeaQueryValueKey(
+            GroupOrderHandle,
+            &ListValName,
+            &Type,
+            GroupListBuffer,
+            sizeof(GroupListBuffer),
+            &GroupListSize
+        );
+
+        ObCloseHandle(GroupOrderHandle, KernelMode);
+    }
+
+    RtlInitAnsiString(&ServicesPath, "/REGISTRY/MACHINE/SYSTEM/CurrentControlSet/Services");
+    RtlZeroMemory(&ObjAttr, sizeof(OBJECT_ATTRIBUTES));
+    ObjAttr.ObjectName = &ServicesPath;
+
+    Status = ObOpenObjectByName(&ObjAttr, VkKeyObjectType, KernelMode, KEY_READ_ACCESS, NULL, &ServicesHandle);
+    if (!VEA_SUCCESS(Status))
+    {
+        KdPrintf("[Vk] ERROR | Failed to open Services key! Status: 0x%X\n", Status);
+        return NULL;
+    }
+
+    Status = ObReferenceObjectByHandle(
+        ServicesHandle,
+        KEY_READ_ACCESS,
+        VkKeyObjectType,
+        KernelMode,
+        (PVOID*)&ServicesKeyObject
+    );
+
+    if (!VEA_SUCCESS(Status))
+    {
+        ObCloseHandle(ServicesHandle, KernelMode);
+        return NULL;
+    }
+
+    Hive = ServicesKeyObject->HiveBase;
+    ServicesNode = ServicesKeyObject->KeyNode;
+
+    if (!ServicesNode || ServicesNode->Signature != KEY_DIR_SIG)
+    {
+        ObDereferenceObject(ServicesKeyObject);
+        ObCloseHandle(ServicesHandle, KernelMode);
+        return NULL;
+    }
+
+    RtlInitAnsiString(&StartValueName, "Start");
+    RtlInitAnsiString(&GroupValueName, "Group");
+
+    ServiceOffset = ServicesNode->FirstSubKeyOffset;
+
+    while (ServiceOffset != 0)
+    {
+        PKEY_FILE_NODE StartFileNode;
+        PKEY_DIRECTORY_NODE ServiceNode = (PKEY_DIRECTORY_NODE)VkpGetCellPointer(Hive, ServiceOffset);
+        if (!ServiceNode || ServiceNode->Signature != KEY_DIR_SIG) break;
+
+        StartFileNode = VkpFindValueNode(Hive, ServiceNode, &StartValueName, NULL);
+
+        if (StartFileNode && StartFileNode->Type == FILE_KEY_DWORD)
+        {
+            ULONG StartType = 0;
+            if ((StartFileNode->Flags & KEY_FILE_INLINE) || StartFileNode->DataLength <= sizeof(ULONG))
+            {
+                StartType = StartFileNode->DataPOffset;
+            }
+            else
+            {
+                PUCHAR CellPtr = (PUCHAR)VkpGetCellPointer(Hive, StartFileNode->DataPOffset);
+                if (CellPtr) StartType = *(PULONG)(CellPtr + sizeof(LONG));
+            }
+
+            if (StartType == SERVICE_SYSTEM_START)
+            {
+                DriverCount++;
+            }
+        }
+
+        ServiceOffset = ServiceNode->NextSiblingOffset;
+    }
+
+    if (DriverCount == 0)
+    {
+        ObDereferenceObject(ServicesKeyObject);
+        ObCloseHandle(ServicesHandle, KernelMode);
+        return NULL;
+    }
+
+    DriverEntries = (PVK_DRIVER_ORDER_ENTRY)UlAllocatePoolWithTag(
+        NonPagedPool,
+        DriverCount * sizeof(VK_DRIVER_ORDER_ENTRY),
+        'VkDr'
+    );
+
+    if (!DriverEntries)
+    {
+        ObDereferenceObject(ServicesKeyObject);
+        ObCloseHandle(ServicesHandle, KernelMode);
+        return NULL;
+    }
+
+    RtlZeroMemory(DriverEntries, DriverCount * sizeof(VK_DRIVER_ORDER_ENTRY));
+
+    ServiceOffset = ServicesNode->FirstSubKeyOffset;
+    Index = 0;
+
+    while (ServiceOffset != 0 && Index < DriverCount)
+    {
+        PKEY_DIRECTORY_NODE ServiceNode = (PKEY_DIRECTORY_NODE)VkpGetCellPointer(Hive, ServiceOffset);
+        PKEY_FILE_NODE StartFileNode;
+
+        if (!ServiceNode || ServiceNode->Signature != KEY_DIR_SIG) break;
+
+        StartFileNode = VkpFindValueNode(Hive, ServiceNode, &StartValueName, NULL);
+
+        if (StartFileNode && StartFileNode->Type == FILE_KEY_DWORD)
+        {
+            ULONG StartType = 0;
+            if ((StartFileNode->Flags & KEY_FILE_INLINE) || StartFileNode->DataLength <= sizeof(ULONG))
+            {
+                StartType = StartFileNode->DataPOffset;
+            }
+            else
+            {
+                PUCHAR CellPtr = (PUCHAR)VkpGetCellPointer(Hive, StartFileNode->DataPOffset);
+                if (CellPtr) StartType = *(PULONG)(CellPtr + sizeof(LONG));
+            }
+
+            if (StartType == SERVICE_SYSTEM_START)
+            {
+                CHAR ServiceName[128];
+                CHAR DriverGroup[64];
+                USHORT NameLen = (ServiceNode->NameLength < 127) ? ServiceNode->NameLength : 127;
+                PKEY_FILE_NODE GroupNode;
+
+                RtlCopyMemory(ServiceName, ServiceNode->Name, NameLen);
+                ServiceName[NameLen] = '\0';
+
+                // Buat Full Registry Path
+                RtlStringCbPrintfA(
+                    DriverEntries[Index].RegistryPath,
+                    sizeof(DriverEntries[Index].RegistryPath),
+                    "/REGISTRY/MACHINE/SYSTEM/CurrentControlSet/Services/%s",
+                    ServiceName
+                );
+
+                // Baca value Group jika ada
+                RtlZeroMemory(DriverGroup, sizeof(DriverGroup));
+                GroupNode = VkpFindValueNode(Hive, ServiceNode, &GroupValueName, NULL);
+
+                if (GroupNode && GroupNode->DataLength > 0)
+                {
+                    PVOID DataPtr = NULL;
+                    if ((GroupNode->Flags & KEY_FILE_INLINE) || GroupNode->DataLength <= sizeof(ULONG))
+                    {
+                        DataPtr = &GroupNode->DataPOffset;
+                    }
+                    else
+                    {
+                        PUCHAR CellPtr = (PUCHAR)VkpGetCellPointer(Hive, GroupNode->DataPOffset);
+                        if (CellPtr) DataPtr = (PVOID)(CellPtr + sizeof(LONG));
+                    }
+
+                    if (DataPtr)
+                    {
+                        USHORT GroupLen = (GroupNode->DataLength < 63) ? (USHORT)GroupNode->DataLength : 63;
+                        RtlCopyMemory(DriverGroup, DataPtr, GroupLen);
+                        DriverGroup[GroupLen] = '\0';
+                    }
+                }
+
+                // Cari GroupIndex berdasarkan ServiceGroupOrder\List
+                DriverEntries[Index].GroupIndex = VkpGetGroupOrderIndex(
+                    GroupListBuffer,
+                    GroupListSize,
+                    DriverGroup
+                );
+
+                Index++;
+            }
+        }
+
+        ServiceOffset = ServiceNode->NextSiblingOffset;
+    }
+
+    ObDereferenceObject(ServicesKeyObject);
+    ObCloseHandle(ServicesHandle, KernelMode);
+
+    for (ULONG i = 0; i < DriverCount - 1; i++)
+    {
+        for (ULONG j = i + 1; j < DriverCount; j++)
+        {
+            if (DriverEntries[i].GroupIndex > DriverEntries[j].GroupIndex)
+            {
+                VK_DRIVER_ORDER_ENTRY Temp = DriverEntries[i];
+                DriverEntries[i] = DriverEntries[j];
+                DriverEntries[j] = Temp;
+            }
+        }
+    }
+
+    DriverList = (PANSI_STRING*)UlAllocatePoolWithTag(
+        NonPagedPool,
+        (DriverCount + 1) * sizeof(PANSI_STRING),
+        'VkDr'
+    );
+
+    if (!DriverList)
+    {
+        UlFreePoolWithTag(DriverEntries, 'VkDr');
+        return NULL;
+    }
+
+    RtlZeroMemory(DriverList, (DriverCount + 1) * sizeof(PANSI_STRING));
+
+    for (ULONG i = 0; i < DriverCount; i++)
+    {
+        ULONG PathLen = (ULONG)RtlRawStringLength(DriverEntries[i].RegistryPath);
+
+        PANSI_STRING AnsiStr = (PANSI_STRING)UlAllocatePoolWithTag(
+            NonPagedPool,
+            sizeof(ANSI_STRING) + PathLen + 1,
+            'VkDr'
+        );
+
+        if (AnsiStr)
+        {
+            AnsiStr->Buffer = (PCHAR)(AnsiStr + 1);
+            AnsiStr->Length = (USHORT)PathLen;
+            AnsiStr->MaximumLength = (USHORT)(PathLen + 1);
+            RtlCopyMemory(AnsiStr->Buffer, DriverEntries[i].RegistryPath, PathLen);
+            AnsiStr->Buffer[PathLen] = '\0';
+
+            DriverList[i] = AnsiStr;
+        }
+    }
+
+    // Bebaskan buffer temporary sorting
+    UlFreePoolWithTag(DriverEntries, 'VkDr');
+
+    return DriverList;
+}
+
+/* EOF */

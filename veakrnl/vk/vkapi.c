@@ -15,6 +15,70 @@
  * REVISION   : Creating file vkapi.c
  * --------------------------------------------------------------------- */
 
+VOID
+VEAPI
+VkpDumpKeyRecursive(
+    IN PVK_HIVE Hive,
+    IN ULONG DirOffset,
+    IN ULONG DepthLevel
+);
+
+/*
+ * Open an existing VeaKey object and return a process handle for it.
+ */
+VEASTATUS
+VEAPI
+VeaOpenVeaKey(
+    OUT PHANDLE KeyHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes
+)
+{
+    PEPROCESS Process;
+    PHANDLE_TABLE HandleTable;
+    PVOID RootObject = NULL;
+    OBJECT_ATTRIBUTES OpenAttributes;
+    VEASTATUS Status;
+
+    /* Validate the output and object-name arguments first. */
+    if (!KeyHandle || !ObjectAttributes || !ObjectAttributes->ObjectName ||
+        !ObjectAttributes->ObjectName->Buffer ||
+        ObjectAttributes->ObjectName->Length == 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *KeyHandle = NULL;
+
+    RtlCopyMemory(&OpenAttributes, ObjectAttributes, sizeof(OBJECT_ATTRIBUTES));
+
+    /* OBJECT_ATTRIBUTES stores a parent object pointer internally, while
+       this public VeaKey API receives a parent handle from the caller. */
+    if (ObjectAttributes->RootDirectory != NULL)
+    {
+        OpenAttributes.RootDirectory = ObjectAttributes->RootDirectory;
+    }
+
+    /* Use the object manager lookup path so this operation never creates a
+       missing key and returns STATUS_OBJECT_NAME_NOT_FOUND instead. */
+    Status = ObOpenObjectByName(
+        &OpenAttributes,
+        VkKeyObjectType,
+        KernelMode,
+        DesiredAccess,
+        NULL,
+        KeyHandle
+    );
+
+    /* Drop the temporary parent reference after lookup has completed. */
+    if (RootObject != NULL)
+    {
+        ObDereferenceObject(RootObject);
+    }
+
+    return Status;
+}
+
 VEASTATUS
 VEAPI
 VeaQueryValueKey(
@@ -28,11 +92,8 @@ VeaQueryValueKey(
 {
     PVK_KEY_OBJECT KeyObject = NULL;
     VEASTATUS Status;
-    PEPROCESS CurrentProcess = (PEPROCESS)PtGetCurrentProcess();
-    PHANDLE_TABLE HandleTable = CurrentProcess->ObjectTable;
 
     Status = ObReferenceObjectByHandle(
-        HandleTable,
         KeyHandle,
         KEY_QUERY_VALUE,
         VkKeyObjectType,
@@ -51,232 +112,68 @@ VeaQueryValueKey(
     return Status;
 }
 
-//
-// to print indent
-//
-VOID
+VEASTATUS
 VEAPI
-VkpPrintIndent(
-    IN ULONG Level
+VeaQueryKeyPath(
+    IN HANDLE KeyHandle,
+    OUT PANSI_STRING KeyPath
 )
 {
-    for (ULONG i = 0; i < Level; i++)
-    {
-        KdPrintf("  "); // 2 spasi per level
-    }
-}
+    PVK_KEY_OBJECT KeyObject = NULL;
+    PEPROCESS CurrentProcess;
+    VEASTATUS Status;
 
-//
-// Routine to dump
-//
-VOID
-VEAPI
-VkpPrintValueData(
-    IN PVK_HIVE Hive,
-    IN PKEY_FILE_NODE ValNode,
-    IN ULONG DepthLevel
-)
-{
-    if (ValNode->DataLength == 0)
+    if (!KeyPath)
     {
-        KdPrintf(" = (empty)\n");
-        return;
+        return STATUS_INVALID_PARAMETER;
     }
 
-    PVOID DataPtr = NULL;
-
-    // -------------------------------------------------------------------------
-    // 1. CEK INLINE VS OUT-OF-LINE DATA
-    // -------------------------------------------------------------------------
-    if ((ValNode->Flags & KEY_FILE_INLINE) || ValNode->DataLength <= sizeof(ULONG))
+    CurrentProcess = (PEPROCESS)PtGetCurrentProcess();
+    if (!CurrentProcess || !CurrentProcess->ObjectTable)
     {
-        // Inline Data: Data tersimpan langsung di dalam field DataPOffset
-        DataPtr = &ValNode->DataPOffset;
-    }
-    else
-    {
-        // Out-of-line Data: DataPOffset adalah Cell Offset
-        PUCHAR CellPtr = (PUCHAR)VkpGetCellPointer(Hive, ValNode->DataPOffset);
-        if (!CellPtr)
-        {
-            KdPrintf(" = <!DATA CELL INVALID! Off: 0x%X>\n", ValNode->DataPOffset);
-            return;
-        }
-
-        // LEWATI 4 BYTE Header CellSize (sizeof(LONG))!
-        DataPtr = (PVOID)(CellPtr + sizeof(LONG));
+        return STATUS_INVALID_HANDLE;
     }
 
-    // -------------------------------------------------------------------------
-    // 2. PRINT SESUAI TIPE DATA
-    // -------------------------------------------------------------------------
-    switch (ValNode->Type)
+    Status = ObReferenceObjectByHandle(
+        KeyHandle,
+        KEY_QUERY_VALUE,
+        VkKeyObjectType,
+        KernelMode,
+        (PVOID)&KeyObject
+    );
+
+    if (!VEA_SUCCESS(Status))
     {
-        case FILE_KEY_STRING:
-        case FILE_KEY_EXPAND_STRING:
-        case FILE_KEY_LINK:
-        {
-            CHAR StrBuf[256];
-            USHORT Len = (ValNode->DataLength < 255) ? (USHORT)ValNode->DataLength : 255;
-            RtlCopyMemory(StrBuf, DataPtr, Len);
-            StrBuf[Len] = '\0';
-            KdPrintf(" = \"%s\"\n", StrBuf);
-            break;
-        }
-
-        case FILE_KEY_DWORD:
-        {
-            ULONG Val = *(PULONG)DataPtr;
-            KdPrintf(" = 0x%X (%u)\n", Val, Val);
-            break;
-        }
-
-        case FILE_KEY_QWORD:
-        {
-            ULONGLONG Val = *(PULONGLONG)DataPtr;
-            KdPrintf(" = 0x%X\n", Val);
-            break;
-        }
-
-        case FILE_KEY_BOOLEAN:
-        {
-            UCHAR Val = *(PUCHAR)DataPtr;
-            KdPrintf(" = %s\n", Val ? "TRUE" : "FALSE");
-            break;
-        }
-
-        case FILE_KEY_MULTI_STRING:
-        {
-            KdPrintf("\n");
-            PUCHAR Cursor = (PUCHAR)DataPtr;
-            PUCHAR End = Cursor + ValNode->DataLength;
-
-            while (Cursor < End && *Cursor != '\0')
-            {
-                CHAR SubStr[128];
-                ULONG SubLen = 0;
-                while (Cursor + SubLen < End && Cursor[SubLen] != '\0' && SubLen < 127)
-                {
-                    SubLen++;
-                }
-                RtlCopyMemory(SubStr, Cursor, SubLen);
-                SubStr[SubLen] = '\0';
-
-                VkpPrintIndent(DepthLevel + 2);
-                KdPrintf("* \"%s\"\n", SubStr);
-
-                Cursor += SubLen + 1;
-            }
-            break;
-        }
-
-        case FILE_KEY_BINARY:
-        case FILE_KEY_GUID:
-        default:
-        {
-            KdPrintf(" = ");
-            PUCHAR Bytes = (PUCHAR)DataPtr;
-            ULONG PrintLen = (ValNode->DataLength < 16) ? ValNode->DataLength : 16;
-
-            for (ULONG i = 0; i < PrintLen; i++)
-            {
-                KdPrintf("%X ", Bytes[i]);
-            }
-            if (ValNode->DataLength > 16)
-            {
-                KdPrintf("... (+%u bytes)", ValNode->DataLength - 16);
-            }
-            KdPrintf("\n");
-            break;
-        }
-    }
-}
-
-VOID
-VEAPI
-VkpDumpKeyRecursive(
-    IN PVK_HIVE Hive,
-    IN ULONG DirOffset,
-    IN ULONG DepthLevel
-)
-{
-    if (!Hive || DirOffset == 0) return;
-
-    PKEY_DIRECTORY_NODE DirNode = (PKEY_DIRECTORY_NODE)VkpGetCellPointer(Hive, DirOffset);
-
-    if (!DirNode || DirNode->Signature != KEY_DIR_SIG)
-    {
-        VkpPrintIndent(DepthLevel);
-        KdPrintf("[!] ERROR | Corrupted Directory Cell at Offset 0x%X\n", DirOffset);
-        return;
+        return Status;
     }
 
-    // -------------------------------------------------------------------------
-    // 1. COPY & NULL-TERMINATE DIRECTORY NAME
-    // -------------------------------------------------------------------------
-    CHAR DirName[256];
-    USHORT DirNameLen = (DirNode->NameLength < 255) ? DirNode->NameLength : 255;
-    RtlCopyMemory(DirName, DirNode->Name, DirNameLen);
-    DirName[DirNameLen] = '\0'; // Paksa kasih Null-Terminator!
-
-    // PRINT DIRECTORY KEY ('DN')
-    // Urutan specifier (%s, %u, 0x%X, 0x%X) disesuaikan persis dengan argumennya!
-    VkpPrintIndent(DepthLevel);
-    KdPrintf("+ [%s]%s (Subkeys: %u, Flags: 0x%X, Off: 0x%X)\n", 
-             DirName, 
-            (DirNode->Flags & KEY_DIR_SYMLINK) ? " -> SYMLINK" : "",
-             DirNode->SubKeyCount,
-             DirNode->Flags,
-             DirOffset);
-
-    // -------------------------------------------------------------------------
-    // 2. DUMP VALUES ('FN')
-    // -------------------------------------------------------------------------
-    ULONG ValOffset = DirNode->FirstValueOffset;
-    while (ValOffset != 0)
+    Status = VkpInitializeKeyObjectPath(KeyObject);
+    if (VEA_SUCCESS(Status))
     {
-        PKEY_FILE_NODE ValNode = (PKEY_FILE_NODE)VkpGetCellPointer(Hive, ValOffset);
+        ULONG RequiredLength = KeyObject->FullKeyPath.Length + 1;
 
-        if (!ValNode || ValNode->Signature != KEY_FILE_SIG)
+        /* Check KeyPath maximum length is big enough */
+        if (!KeyPath->Buffer || KeyPath->MaximumLength < RequiredLength)
         {
-            VkpPrintIndent(DepthLevel + 1);
-            KdPrintf("[!] ERROR | Corrupted Value Cell at Offset 0x%X\n", ValOffset);
-            break;
+            /* Report text length; caller must add one byte for '\0'. */
+            KeyPath->Length = KeyObject->FullKeyPath.Length;
+            KeyPath->MaximumLength = (USHORT)RequiredLength;
+            ObDereferenceObject(KeyObject);
+            return STATUS_BUFFER_TOO_SMALL;
         }
 
-        // COPY & NULL-TERMINATE VALUE NAME
-        CHAR ValName[256];
-        USHORT ValNameLen = (ValNode->NameLength < 255) ? ValNode->NameLength : 255;
-        RtlCopyMemory(ValName, ValNode->Name, ValNameLen);
-        ValName[ValNameLen] = '\0'; // Paksa kasih Null-Terminator!
-
-        VkpPrintIndent(DepthLevel + 1);
-        KdPrintf("  - %s [Type: %u, Size: %u Bytes] ",
-                 ValName,
-                 ValNode->Type,
-                 ValNode->DataLength);
-
-        VkpPrintValueData(Hive, ValNode, DepthLevel);
-
-        ValOffset = ValNode->NextValueOffset;
+        /* Copy it */
+        RtlCopyMemory(
+            KeyPath->Buffer,
+            KeyObject->FullKeyPath.Buffer,
+            KeyObject->FullKeyPath.Length
+        );
+        KeyPath->Buffer[KeyObject->FullKeyPath.Length] = '\0';
+        KeyPath->Length = KeyObject->FullKeyPath.Length;
     }
 
-    // -------------------------------------------------------------------------
-    // 3. DUMP SUBKEYS RECURSIVE
-    // -------------------------------------------------------------------------
-    ULONG ChildOffset = DirNode->FirstSubKeyOffset;
-    while (ChildOffset != 0)
-    {
-        VkpDumpKeyRecursive(Hive, ChildOffset, DepthLevel + 1);
-
-        PKEY_DIRECTORY_NODE ChildNode = (PKEY_DIRECTORY_NODE)VkpGetCellPointer(Hive, ChildOffset);
-        if (!ChildNode || ChildNode->Signature != KEY_DIR_SIG)
-        {
-            break; 
-        }
-
-        ChildOffset = ChildNode->NextSiblingOffset;
-    }
+    ObDereferenceObject(KeyObject);
+    return Status;
 }
 
 VEASTATUS
@@ -290,10 +187,7 @@ VeaDumpKdPrint(
 
     // 1. Resolve Handle dari User Mode / Kernel Mode ke Object Manager
     // **FIXME
-    PEPROCESS Process = (PEPROCESS)PtGetCurrentProcess();
-    PHANDLE_TABLE Table = Process->ObjectTable;
     Status = ObReferenceObjectByHandle(
-        Table,
         KeyHandle,               
         KEY_READ_ACCESS,        // Expected Object Type
         VkKeyObjectType,    // Validate UserMode / KernelMode Boundary
@@ -476,8 +370,9 @@ VeaCreateKey(
 )
 {
     VEASTATUS Status;
-    PEPROCESS Process = (PEPROCESS)PtGetCurrentProcess();
-    PHANDLE_TABLE Table = Process->ObjectTable;
+
+    UNREFERENCED_PARAMETER(TitleIndex);
+    UNREFERENCED_PARAMETER(Class);
 
     if (!KeyHandle || !ObjectAttributes || !ObjectAttributes->ObjectName)
     {
@@ -525,12 +420,11 @@ VeaCreateKey(
 
     PVK_KEY_OBJECT ParentKeyObject = NULL;
     HANDLE ParentHandle = ObjectAttributes->RootDirectory;
-    BOOLEAN ParentIsBorrowed = FALSE;
+    HANDLE OpenedParentHandle = NULL; // Untuk melacak handle temporary agar bisa ditutup
 
     if (ParentHandle != NULL)
     {
         Status = ObReferenceObjectByHandle(
-            Table,
             ParentHandle,
             0x10000,
             VkKeyObjectType,
@@ -542,8 +436,6 @@ VeaCreateKey(
         {
             return Status;
         }
-
-        ParentIsBorrowed = TRUE;
     }
     else
     {
@@ -580,22 +472,22 @@ VeaCreateKey(
             ParentObjAttr.RootDirectory = NULL;
 
             Status = ObOpenObjectByName(
-                Table,
                 &ParentObjAttr,
                 VkKeyObjectType,
                 KernelMode,
                 KEY_CREATE_SUB_KEY,
-                &ParentHandle
+                NULL,
+                &OpenedParentHandle
             );
 
             if (!VEA_SUCCESS(Status))
             {
+                DPRINT("VeaCreateKey: ObOpenObjectByName failed: 0x%x\n", Status);
                 return Status;
             }
 
             Status = ObReferenceObjectByHandle(
-                Table,
-                ParentHandle,
+                OpenedParentHandle,
                 0x10000,
                 VkKeyObjectType,
                 KernelMode,
@@ -604,6 +496,8 @@ VeaCreateKey(
 
             if (!VEA_SUCCESS(Status))
             {
+                DPRINT("VeaCreateKey: ObReferenceObjectByHandle failed: 0x%x\n", Status);
+                ObCloseHandle(OpenedParentHandle, KernelMode);
                 return Status;
             }
         }
@@ -653,6 +547,7 @@ VeaCreateKey(
             if (LeafNameLen >= sizeof(LeafNameBuf))
             {
                 ObDereferenceObject(ParentKeyObject);
+                if (OpenedParentHandle) ObCloseHandle(OpenedParentHandle, KernelMode);
                 return STATUS_NAME_TOO_LONG;
             }
 
@@ -668,20 +563,38 @@ VeaCreateKey(
             {
                 if (CreateOptions & REG_OPTION_VOLATILE)
                 {
-                    Status = VkpAttachVolatileSubkey(Hive, ParentOffset, &LeafNameStr, &TargetSubkeyOffset);
+                    Status = VkpAttachVolatileSubkey(
+                        Hive, 
+                        ParentOffset, 
+                        &LeafNameStr, 
+                        &TargetSubkeyOffset
+                    );
                 }
                 else
                 {
-                    Status = VkpAttachStableSubkey(Hive, ParentOffset, &LeafNameStr, &TargetSubkeyOffset);
+                    Status = VkpAttachStableSubkey(
+                        Hive, 
+                        ParentOffset, 
+                        &LeafNameStr, 
+                        &TargetSubkeyOffset
+                    );
                 }
 
-                if (!VEA_SUCCESS(Status))
+                if (Status == STATUS_OBJECT_NAME_COLLISION)
+                {
+                    Status = STATUS_SUCCESS;
+                    IsNewKeyCreated = FALSE;
+                }
+                else if (!VEA_SUCCESS(Status))
                 {
                     ObDereferenceObject(ParentKeyObject);
+                    if (OpenedParentHandle) ObCloseHandle(OpenedParentHandle, KernelMode);
                     return Status;
                 }
-
-                IsNewKeyCreated = TRUE;
+                else
+                {
+                    IsNewKeyCreated = TRUE;
+                }
             }
             else
             {
@@ -697,10 +610,17 @@ VeaCreateKey(
     if (!VEA_SUCCESS(Status))
     {
         ObDereferenceObject(ParentKeyObject);
+        if (OpenedParentHandle) ObCloseHandle(OpenedParentHandle, KernelMode);
         return Status;
     }
 
+    // Lepas parent dereference & tutup handle parent sementara jika ada
     ObDereferenceObject(ParentKeyObject);
+    if (OpenedParentHandle)
+    {
+        ObCloseHandle(OpenedParentHandle, KernelMode);
+        OpenedParentHandle = NULL;
+    }
 
     PKEY_DIRECTORY_NODE TargetDirNode = (PKEY_DIRECTORY_NODE)VkpGetCellPointer(Hive, TargetSubkeyOffset);
     PVK_KEY_OBJECT TargetKeyObject = NULL;
@@ -714,7 +634,7 @@ VeaCreateKey(
         sizeof(VK_KEY_OBJECT),
         0,
         0,
-        (PVOID)&TargetKeyObject
+        (PVOID*)&TargetKeyObject
     );
 
     if (!VEA_SUCCESS(Status))
@@ -727,15 +647,27 @@ VeaCreateKey(
     TargetKeyObject->KeyNode   = TargetDirNode;
     TargetKeyObject->KeyOffset = TargetSubkeyOffset;
 
-    Status = ObInsertObject((PVOID)TargetKeyObject, NULL);
+    Status = VkpInitializeKeyObjectPath(TargetKeyObject);
     if (!VEA_SUCCESS(Status))
     {
+        ObDereferenceObject(TargetKeyObject);
         return Status;
     }
 
-    if (KeyHandle != NULL)
+    // Panggil ObInsertObject versi baru (6 parameter)
+    // Parameter DesiredAccess & KeyHandle langsung dikirim ke ObInsertObject
+    Status = ObInsertObject(
+        TargetKeyObject,
+        NULL,           // AccessState
+        DesiredAccess,  // DesiredAccess
+        0,              // ObjectPointerBias
+        NULL,           // NewObject
+        KeyHandle       // Target handle dikembalikan langsung via ObInsertObject
+    );
+
+    if (!VEA_SUCCESS(Status))
     {
-        *KeyHandle = UlCreateHandle(Table, TargetKeyObject, KEY_ALL_ACCESS);
+        return Status;
     }
 
     if (Disposition != NULL)
@@ -757,9 +689,6 @@ VeaSetValueKey(
     IN ULONG DataSize
 )
 {
-    PEPROCESS Process = (PEPROCESS)PtGetCurrentProcess();
-    PHANDLE_TABLE Table = Process->ObjectTable;
-
     if (!KeyHandle || !ValueName || !ValueName->Buffer)
     {
         return STATUS_INVALID_PARAMETER;
@@ -770,7 +699,6 @@ VeaSetValueKey(
     // =========================================================================
     PVK_KEY_OBJECT KeyObject = NULL;
     VEASTATUS Status = ObReferenceObjectByHandle(
-        Table,
         KeyHandle,
         KEY_SET_VALUE,
         VkKeyObjectType,
@@ -791,35 +719,64 @@ VeaSetValueKey(
                          (TargetNode->Flags & KEY_DIR_VOLATILE)) ? TRUE : FALSE;
 
     // Check duplicate. after check, we should update data in place
-    PKEY_FILE_NODE ExistingFileNode = VkpFindValueNode(Hive, TargetNode, ValueName, NULL);
+    ULONG ExistingNodeOffset = 0;
+    PKEY_FILE_NODE ExistingFileNode =
+        VkpFindValueNode(Hive, TargetNode, ValueName, &ExistingNodeOffset);
 
     if (ExistingFileNode != NULL)
     {
-        // Update In Place logic
-        if (DataSize <= ExistingFileNode->DataLength && DataSize > 0 && Data != NULL)
+        BOOLEAN WasInline = (ExistingFileNode->Flags & KEY_FILE_INLINE) ||
+                            ExistingFileNode->DataLength <= sizeof(ULONG);
+
+        // (A) Data baru <= 4 byte: SELALU inline di DataPOffset
+        if (DataSize <= sizeof(ULONG))
         {
-            // Cukup di data cell lama (asalkan gak lebih gede) -> reuse
+            ULONG InlineData = 0;
+            if (Data != NULL && DataSize > 0)
+            {
+                RtlCopyMemory(&InlineData, Data, DataSize);
+            }
+            ExistingFileNode->DataPOffset = InlineData;
+            ExistingFileNode->DataLength  = DataSize;
+            ExistingFileNode->Type        = Type;
+            ExistingFileNode->Flags      |= KEY_FILE_INLINE;
+
+            VkpMarkCellDirty(Hive, ExistingNodeOffset);
+            ObDereferenceObject(KeyObject);
+            return STATUS_SUCCESS;
+        }
+
+        if (Data == NULL)
+        {
+            ObDereferenceObject(KeyObject);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        // (B) Data > 4 byte, value lama out-of-line dan cukup: timpa di tempat
+        if (!WasInline && DataSize <= ExistingFileNode->DataLength)
+        {
             PVOID ExistingDataCell = VkpGetCellPointer(Hive, ExistingFileNode->DataPOffset);
             if (ExistingDataCell)
             {
                 RtlCopyMemory((PUCHAR)ExistingDataCell + sizeof(LONG), Data, DataSize);
                 ExistingFileNode->DataLength = DataSize;
-                ExistingFileNode->Type = Type;
+                ExistingFileNode->Type       = Type;
+
+                VkpMarkCellDirty(Hive, ExistingFileNode->DataPOffset);
+                VkpMarkCellDirty(Hive, ExistingNodeOffset);
                 ObDereferenceObject(KeyObject);
                 return STATUS_SUCCESS;
             }
         }
 
-        // Data lebih gede dari cell lama (atau kondisi lain) -> alokasi cell data baru,
-        // tapi TETAP reuse FileNode yang sama (jangan bikin FileNode baru / jangan
-        // relink linked list)
-        ULONG NewDataOffset = 0;
-        if (DataSize > 0 && Data != NULL)
+        // (C) Butuh cell data baru
         {
+            ULONG NewDataOffset = 0;
             ULONG CellAllocSize = DataSize + sizeof(LONG);
             PVOID NewDataCell = IsVolatile
                 ? VkpAllocateVolatileCell(Hive, CellAllocSize, &NewDataOffset)
                 : VkpAllocateStableCell(Hive, CellAllocSize, &NewDataOffset);
+                
 
             if (!NewDataCell)
             {
@@ -827,17 +784,23 @@ VeaSetValueKey(
                 return STATUS_INSUFFICIENT_MEMORY;
             }
 
+            if (IsVolatile)
+            {
+                NewDataOffset = VkMakeVolatileOffset(NewDataOffset);   // <-- yang tadi hilang
+            }
+
             *(PLONG)NewDataCell = -(LONG)CellAllocSize;
             RtlCopyMemory((PUCHAR)NewDataCell + sizeof(LONG), Data, DataSize);
+
+            ExistingFileNode->DataPOffset = NewDataOffset;
+            ExistingFileNode->DataLength  = DataSize;
+            ExistingFileNode->Type        = Type;
+            ExistingFileNode->Flags      &= ~KEY_FILE_INLINE;
+
+            VkpMarkCellDirty(Hive, ExistingNodeOffset);
+            ObDereferenceObject(KeyObject);
+            return STATUS_SUCCESS;
         }
-
-        ExistingFileNode->DataPOffset = NewDataOffset;
-        ExistingFileNode->DataLength  = DataSize;
-        ExistingFileNode->Type        = Type;
-
-        VkpMarkCellDirty(Hive, KeyObject->KeyOffset);
-        ObDereferenceObject(KeyObject);
-        return STATUS_SUCCESS;
     }
 
     // =========================================================================
@@ -852,7 +815,6 @@ VeaSetValueKey(
         FileNode = (PKEY_FILE_NODE)VkpAllocateVolatileCell(Hive, NodeAllocationSize, &FileNodeOffset);
         if (FileNode != NULL)
         {
-            // PERBAIKAN: Ubah raw offset menjadi volatile offset (set MSB)
             FileNodeOffset = VkMakeVolatileOffset(FileNodeOffset);
         }
     }
@@ -867,21 +829,36 @@ VeaSetValueKey(
         return STATUS_INSUFFICIENT_MEMORY;
     }
 
-    // =========================================================================
-    // STEP 3: Alokasikan Cell untuk Payload Data (Jika Ada)
-    // =========================================================================
+    RtlZeroMemory(FileNode, NodeAllocationSize);      // <-- pindah ke sini
+
+    // STEP 3
     ULONG DataOffset = 0;
-    if (DataSize > 0 && Data != NULL)
+    ULONG InlineFlag = 0;
+
+    if (DataSize <= sizeof(ULONG))
     {
+        if (Data != NULL && DataSize > 0)
+        {
+            RtlCopyMemory(&DataOffset, Data, DataSize);
+        }
+        InlineFlag = KEY_FILE_INLINE;
+    }
+    else
+    {
+        if (Data == NULL)
+        {
+            ObDereferenceObject(KeyObject);
+            return STATUS_INVALID_PARAMETER;
+        }
+
         PVOID DataCellPtr = NULL;
-        ULONG CellAllocSize = DataSize + sizeof(LONG); // Reservasi 4 Byte Header
+        ULONG CellAllocSize = DataSize + sizeof(LONG);
 
         if (IsVolatile)
         {
             DataCellPtr = VkpAllocateVolatileCell(Hive, CellAllocSize, &DataOffset);
             if (DataCellPtr != NULL)
             {
-                // PERBAIKAN: Ubah raw offset menjadi volatile offset (set MSB)
                 DataOffset = VkMakeVolatileOffset(DataOffset);
             }
         }
@@ -896,22 +873,19 @@ VeaSetValueKey(
             return STATUS_INSUFFICIENT_MEMORY;
         }
 
-        // Set Cell Header (Negatif = Terpakai)
         *(PLONG)DataCellPtr = -(LONG)CellAllocSize;
         RtlCopyMemory((PUCHAR)DataCellPtr + sizeof(LONG), Data, DataSize);
     }
 
-    // =========================================================================
-    // STEP 4: Isi Field Struktur KEY_FILE_NODE
-    // =========================================================================
+    // STEP 4
     FileNode->CellSize        = -(LONG)NodeAllocationSize;
     FileNode->Signature       = KEY_FILE_SIG;
-    FileNode->NextValueOffset = 0;             // NULL offset (ujung list)
+    FileNode->NextValueOffset = 0;
     FileNode->NameLength      = ValueName->Length;
     FileNode->DataPOffset     = DataOffset;
     FileNode->DataLength      = DataSize;
     FileNode->Type            = Type;
-    FileNode->Flags           = IsVolatile ? KEY_FILE_VOLATILE : KEY_FILE_DEFAULT;
+    FileNode->Flags           = (IsVolatile ? KEY_FILE_VOLATILE : KEY_FILE_DEFAULT) | InlineFlag;
 
     // Copy string Nama File Node ke Flexible Array Member
     RtlCopyMemory(FileNode->Name, ValueName->Buffer, ValueName->Length);
@@ -955,3 +929,4 @@ VeaSetValueKey(
     ObDereferenceObject(KeyObject);
     return STATUS_SUCCESS;
 }
+
