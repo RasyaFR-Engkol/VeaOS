@@ -1,6 +1,8 @@
 #include <veakrnl.h>
 
 ULONG PtUniqueProcessId = 100;
+KSERVICE_TABLE_DESCRIPTOR KsServiceTableDescriptor[SSDT_MAX_ENTRIES];
+KSERVICE_TABLE_DESCRIPTOR KsServiceTableDescriptorShadow[SSDT_MAX_ENTRIES];
 
 static inline VOID PiSwapProcess(PKPROCESS TargetProcess) {
     ULONG_PTR DirectoryTableBase = TargetProcess->DirectoryTableBase; 

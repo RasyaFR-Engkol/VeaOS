@@ -105,29 +105,146 @@ UlParseBootArgument(PSTR BootArgument)
 
 VOID
 VEAPI
-VeaTestSoftwareException(VOID)
+TestSectionMaking(VOID)
 {
-    DPRINT("\n==================================================\n");
-    DPRINT("     TESTING SOFTWARE EXCEPTION INJECTION         \n");
-    DPRINT("==================================================\n");
+    PVOID SectionObject = NULL;
+    HANDLE SectionHandle = NULL;
+    VEASTATUS Status;
+    LARGE_INTEGER SectionSize;
+    OBJECT_ATTRIBUTES ObjAttr;
+    ANSI_STRING SectionName;
+
+    // Variable pendukung untuk MmMapViewOfSection
+    PVOID BaseAddress = NULL;
+    SIZE_T ViewSize = 0; // Diset 0 untuk uji coba Auto-Size Bounds calculation!
+
+    DPRINT("=== [VeaOS MM Test] Starting Section Full Lifecycle Test ===\n\r");
 
     _VEA_TRY
     {
-        DPRINT("[SW_EXCEPT] Inside _VEA_TRY block. Raising STATUS_INSUFFICIENT_MEMORY...\n");
+        SectionSize.QuadPart = 64 * 1024; // 64 KB
 
-        // Lempar Software Exception secara manual (tanpa CPU Crash!)
-        UlRaiseStatus(STATUS_INSUFFICIENT_MEMORY);
+        RtlInitAnsiString(&SectionName, "/Device/MyTestSection");
 
-        DPRINT("[ERROR] Unreachable code! ExRaiseStatus failed!\n");
+        InitializeObjectAttributes(
+            &ObjAttr,
+            &SectionName,
+            OBJ_CASE_INSENSITIVE,
+            NULL,
+            NULL
+        );
+
+        // 1. Create Section (PAGE_READWRITE)
+        Status = MmCreateSection(
+            &SectionObject,
+            SECTION_ALL_ACCESS,
+            &ObjAttr,
+            &SectionSize,
+            PAGE_READWRITE,
+            SEC_COMMIT,
+            NULL,
+            NULL
+        );
+
+        if (VEA_SUCCESS(Status) && SectionObject != NULL)
+        {
+            DPRINT("[PASS] Named Section created at 0x%08X\n\r", (ULONG)SectionObject);
+
+            // 2. Insert Object ke Object Tree
+            Status = ObInsertObject(
+                SectionObject,
+                NULL,
+                SECTION_ALL_ACCESS,
+                0,
+                NULL,
+                &SectionHandle
+            );
+
+            if (VEA_SUCCESS(Status))
+            {
+                DPRINT("[PASS] Section inserted into Object Tree! Handle: 0x%08X\n\r", (ULONG)SectionHandle);
+            }
+
+            // -----------------------------------------------------------------
+            // 3. MAP SECTION
+            // -----------------------------------------------------------------
+            Status = MmMapViewOfSection(
+                SectionObject,
+                (PEPROCESS)PtGetCurrentProcess(),
+                &BaseAddress,
+                0,
+                0,
+                NULL,          // Offset NULL -> Mulai dari byte 0
+                &ViewSize,     // ViewSize 0 -> Harus otomatis terisi 65536 bytes
+                ViewShare,
+                0,
+                PAGE_READWRITE
+            );
+
+            if (VEA_SUCCESS(Status) && BaseAddress != NULL)
+            {
+                DPRINT("[PASS] MmMapViewOfSection Succeeded!\n\r");
+                DPRINT("       Mapped Base VA : 0x%08X\n\r", (ULONG)BaseAddress);
+                DPRINT("       Auto View Size : %u bytes\n\r", (ULONG)ViewSize);
+
+                // -------------------------------------------------------------
+                // 4. TEST R/W SEBELUM UNMAP (HARUS SUKSES VIA DEMAND PAGING)
+                // -------------------------------------------------------------
+                PULONG TestPtr = (PULONG)BaseAddress;
+                *TestPtr = 0xCAFEBAB3;
+
+                if (*TestPtr == 0xCAFEBAB3)
+                {
+                    DPRINT("[PASS] Memory R/W Verified! Value 0xCAFEBAB3 read at VA 0x%08X\n\r", (ULONG)BaseAddress);
+                }
+
+                // -------------------------------------------------------------
+                // 5. UNMAP SECTION
+                // -------------------------------------------------------------
+                Status = MmUnmapViewOfSection((PEPROCESS)PtGetCurrentProcess(), BaseAddress);
+
+                if (VEA_SUCCESS(Status))
+                {
+                    DPRINT("[PASS] MmUnmapViewOfSection Succeeded!\n\r");
+
+                    // ---------------------------------------------------------
+                    // 6. TEST R/W SETELAH UNMAP (HARUS FAULT & DITANGKAP PSEH)
+                    // ---------------------------------------------------------
+                    DPRINT("[TEST] Accessing unmapped VA 0x%08X (Expecting Fault)...\n\r", (ULONG)BaseAddress);
+
+                    _VEA_TRY
+                    {
+                        // Akses ini harus memicu #PF.
+                        // Karena VAD sudah dihapus dan PTE di-invalidasi, MmAccessFault bakal return FALSE
+                        // dan exception ditangkap oleh _VEA_EXCEPT di bawah!
+                        *TestPtr = 0xDEADBEEF;
+
+                        DPRINT("[FAIL] Access to unmapped memory succeeded unexpectedly! Value: 0x%08X\n\r", *TestPtr);
+                    }
+                    _VEA_EXCEPT(1)
+                    {
+                        DPRINT("[PASS] Page Fault caught by PSEH as expected on unmapped memory 0x%08X!\n\r", (ULONG)BaseAddress);
+                    }
+                    _VEA_END
+                }
+                else
+                {
+                    DPRINT("[FAIL] MmUnmapViewOfSection failed! Status: 0x%08X\n\r", Status);
+                }
+            }
+            else
+            {
+                DPRINT("[FAIL] MmMapViewOfSection failed! Status: 0x%08X\n\r", Status);
+            }
+        }
     }
-    _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
+    _VEA_EXCEPT(1)
     {
-        DPRINT("[SW_EXCEPT] SUCCESS! Caught Software Exception in _VEA_EXCEPT!\n");
-        DPRINT("[SW_EXCEPT] Raised Status Code: 0x%X\n", GetExceptionCode());
+        DPRINT("[EXCEPT] Outer Fault caught during test!\n\r");
     }
-    _VEA_END;
+    _VEA_END
 
-    DPRINT("==================================================\n\n");
+    DPRINT("=== [VeaOS MM Test] Test Completed ===\n\r");
 }
 
 VOID
@@ -242,12 +359,12 @@ UlPhase1(VOID)
         KsBugCheckEx(IO1_INITIALIZATION_FAILED, 1, 0, 0, 0);
     }
 
+    TestSectionMaking();
+
     ObDumpObjectTree();
     ObioDumpDeviceTree();
 
     DPRINT("ObioInitSystem1 finished\n");
-
-    VeaTestSoftwareException();
 
     Loop:
     PtIdleLoop();

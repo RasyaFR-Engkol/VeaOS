@@ -1,12 +1,14 @@
 #include "internal/util.h"
 #include "ldrtypes.h"
 #include <veakrnl.h>
+#include "internal/sysapi.h"
 
 ULONG ks_cpu_count = 0;
 
 VOID ks_system_startup_boot_stack(PBLOCK_BOOT_2 block_boot);
 PBLOCK_BOOT_2 KsLoaderBlock = NULL;
 KPRCB KsProcessorBlock[MAX_CPU];
+ULONG KsiServiceLimit = NUMBER_OF_SYSCALLS;
 
 VOID
 VEAPI
@@ -22,6 +24,25 @@ KiInitSystem(VOID)
     /* DPC Stack is done allocated by our loader. Init LOCK and linked lsit */
     KsInitializeSpinlock(&CurrentPrcb->DpcLock);
     InitializeListHead(&CurrentPrcb->DpcListHead);
+
+    KsServiceTableDescriptor[0].Base = MainSSDT;
+    KsServiceTableDescriptor[0].Count = NULL;
+    KsServiceTableDescriptor[0].Limit = KsiServiceLimit;
+    KsServiceTableDescriptor[1].Limit = 0;
+    KsServiceTableDescriptor[0].Number = MainSSPT;
+
+    RtlCopyMemory(KsServiceTableDescriptor,
+                  KsServiceTableDescriptorShadow,
+                  sizeof(KsServiceTableDescriptor));
+
+    RmInitSyscall();
+}
+
+VOID
+VEAPI
+KsiInitMachineDependent(VOID)
+{
+
 }
 
 VOID
@@ -42,6 +63,9 @@ KsiInitializeKernel(
     // Daftarkan ke PRCB dan RunQueue
     Prcb->CurrentThread = (PKTHREAD)InitThread;
     PtRunQueue[Prcb->Number].CurrentThread = InitThread;
+
+    // Do Initialize Machine Dependent
+    KsiInitMachineDependent();
 
     // Init Upper Layer
     ul_initialize_layer(BlockBoot);
