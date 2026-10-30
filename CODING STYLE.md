@@ -32,14 +32,14 @@ Indentation must be used to clarify the hierarchy and readability of the source 
     Foo(VOID)
     {
     DoSomething();
-       OrIndentationLikeThisIsWrong();
-                   MustNotBeThisFarFromTheLevel();
+        OrIndentationLikeThisIsWrong();
+                    MustNotBeThisFarFromTheLevel();
     }
     ```
 
-*   **Brace Style:** Use *Allman Style*. Each brace `{` and `}` must have its own line.
+*   **Brace Style:** Both *Allman Style* and *K&R Style* are permitted. Choose one and keep it clean and consistent.
 
-    **Correct:**
+    **Allman Style (Allowed):**
     ```c
     VOID
     VEAPI
@@ -53,64 +53,71 @@ Indentation must be used to clarify the hierarchy and readability of the source 
     }
     ```
 
-    **Incorrect:**
+    **K&R Style (Allowed):**
     ```c
     VOID
     VEAPI
     Foo(VOID) {
-        // Linux style is strictly PROHIBITED
-        if (SOME){
-         // ^^ especially braces attached to parentheses
+        DoSomething();
+        if (Some) {
+            
         }
     }
     ```
 
-*   **Maximum Depth Level:** VeaOS strictly mandates a maximum of 4 indentation levels for any code function. If your code requires more than 4 levels of depth, immediately break the code down into helpers, reduce your function size, or improve the code logic.
+*   **Indentation Depth:** Avoid excessive indentation levels whenever possible. Deeply nested code quickly becomes confusing and hard to read—refactor into helper functions or simplify your logic if nesting gets out of hand.
 
 ---
 
 ## 2. Writing Style
 Proper writing makes the code much more comfortable to read.
 
-*   **PascalCase:** Every code element, from Variables to Functions (`typedef` variables must use `ALL_UPPERCASE`), must use `PascalCase` to make the code more comfortable to read and certainly to keep your keyboard from heating up too fast :p.
+*   **Naming Conventions:** Code elements (variables, parameters, functions) are flexible and can use **PascalCase**, **camelCase**, or **Hungarian / Prefixed Notation** (e.g., `hHandle`, `kScreen`, `pBuffer`). Keep it clean, readable, and consistent within your module (`typedef` names should still use `ALL_UPPERCASE`).
+
+    *Allowed Styles:*
+    1. `PascalCase` (e.g., `AkuCintaHatsuneMiku`)
+    2. `camelCase` (e.g., `akuCintaHatsuneMiku`)
+    3. `Hungarian / Prefixed Notation` (e.g., `hHandle`, `kScreen`, `pPointer`)
+
     *Styles to avoid:*
-    1. `camelCase`
-    2. `snake_case`
+    1. `snake_case` (e.g., `aku_cinta_hatsune_miku`)
 
     **Correct:**
     ```c
     VOID
     VEAPI
     AkuCintaHatsuneMiku(
-        IN INT Aku,
-        OUT INT Miku
+        IN HANDLE hHandle,
+        OUT INT kScreen
     )
     {
-        IniBaruBener(Aku, Miku);
+        INT localBufferCount = 0;
+        IniBaruBener(hHandle, kScreen);
     }
     ```
 
     **Incorrect:**
     ```c
-    void veapi aku_cinta_hatsune_miku(int aku, int miku)
+    void veapi aku_cinta_hatsune_miku(int h_handle, int k_screen)
     {
-        // Even though indentation and braces are correct, this is still prohibited
-        ini_salah(aku, miku)
+        // snake_case is strictly prohibited
+        ini_salah_banget(h_handle, k_screen);
     }
     ```
-
-*   **Variable Definition:** Variable definitions must be longer than 2 letters. And the Variable must have a clear name according to the initial purpose of why the Variable was created. Furthermore, it must follow `PascalCase`.
+*   **Variable Naming & Definition:** Variable names must be clear and descriptive, reflecting their actual purpose. Avoid meaningless 1-letter or 2-letter variable names (except for standard loop counters like `i` or `j`). Variables can follow **PascalCase**, **camelCase**, or **Hungarian / Prefixed Notation**.
 
     **Correct:**
     ```c
     BOOLEAN DidSend;
-    INT TotalSend;
+    INT totalSend;
+    BOOLEAN bDidSend;      // Allowed (Hungarian prefix + PascalCase)
+    HANDLE hAdapter;       // Allowed (Hungarian prefix + PascalCase)
     ```
 
     **Incorrect:**
     ```c
-    BOOLEAN A // <- PROHIBITED
-    BOOLEAN bA // <- STILL PROHIBITED EVEN IF 2 LETTERS DUE TO camelCase
+    BOOLEAN A;             // Prohibited (meaningless single-letter name)
+    INT total_send;        // Prohibited (snake_case is strictly forbidden)
     ```
 
 *   **Function Definition:** Function definitions also have their own written rules.
@@ -163,9 +170,9 @@ Proper writing makes the code much more comfortable to read.
     *Basic rules:*
     1. Use `//` for single line or multi-line.
     2. Or you can also use `/* COMMENT */`.
-    3. PROHIBITED from commenting out dead-code. If there is dead-code, DELETE IT! Do not leave it there.
+    3. Dead code may be kept, but make sure to tag it with FIXME or wrap it with #if 0 ... #endif.
     4. Every code block that serves a purpose within a function MUST be given a comment so that others know its intent. Ensure the comments are clear and do not raise many questions.
-    5. Do not repeat redundant comments that state the obvious.
+    5. Try to avoid redundant comments that state the obvious.
 
     **Correct:**
     ```c
@@ -206,29 +213,24 @@ Proper writing makes the code much more comfortable to read.
             return; // No explanation why the function immediately returns
         }
 
-        // ApicLapicBase[0] = 0; <-- PROHIBITED: Dead code left commented out! DELETE IT!
+        // ApicLapicBase[0] = 0; <- PUT FIXME or TODO
 
-        ULONG Sivr = ApicLapicBase[LAPIC_SIVR_OFFSET / 4]; // Get Sivr <-- PROHIBITED: Redundant comment/repeating what is obvious in the code
+        ULONG Sivr = ApicLapicBase[LAPIC_SIVR_OFFSET / 4]; // Get Sivr <-- AT LEAST AVOID THIS: Redundant comment/repeating what is obvious in the code
 
-        Sivr |= 0x100; // Set bit to 100 hex <-- Comment does not explain the PURPOSE (why is it set to 0x100?)
+        Sivr |= 0x100; // Set bit to 100 hex 
         ApicLapicBase[LAPIC_SIVR_OFFSET / 4] = Sivr;
 
-        // OldApicDisableLogic(); <-- PROHIBITED: Do not leave remnants of old test code
+        // OldApicDisableLogic(); <-- PROHIBITED: Do not leave remnants of old test code without TODO
     }
     ```
 
-*   **Pointer Style:** The correct pointer style is attached to the *Variable Name*.
+*   **Pointer Style:** Flexible formatting is allowed. The asterisk * can be attached to either the type name or the variable name, as long as it remains clear and readable.
 
-    **Correct:**
+    **Example: **
     ```c
-    VOID *Ajl;
-    PVOID *AhciInterruptRoutine;
-    ```
-
-    **Incorrect:**
-    ```c
-    VOID* AduhSalah; // <- WRONG
-    PVOID * HarusnyaSalah; // <- ALSO WRONG
+      VOID *Ajl;             // OK (Attached to variable)
+      VOID* Ajl;             // OK (Attached to type)
+      PVOID * AhciRoutine;   // OK (Spaced)
     ```
 
 *   **Struct and Enumeration Naming:** Struct names must be `typedef`-ed to `UPPER_CASE` and the struct name must be prefixed with `_` as a mark to avoid conflicts, and the same goes for enums. Every variable inside the struct must be a `PascalCase` variable, same as the `PascalCase` rule mentioned above.
@@ -313,11 +315,10 @@ Proper writing makes the code much more comfortable to read.
         PVOID ExtraContext      // WRONG: No OPTIONAL marker
     );
     ```
-
 *   **Top Section of C and H Files:**
-    1. **SPDX License:** Must place the license with the following format:
-       ```c
-       /* VeaOS SPDX License ----------------------------------------------------
+    1. **SPDX License:** Must be placed at the top of **`.c` / `.cpp` files**. For **`.h` / `.hpp` files, this is optional**. When included, use the following format:
+        ```c
+        /* VeaOS SPDX License ----------------------------------------------------
          SPDX-License-Identifier: GPL-2.0-only
          LICENSE     : GNU General Public License v2.0
          FILE        : [FileName.c / FileName.h]
@@ -325,33 +326,30 @@ Proper writing makes the code much more comfortable to read.
          MAINTAINER  : [Maintainer Name / Team
                         CAN BE NEW LINE. BUT PLEASE MAKE IT A LIST WITH -]
          PURPOSE     : [Brief explanation of this file's purpose. CAN BE NEW LINE]
-        ----- Effective since MM-YYYY til FOREVER ------------------------------- */
-       ```
+         ----- Effective since MM-YYYY til FOREVER ------------------------------- */
+        ```
     2. **Header:** 
-       For `.c`/`.cpp`, the most mandatory Header to add at the top is `veakrnl.h`. After that, you are free to add any Headers you need.
-       For `.h`/`.hpp`, the most mandatory Header to add at the top is `#pragma once` first, skip 1 line down, then `#include <procbind.h>` or `#include "procbind.h"`, after that add any Headers you need.
-       
-       **Example:**
-       *.C:*
-       ```c
-       #include <veakrnl.h>
-       #include <mycoolheader.h>
-       ```
-       *.H:*
-       ```c
-       #pragma once
-       
-       #include "procbind.h"
-       #include "whateveryouwant.h"
-       ```
-    3. **Revision History:** Must place Revision History below the header with the following mandatory format:
-       ```c
-       /* Revision History ------------------------------------------------------
-        * Date          : 26-07-2026
-        * Author        : Cool Dev
-        * Revision      : Added resetting TPR to IRQL PASSIVE_LEVEL
-        *
-        * Date          : 25-07-2026
-        * Author        : VeaOS Team
-        * Revision      : Initial initialization of ApicEnableLapic function
-        * --------------------------------------------------------------------- */
+        For `.c`/`.cpp`, the most mandatory Header to add at the top is `veakrnl.h`. After that, you are free to add any Headers you need.
+        For `.h`/`.hpp`, start with `#pragma once` at the top, skip 1 line down, and then you are free to include any Headers you need.
+        
+        **Example:**
+        *.C / .CPP:*
+        ```c
+        #include <veakrnl.h>
+        #include <mycoolheader.h>
+        ```
+        *.H / .HPP:*
+        ```c
+        #pragma once
+        
+        #include "whateveryouwant.h"
+        #include "mycoolheader.h"
+        ```
+    3. **Created File History:** Must place Created File History below the headers with the following format:
+        ```c
+        /* Created File History --------------------------------------------------
+         * Date          : 26-07-2026
+         * Author        : Cool Dev
+         * Description   : Initial creation of the file and base implementations
+         * --------------------------------------------------------------------- */
+        ```
