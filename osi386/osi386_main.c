@@ -54,6 +54,8 @@ LdrLoadVeakrnl(OUT PUCHAR *BufferToKernel)
     VFS_FILE_INFO FileInfo;
     cmemset(&FileInfo, 0, sizeof(FileInfo));
 
+    LdrInfo("Loading: /veakrnl.elf\n");
+
     if(FsLookupFileInformation("/veakrnl.elf", &FileInfo) < 0)
     {
         LdrError(STATUS_FILE_NOT_FOUND);
@@ -245,6 +247,9 @@ void LdrPrepareBlockBootAndBoot(
     //
     BvMoveVideoInfoToBootBlock(block_boot);
 
+    BvClearScreen();
+    BvRerenderLayout();
+
     //
     // cari VeaKey SYSTEM
     //
@@ -332,19 +337,14 @@ void LdrPrepareBlockBootAndBoot(
     LdrLoadBootDriver(block_boot);
 
     //
+    // Initialize our GDT
+    //
+    LdrInitializeGdtTss(block_boot);
+
+    //
     // Extract memory map
     //
     extract_memory_map(block_boot);
-
-    //
-    // We need to save our pointer, load our boot driver here
-    // TODO
-    //
-    /* if(!LdrLoadBootDriver(block_boot))
-       {
-        LdrError(STATUS_INSUFFICIENT_RESOURCES);
-       }
-    */
     
     //
     // eksekusi elf 
@@ -366,6 +366,11 @@ void LdrPrepareBlockBootAndBoot(
         bios_print_string("ERROR: Entry point not found!\n\r");
         restart_n_message();
     }
+
+    //
+    // Matiin dulu PIC nya
+    //
+    pic_disable_all();
 
     typedef void (*KernelMain)(BLOCK_BOOT_2*);
     KernelMain kernel_entry = (KernelMain)entry_point_addr;

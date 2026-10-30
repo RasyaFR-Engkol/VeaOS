@@ -3,8 +3,10 @@ file(GLOB_RECURSE LOADER_C_SOURCES "*.c")
 list(APPEND LOADER_C_SOURCES ${RTL_SOURCES})
 
 # Folder untuk file objek (.o) sementara -> build/osi386/
+set(SDK_DIR "${CMAKE_SOURCE_DIR}/sdk")
+set(SDK_GCC_INCLUDE_DIR "${SDK_DIR}/lib/gcc")
+set(SDK_INCLUDE_DIR "${SDK_DIR}/include")
 set(OBJ_DIR ${CMAKE_CURRENT_BINARY_DIR})
-
 set(LOADER_OBJS "")
 
 # 1. Compile Bootstrap ASM (boot.o)
@@ -35,7 +37,7 @@ foreach(ASM_FILE ${LOADER_ASM_SOURCES_EXCLUDED})
     list(APPEND LOADER_OBJS ${OBJ_FILE})
 endforeach()
 
-# 3. Compile file C
+# 3. Compile file C (Backslash \ dihapus di sini)
 foreach(C_FILE ${LOADER_C_SOURCES})
     file(RELATIVE_PATH REL_PATH ${CMAKE_CURRENT_SOURCE_DIR} ${C_FILE})
     string(REPLACE "/" "_" SAFE_NAME ${REL_PATH})
@@ -43,8 +45,13 @@ foreach(C_FILE ${LOADER_C_SOURCES})
     
     add_custom_command(
         OUTPUT ${OBJ_FILE}
-        # TAMBAHKAN ${VEA_INCLUDES} DI SINI
-        COMMAND clang --target=i686-pc-none-elf -march=i686 -m32 -ffreestanding -nostdlib -fno-builtin -DBUILDING_VEA_LOADER -I${LOADER_INCLUDE_DIR} ${VEA_INCLUDES} -c ${C_FILE} -o ${OBJ_FILE} -fms-extensions
+        COMMAND clang --target=i686-pc-none-elf -march=i686 -m32 -ffreestanding -nostdlib -fno-builtin
+                      -DBUILDING_VEA_LOADER
+                      -I${LOADER_INCLUDE_DIR}
+                      -I${SDK_GCC_INCLUDE_DIR}
+                      -I${SDK_INCLUDE_DIR}
+                      ${VEA_INCLUDES}
+                      -c ${C_FILE} -o ${OBJ_FILE} -fms-extensions
         DEPENDS ${C_FILE}
         COMMENT "Compiling Loader C: ${SAFE_NAME}"
     )
@@ -57,7 +64,11 @@ add_library(clangd_loader_dummy OBJECT EXCLUDE_FROM_ALL ${LOADER_C_SOURCES})
 target_compile_options(clangd_loader_dummy PRIVATE 
     --target=i686-pc-none-elf -march=i686 -m32 -ffreestanding -nostdlib -fno-builtin -fms-extensions
 )
-target_include_directories(clangd_loader_dummy PRIVATE ${LOADER_INCLUDE_DIR})
+target_include_directories(clangd_loader_dummy PRIVATE 
+    ${LOADER_INCLUDE_DIR}
+    ${SDK_GCC_INCLUDE_DIR}
+    ${SDK_INCLUDE_DIR}
+)
 
 list(REMOVE_ITEM LOADER_OBJS ${BOOT_OBJ})
 
@@ -73,3 +84,4 @@ add_custom_command(
 )
 
 add_custom_target(build_osi386 DEPENDS ${OUT_DIR}/OSI386)
+

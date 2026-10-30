@@ -15,6 +15,8 @@
  * REVISION   : Creating file processor.c
  * --------------------------------------------------------------------- */
 
+VOID VEAPI LdrpReloadSegments(IN PKDESCRIPTOR Gdtr, IN USHORT TssSelector);
+
 VOID
 VEAPI
 LdrSetFsSegmentBase(IN ULONG Base, IN ULONG Limit)
@@ -93,6 +95,12 @@ LdrBuildProcessorControlBlock(IN OUT BLOCK_BOOT_2 *BlockBoot2)
     // Inisialisasi Antrean DPC (Circular Double Linked List)
     Prcb->DpcListHead.Flink = &Prcb->DpcListHead;
     Prcb->DpcListHead.Blink = &Prcb->DpcListHead;
+    PUCHAR DpcStackBuffer = (PUCHAR)LmAllocatePool(LdrUnreclaimablePool, 12 * 1024);
+    if (DpcStackBuffer)
+    {
+        // PENTING: Tambahkan offset 12 KB agar menunjuk ke Top of Stack!
+        Prcb->DpcStack = (PVOID)(DpcStackBuffer + (12 * 1024));
+    }
 
     // ==========================================
     // 7. SIMPAN POINTER KE BLOCK_BOOT_2
@@ -101,4 +109,168 @@ LdrBuildProcessorControlBlock(IN OUT BLOCK_BOOT_2 *BlockBoot2)
     BlockBoot2->Prcb = (ULONG_PTR)Prcb;
 
     LdrSetFsSegmentBase((ULONG)Kpcr, sizeof(KIPCR));
+}
+
+static VOID
+LdrpSetGdtEntry(
+    PKGDTENTRY32 Entry,
+    ULONG Base,
+    ULONG Limit,
+    UCHAR Type,
+    UCHAR Dpl,
+    BOOLEAN IsSystem,
+    BOOLEAN Granularity,
+    BOOLEAN DefaultBig
+)
+{
+    cmemset(Entry, 0, sizeof(KGDTENTRY32));
+
+    Entry->LimitLow = (USHORT)(Limit & 0xFFFF);
+    Entry->BaseLow  = (USHORT)(Base & 0xFFFF);
+
+    Entry->HighWord.Bits.BaseMid     = (Base >> 16) & 0xFF;
+    Entry->HighWord.Bits.Type        = Type;
+    Entry->HighWord.Bits.System      = IsSystem ? 1 : 0;
+    Entry->HighWord.Bits.Dpl         = Dpl;
+    Entry->HighWord.Bits.Present     = 1;
+    Entry->HighWord.Bits.LimitHi     = (Limit >> 16) & 0x0F;
+    Entry->HighWord.Bits.Avl         = 0;
+    Entry->HighWord.Bits.LongMode    = 0;
+    Entry->HighWord.Bits.DefaultBig  = DefaultBig ? 1 : 0;
+    Entry->HighWord.Bits.Granularity = Granularity ? 1 : 0;
+    Entry->HighWord.Bits.BaseHi      = (Base >> 24) & 0xFF;
+}
+
+VOID
+VEAPI
+LdrInitializeGdtTss(IN OUT BLOCK_BOOT_2 *BlockBoot2)
+{
+    /*
+    
+        BOOTLOADER GDT Segment:
+        1. GDT_NULL
+        2. GDT_CODE
+        3. GDT_DATA
+        4. GDT_CODE16
+        5. GDT_DATA16
+        6. GDT_RESERVED
+        7. GDT_PCR
+
+        KERNEL GDT Segment:
+        1. GDT_NULL
+        2. GDT_CODE
+        3. GDT_DATA
+        4. GDT_CODE_R3
+        5. GDT_DATA_R3
+        6. GDT_TSS
+        7. GDT_PCR
+    */
+
+    PKGDTENTRY32 GdtHigherHalf;
+    PKTSSENTRY32 TssObject;
+    PKTSSENTRY32 DfTssObject;
+    KDESCRIPTOR Gdtr;
+    PKIPCR Kipcr;
+    PKPCR Kpcr;
+    ULONG CR3 = __ReadCR3();
+
+    GdtHigherHalf = (PKGDTENTRY32)LmAllocatePool(
+        LdrUnreclaimablePool, 
+        sizeof(KGDTENTRY32) * GDT_ENTRY_COUNT
+    );
+    if (!GdtHigherHalf)
+    {
+        LdrError(STATUS_INSUFFICIENT_RESOURCES);
+        return;
+    }
+    cmemset(GdtHigherHalf, 0, sizeof(KGDTENTRY32) * GDT_ENTRY_COUNT);
+
+    TssObject = (PKTSSENTRY32)LmAllocatePool(LdrUnreclaimablePool, sizeof(KTSSENTRY32));
+    if (!TssObject)
+    {
+        LdrError(STATUS_INSUFFICIENT_RESOURCES);
+        return;
+    }
+    cmemset(TssObject, 0, sizeof(KTSSENTRY32));
+
+    TssObject->Ss0       = KGDT32_R0_DATA;
+    TssObject->Esp0      = 0;
+    TssObject->IoMapBase = sizeof(KTSSENTRY32);
+
+    DfTssObject = (PKTSSENTRY32)LmAllocatePool(LdrUnreclaimablePool, sizeof(KTSSENTRY32));
+    if (!DfTssObject) return;
+    cmemset(DfTssObject, 0, sizeof(KTSSENTRY32));
+
+    DfTssObject->Cs        = KGDT32_R0_CODE;
+    DfTssObject->Ds        = KGDT32_R0_DATA;
+    DfTssObject->Es        = KGDT32_R0_DATA;
+    DfTssObject->Fs        = KGDT32_R0_PCR;
+    DfTssObject->Gs        = KGDT32_R0_DATA;
+    DfTssObject->Ss        = KGDT32_R0_DATA;
+    DfTssObject->Ss0       = KGDT32_R0_DATA;
+    DfTssObject->Eflags    = 0x00000002;
+    DfTssObject->Cr3       = CR3;
+    DfTssObject->IoMapBase = sizeof(KTSSENTRY32);
+    
+    Kipcr = (PKIPCR)CONTAINING_RECORD(BlockBoot2->Prcb, KIPCR, PrcbData);
+    Kpcr  = &Kipcr->Pcr;
+
+    // Index 0: KGDT32_R0_NULL (0x00)
+    LdrpSetGdtEntry(&GdtHigherHalf[0], 0, 0, 0, 0, FALSE, FALSE, FALSE);
+
+    // Index 1: KGDT32_R0_CODE (0x08) -> Kernel Code (Flat 4GB)
+    LdrpSetGdtEntry(&GdtHigherHalf[1], 0x00000000, 0xFFFFF, 0xB, 0, TRUE, TRUE, TRUE);
+
+    // Index 2: KGDT32_R0_DATA (0x10) -> Kernel Data (Flat 4GB)
+    LdrpSetGdtEntry(&GdtHigherHalf[2], 0x00000000, 0xFFFFF, 0x3, 0, TRUE, TRUE, TRUE);
+
+    // Index 3: KGDT32_R3_CODE (0x18 / RPL 3 -> 0x1B) -> User Code (Flat 4GB)
+    LdrpSetGdtEntry(&GdtHigherHalf[3], 0x00000000, 0xFFFFF, 0xB, 3, TRUE, TRUE, TRUE);
+
+    // Index 4: KGDT32_R3_DATA (0x20 / RPL 3 -> 0x23) -> User Data (Flat 4GB)
+    LdrpSetGdtEntry(&GdtHigherHalf[4], 0x00000000, 0xFFFFF, 0x3, 3, TRUE, TRUE, TRUE);
+
+    // Index 5: KGDT32_TSS (0x28) -> Task State Segment
+    LdrpSetGdtEntry(
+        &GdtHigherHalf[5], 
+        (ULONG_PTR)TssObject, 
+        sizeof(KTSSENTRY32) - 1, 
+        0x9, // Available 32-bit TSS
+        0, 
+        FALSE, // System Descriptor
+        FALSE, // Byte Granularity
+        FALSE
+    );
+
+    // Index 6: KGDT32_R0_PCR (0x30) -> KPCR (FS Register Base)
+    LdrpSetGdtEntry(
+        &GdtHigherHalf[6], 
+        (ULONG_PTR)Kpcr, 
+        sizeof(KIPCR) - 1, 
+        0x3, // Read/Write Data
+        0, 
+        TRUE, 
+        FALSE, // Byte Granularity
+        TRUE
+    );
+    
+    // Index 6: KGDT32_DF_TSS (0x38) 
+    LdrpSetGdtEntry(
+        &GdtHigherHalf[7], 
+        (ULONG_PTR)DfTssObject, 
+        sizeof(KTSSENTRY32) - 1, 
+        0x9,   // Type 0x9 = Available 32-bit TSS
+        0,     // DPL 0 (Kernel)
+        FALSE, // System Descriptor (0)
+        FALSE, // Byte Granularity
+        FALSE
+    );
+
+    Gdtr.Limit = (sizeof(KGDTENTRY32) * GDT_ENTRY_COUNT) - 1;
+    Gdtr.Base  = (ULONG_PTR)GdtHigherHalf;
+
+    LdrpReloadSegments(&Gdtr, KGDT32_TSS);
+    
+    Kpcr->GDT = (PVOID)GdtHigherHalf;
+    Kpcr->TSS = (PVOID)TssObject;
 }
