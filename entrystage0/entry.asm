@@ -67,7 +67,10 @@ relocated:
 ; =====================================================================
 ; PADDING DAN PARTITION TABLE
 ; =====================================================================
-times 446 - ($ - $$) db 0   ; Penuhi sisa ruang dengan 0 sampai batas partisi
+times 440 - ($ - $$) db 0   ; Penuhi ruang sebelum MBR disk signature
+
+dd 0x56454131               ; Disk signature ("VEA1"), bytes at offsets 440-443
+dw 0                        ; Reserved bytes at offsets 444-445
 
 ; Entry 1 (Bootable, mulai di LBA 2048, tipe FAT32 LBA)
 db 0x80                     ; Status: Active/Bootable
