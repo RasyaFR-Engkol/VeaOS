@@ -15,6 +15,27 @@ VOID RtlFillMemory(
     }
 }
 
+VOID
+VEAPI
+RtlFillMemoryUlong(
+    PVOID  Destination,
+    SIZE_T Length,
+    ULONG  Pattern
+)
+{
+    // Pastikan pointer valid dan Length minimal seukuran 1 ULONG (4 bytes)
+    if (Destination == NULL || Length < sizeof(ULONG)) {
+        return;
+    }
+
+    PULONG UlongPtr = (PULONG)Destination;
+    SIZE_T Count = Length / sizeof(ULONG); // Hitung berapa banyak ULONG yang ditulis
+
+    for (SIZE_T i = 0; i < Count; i++) {
+        UlongPtr[i] = Pattern;
+    }
+}
+
 VOID RtlZeroMemory(
     PVOID  Destination,
     SIZE_T Length
@@ -33,4 +54,22 @@ VOID RtlCopyMemory(PVOID Dest, PVOID Src, SIZE_T N)
         pDest++; pSrc++;
         N--;
     };
+}
+
+SIZE_T RtlCompareMemory(
+    const PVOID Source1,
+    const PVOID Source2,
+    SIZE_T Length
+)
+{
+    const PUCHAR P1 = (const PUCHAR)Source1;
+    const PUCHAR P2 = (const PUCHAR)Source2;
+    SIZE_T Matched = 0;
+
+    while (Matched < Length && P1[Matched] == P2[Matched])
+    {
+        Matched++;
+    }
+
+    return Matched;
 }

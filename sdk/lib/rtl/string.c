@@ -1,5 +1,6 @@
 #include <rtl.h>
 #include "rtlp.h"
+#include <tag.h>
 
 static
 VOID
@@ -387,6 +388,72 @@ RtlCopyString(PANSI_STRING DestinationString,
     if (copyLength < DestinationString->MaximumLength) {
         DestinationString->Buffer[copyLength] = '\0';
     }
+}
+
+VEASTATUS
+RtlpAppendStringToString(
+    PANSI_STRING DestinationString,
+    const ANSI_STRING *SourceString
+)
+{
+    PCHAR DestinationBuffer;
+
+    if (!DestinationString || !DestinationString->Buffer) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (!SourceString || SourceString->Length == 0) {
+        return STATUS_SUCCESS;
+    }
+
+    if (!SourceString->Buffer) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (DestinationString->Length > DestinationString->MaximumLength ||
+        SourceString->Length >
+            DestinationString->MaximumLength - DestinationString->Length) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    DestinationBuffer = DestinationString->Buffer + DestinationString->Length;
+    RtlCopyMemory(DestinationBuffer,
+                  (PVOID)SourceString->Buffer,
+                  SourceString->Length);
+    DestinationString->Length += SourceString->Length;
+
+    if (DestinationString->MaximumLength > DestinationString->Length) {
+        DestinationBuffer[SourceString->Length] = '\0';
+    }
+
+    return STATUS_SUCCESS;
+}
+
+VEASTATUS
+VEAPI
+RtlAppendRawStringToString(
+    PANSI_STRING DestinationString,
+    PCHAR SourceString
+)
+{
+    ANSI_STRING AnsiSource;
+
+    if (!SourceString) {
+        return STATUS_SUCCESS;
+    }
+
+    RtlInitAnsiString(&AnsiSource, SourceString);
+    return RtlpAppendStringToString(DestinationString, &AnsiSource);
+}
+
+VEASTATUS
+VEAPI
+RtlAppendStringToString(
+    PANSI_STRING DestinationString,
+    const ANSI_STRING *SourceString
+)
+{
+    return RtlpAppendStringToString(DestinationString, SourceString);
 }
 
 VOID
@@ -830,4 +897,198 @@ RtlCheckBootFlag(
 {
     if (!BootArgs || !Flag) return FALSE;
     return (RtlRawStringString(BootArgs, Flag) != NULL);
+}
+
+BOOLEAN
+VEAPI
+RtlAppendRawString(
+    OUT PCHAR Destination,
+    IN ULONG DestinationSize,
+    IN PCSTR Source
+)
+{
+    ULONG DestinationLength;
+    ULONG SourceLength;
+
+    if (!Destination || !Source || DestinationSize == 0)
+    {
+        return FALSE;
+    }
+
+    DestinationLength = (ULONG)RtlRawStringLength(Destination);
+    SourceLength = (ULONG)RtlRawStringLength(Source);
+
+    if (DestinationLength >= DestinationSize ||
+        SourceLength >= DestinationSize - DestinationLength)
+    {
+        return FALSE;
+    }
+
+    RtlCopyMemory(
+        Destination + DestinationLength,
+        (PVOID)Source,
+        SourceLength + 1
+    );
+
+    return TRUE;
+}
+
+VEASTATUS
+VEAPI
+RtlStringCchCopyA(
+    OUT PCHAR pszDest,
+    IN SIZE_T cchDest,
+    IN PCSTR pszSrc
+)
+{
+    if (!pszDest || cchDest == 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (!pszSrc)
+    {
+        pszDest[0] = '\0';
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    SIZE_T i = 0;
+
+    /* Copy karakter hingga cchDest - 1 untuk memberi ruang null terminator */
+    while (i < cchDest - 1 && pszSrc[i] != '\0')
+    {
+        pszDest[i] = pszSrc[i];
+        i++;
+    }
+
+    /* Selalu akhiri dengan null-terminate */
+    pszDest[i] = '\0';
+
+    /* Jika pszSrc berakhir di sini, artinya salin berhasil sepenuhnya */
+    if (pszSrc[i] == '\0')
+    {
+        return STATUS_SUCCESS;
+    }
+
+    /* Buffer tujuan terlalu kecil untuk menampung seluruh string */
+    return STATUS_BUFFER_TOO_SMALL;
+}
+
+VEASTATUS
+VEAPI
+RtlStringFromGUID(
+    IN const GUID *Guid,
+    OUT PANSI_STRING GuidString
+)
+{
+    ULONG Written;
+
+    GuidString->Length = 38;
+    GuidString->MaximumLength = GuidString->Length + sizeof(CHAR);
+    GuidString->Buffer = RtlpAllocateStringMemory(GuidString->MaximumLength,
+                                                  TAG_USTR);
+    if (!GuidString->Buffer) return STATUS_INSUFFICIENT_MEMORY;
+
+    Written = RtlStringCbPrintfA(
+        GuidString->Buffer,
+        GuidString->MaximumLength,
+        "{%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}",
+        Guid->Data1,
+              Guid->Data2,
+              Guid->Data3,
+              Guid->Data4[0],
+              Guid->Data4[1],
+              Guid->Data4[2],
+              Guid->Data4[3],
+              Guid->Data4[4],
+              Guid->Data4[5],
+              Guid->Data4[6],
+              Guid->Data4[7]
+    );
+
+    if (Written != GuidString->Length)
+    {
+        RtlpFreeStringMemory(GuidString->Buffer, TAG_USTR);
+        GuidString->Buffer = NULL;
+        GuidString->Length = 0;
+        GuidString->MaximumLength = 0;
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+CHAR
+VEAPI
+RtlUpperChar(
+    CHAR Character
+)
+{
+    if (Character >= 'a' && Character <= 'z')
+    {
+        return Character - ('a' - 'A');
+    }
+
+    return Character;
+}
+
+/**
+ * @brief Menduplikasi struktur ANSI_STRING / STRING ala Windows NT.
+ * 
+ * @param Flags             Opsi duplikasi (misal: penambahan null-terminated).
+ * @param SourceString      Pointer ke ANSI_STRING sumber yang ingin diduplikasi.
+ * @param DestinationString Pointer ke ANSI_STRING tujuan yang akan diinisialisasi.
+ * @return NTSTATUS         STATUS_SUCCESS jika berhasil, atau kode error jika gagal.
+ */
+VEASTATUS VEAPI RtlDuplicateAnsiString(
+    ULONG Flags,
+    const ANSI_STRING* SourceString,
+    ANSI_STRING* DestinationString
+)
+{
+    // Validasi parameter dasar
+    if (!SourceString || !DestinationString) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Cek apakah buffer sumber invalid tapi length-nya ada
+    if (!SourceString->Buffer && SourceString->Length > 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Jika sumber kosong
+    if (!SourceString->Buffer) {
+        DestinationString->Length = 0;
+        DestinationString->MaximumLength = 0;
+        DestinationString->Buffer = 0;
+        return (Flags & RTL_DUPLICATE_ANSI_STRING_ALLOCATE_NULL_STRING) ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+    }
+
+    // Hitung ukuran buffer baru (tambahkan 1 byte untuk null-terminator jika diminta flag)
+    unsigned long extraBytes = (Flags & RTL_DUPLICATE_ANSI_STRING_NULL_TERMINATE) ? sizeof(CHAR) : 0;
+    unsigned long destMaxLen = SourceString->Length + extraBytes;
+
+    // Alokasikan memori baru (Ganti fungsi alokasi ini dengan alokator kernel OS kamu, misal ExAllocatePool)
+    PSTR newBuffer = (PSTR)RtlpAllocateStringMemory(destMaxLen, TAG_RTL_STRING);
+    if (!newBuffer) {
+        return STATUS_INSUFFICIENT_MEMORY;
+    }
+
+    // Salin isi karakter dari buffer lama ke buffer baru
+    unsigned long i;
+    for (i = 0; i < SourceString->Length; i++) {
+        newBuffer[i] = SourceString->Buffer[i];
+    }
+
+    // Tambahkan null-terminator jika flag diaktifkan
+    if (Flags & RTL_DUPLICATE_ANSI_STRING_NULL_TERMINATE) {
+        newBuffer[i] = '\0';
+    }
+
+    // Set nilai pada struct ANSI_STRING tujuan
+    DestinationString->Length = SourceString->Length;
+    DestinationString->MaximumLength = (unsigned short)destMaxLen;
+    DestinationString->Buffer = newBuffer;
+
+    return STATUS_SUCCESS;
 }
