@@ -90,6 +90,9 @@ VOID ks_system_startup_boot_stack(PBLOCK_BOOT_2 block_boot)
     PKPROCESS Process = (PKPROCESS)Thread->ApcState.Process;
     PVOID KernelStack = (PVOID)block_boot->KernelStack;
 
+    /* Initialize Po */
+    PoInitializePrcb(Prcb);
+
     if(Prcb->Number == 0)
     {
         KsiInitializeKernel(

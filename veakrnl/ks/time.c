@@ -50,10 +50,38 @@ KsQuerySystemTime(VOID)
     return KsSystemTime;
 }
 
+ULONGLONG
+VEAPI
+KsQuerySystemTimeNs(VOID)
+{
+    ULONGLONG SystemTime;
+    ULONG_PTR Flags;
+
+    // Matikan interupsi sebentar agar pembacaan 64-bit di CPU 32-bit atomik
+    Flags = __ReadEFlags();
+    __Stop();
+
+    SystemTime = KsSystemTime;
+
+    __WriteEFlags(Flags);
+
+    // Konversi dari unit 100-ns ke Nanosecond murni (x 100)
+    return SystemTime * 100ULL;
+}
+
+VOID
+VEAPI
+KsStallExecutionProcessor(
+    IN ULONG Microseconds
+)
+{
+    HctStallExecutionProcessor(Microseconds);
+}
+
 VOID
 VEAFAST
 KsUpdateSystemTime(
-    IN PKREGISTER_FRAME RegisterFrame,
+    IN PKTRAP_FRAME RegisterFrame,
     IN ULONG Increment,
     IN KIRQL Irql
 )
@@ -66,9 +94,6 @@ KsUpdateSystemTime(
 
     // Update System Time
     NewSystemTime = KsiAdvanceSystemTime(Increment);
-
-    // Run routine for timer expiration
-    KsiCheckTimerExpiration(NewSystemTime);
 }
 
 VOID
@@ -88,6 +113,9 @@ KsInitializeTimer(
 {
     // Zero-init supaya semua field, termasuk Active, dalam state bersih
     RtlZeroMemory(Timer, sizeof(KTIMER));
+    InitializeListHead(&Timer->Header.WaitListHead);
+    KsInitializeSpinlock((PKSPIN_LOCK)&Timer->Header.Lock);
+    Timer->Header.Type = TimerSynchronizationObject;
     Timer->Active = FALSE;
 }
 
@@ -139,7 +167,7 @@ KsSetTimer(
     BOOLEAN WasActive;
     ULONGLONG CurrentSystemTime;
 
-    OldIrql = KeRaiseIrql(DISPATCH_LEVEL);
+    KsAcquireSpinLock(&KsTimerListLock, &OldIrql);
 
     // Kalau timer sudah armed, cabut dulu dari list sebelum re-arm
     WasActive = Timer->Active;
@@ -165,7 +193,7 @@ KsSetTimer(
 
     KsiInsertTimerSorted(Timer);
 
-    KeLowerIrql(OldIrql);
+    KsReleaseSpinLock(&KsTimerListLock, OldIrql);
 
     return WasActive;
 }
@@ -179,7 +207,7 @@ KsCancelTimer(
     KIRQL OldIrql;
     BOOLEAN WasActive;
 
-    OldIrql = KeRaiseIrql(DISPATCH_LEVEL);
+    KsAcquireSpinLock(&KsTimerListLock, &OldIrql);
 
     WasActive = Timer->Active;
     if (WasActive)
@@ -188,7 +216,7 @@ KsCancelTimer(
         Timer->Active = FALSE;
     }
 
-    KeLowerIrql(OldIrql);
+    KsReleaseSpinLock(&KsTimerListLock, OldIrql);
 
     return WasActive;
 }
@@ -201,6 +229,10 @@ KsiCheckTimerExpiration(
 {
     PLIST_ENTRY Entry;
     PKTIMER Timer;
+    KIRQL TimerListIrql;
+    KIRQL DispatcherIrql;
+
+    KsAcquireSpinLock(&KsTimerListLock, &TimerListIrql);
 
     while (!IsListEmpty(&KsTimerListHead))
     {
@@ -216,11 +248,15 @@ KsiCheckTimerExpiration(
         RemoveEntryList(&Timer->TimerListEntry);
         Timer->Active = FALSE;
 
+        DispatcherIrql = KsAcquireDispatcherLock();
+        Timer->Header.SignalState = 1;
+        if (!IsListEmpty(&Timer->Header.WaitListHead))
+            KsWaitTest(&Timer->Header);
+        KsReleaseDispatcherLock(DispatcherIrql);
+
         // Queue DPC-nya kalau ada, biar diproses di luar interrupt context
         if (Timer->Dpc != NULL)
         {
-            /* TODO: Insert Queue DPC. Uncommment this code 
-               if DPC part is done. */
             KsInsertQueueDpc(Timer->Dpc, NULL, NULL);
         }
 
@@ -232,6 +268,8 @@ KsiCheckTimerExpiration(
             KsiInsertTimerSorted(Timer);
         }
     }
+
+    KsReleaseSpinLock(&KsTimerListLock, TimerListIrql);
 }
 
 VOID
@@ -243,9 +281,6 @@ KsiTimerExpirationDpcRoutine(
     IN PVOID SystemArgument2
 )
 {
-    PLIST_ENTRY Entry;
-    PKTIMER Timer;
-    KIRQL OldIrql;
     ULONGLONG CurrentSystemTime = KsQuerySystemTime();
 
     UNREFERENCED_PARAMETER(Dpc);
@@ -253,33 +288,5 @@ KsiTimerExpirationDpcRoutine(
     UNREFERENCED_PARAMETER(SystemArgument1);
     UNREFERENCED_PARAMETER(SystemArgument2);
 
-    KsAcquireSpinLockAtDpcLevel(&KsTimerListLock);
-
-    while (!IsListEmpty(&KsTimerListHead))
-    {
-        Entry = KsTimerListHead.Flink;
-        Timer = CONTAINING_RECORD(Entry, KTIMER, TimerListEntry);
-
-        if (Timer->DueTime.QuadPart > CurrentSystemTime)
-        {
-            break;
-        }
-
-        RemoveEntryList(&Timer->TimerListEntry);
-        Timer->Active = FALSE;
-
-        if (Timer->Dpc != NULL)
-        {
-            KsInsertQueueDpc(Timer->Dpc, SystemArgument1, SystemArgument2);
-        }
-
-        if (Timer->Period > 0)
-        {
-            Timer->DueTime.QuadPart = CurrentSystemTime + ((ULONGLONG)Timer->Period * 10000ULL);
-            Timer->Active = TRUE;
-            KsiInsertTimerSorted(Timer);
-        }
-    }
-
-    KsReleaseSpinLockFromDpcLevel(&KsTimerListLock);
+    KsiCheckTimerExpiration(CurrentSystemTime);
 }
