@@ -211,6 +211,8 @@ typedef struct _KTHREAD {
     BOOLEAN Alertable;
     KAPC SuspendApc;
     KPROCESSOR_MODE WaitMode;
+    PVOID ServiceTable;
+    KPROCESSOR_MODE PreviousMode;
 } KTHREAD, *PKTHREAD;
 
 typedef enum _KDPC_IMPORTANCE {
@@ -845,5 +847,25 @@ KsiDispatchSehException(
     IN PKTRAP_FRAME TrapFrame,
     IN VEASTATUS ExceptionCode
 );
+
+typedef struct _KSERVICE_TABLE_DESCRIPTOR
+{
+    PULONG_PTR Base;
+    PULONG Count;
+    ULONG Limit;
+    PUCHAR Number;
+} KSERVICE_TABLE_DESCRIPTOR, *PKSERVICE_TABLE_DESCRIPTOR;
+
+// 1 for Thread, 1 for GUI thread?
+#define SSDT_MAX_ENTRIES                2
+
+extern KSERVICE_TABLE_DESCRIPTOR KsServiceTableDescriptor[SSDT_MAX_ENTRIES];
+extern KSERVICE_TABLE_DESCRIPTOR KsServiceTableDescriptorShadow[SSDT_MAX_ENTRIES];
+
+VOID
+VEAPI
+RmInitSyscall(VOID);
+
+extern ULONG KsiServiceLimit;
 
 /* EOF */
