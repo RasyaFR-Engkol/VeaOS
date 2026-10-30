@@ -14,10 +14,12 @@ PtCreateSystemThread(
     POOL_TYPE PoolType
 );
 
-PEPROCESS
+VEASTATUS
 VEAPI
 PtCreateSystemProcess(
-    VOID
+    OUT PHANDLE ProcessHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjAttr
 );
 
 VOID
@@ -76,3 +78,48 @@ PtEnqueueThreadCfs(
 VOID
 VEAPI
 PtSchedulerTick(ULONGLONG DeltaTimeNs);
+
+VOID
+VEAPI
+PtYieldThread(VOID);
+
+BOOLEAN
+VEAPI
+PtWakeThread(
+    PKTHREAD Thread
+);
+
+BOOLEAN
+VEAPI
+PtSetThreadPriority(
+    IN PKTHREAD Thread,
+    IN CHAR Priority
+);
+
+VOID
+VEAPI
+PtDetachProcess(VOID);
+
+VOID
+VEAPI
+PtAttachProcess(
+    IN PKPROCESS Process
+);
+
+BOOLEAN
+VEAPI
+PtWakeThreadEx(
+    PKTHREAD Thread,
+    VEASTATUS WakeStatus
+);
+
+ULONG_PTR
+VEAFAST
+PtpSaveAndDisableInterrupts(VOID)
+;
+
+VOID
+VEAFAST
+PtpRestoreInterrupts(ULONG_PTR Flags);
+
+/* EOF */

@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <procbind.h>
+#include <gcc_intrin.h>
 
 // Forward for KTHREAD KPROCESS KPRCB KIPCR KPCR
 #include <../ndk/ks.h>
@@ -10,6 +11,7 @@
 typedef char CHAR;
 typedef short SHORT;
 typedef long LONG;
+typedef LONG VEASTATUS;
 
 typedef unsigned long ULONG;
 typedef unsigned char UCHAR;
@@ -345,23 +347,7 @@ void extract_memory_map(BLOCK_BOOT_2 *block_boot);
 // page entry
 //
 #pragma pack(push, 1)
-typedef union _PAGE_ENTRY {
-    uint32_t raw; // Buat ngisi nol atau math kasar
-    struct {
-        uint32_t present       : 1; // Bit 0: 1 = Halaman ada di RAM
-        uint32_t rw            : 1; // Bit 1: 0 = Read Only, 1 = Read/Write
-        uint32_t user          : 1; // Bit 2: 0 = Kernel (Ring 0), 1 = User (Ring 3)
-        uint32_t write_through : 1; // Bit 3: Caching write-through
-        uint32_t cache_disable : 1; // Bit 4: Caching disable
-        uint32_t accessed      : 1; // Bit 5: Diset CPU kalau memori dibaca
-        uint32_t dirty         : 1; // Bit 6: Diset CPU kalau memori ditulis
-        uint32_t ps_or_pat     : 1; // Bit 7: Page Size (PDE) / PAT (PTE)
-        uint32_t global        : 1; // Bit 8: Global page (nggak di-flush dari TLB)
-        ULONG cow              : 1; // Bit 9: Copy on Write
-        uint32_t available     : 2; // Bit 10-11: Kosong, OS bebas pake buat apa aja!
-        uint32_t frame         : 20;// Bit 12-31: Physical Address >> 12
-    } bits;
-} PAGE_ENTRY;
+
 #pragma pack(pop)
 
 #define PAGE_DIR_ADDR       0x40000
@@ -491,6 +477,10 @@ LmAllocatePool(BOOT_POOL_TYPE PoolType, ULONG ByteSize);
 #define KGDT32_R3_DATA   0x23   // Index 4 (Offset 0x20 | 3) -> User Data
 #define KGDT32_TSS       0x28   // Index 5 (Offset 0x28), RPL 0 -> Task State Segment
 #define KGDT32_R0_PCR    0x30   // Index 6 (Offset 0x30), RPL 0 -> KPCR (FS Register)
+#define KGDT32_DF_TSS    0x38
+
+#define GDT_ENTRY_COUNT 8
+#define TSS_SIZE_32     104
 
 // Lock
 VOID
@@ -663,6 +653,7 @@ extern CHAR LdrLastCheckedFile[256];
 #define STATUS_READ_DISK_ERROR              0xC000000C
 #define STATUS_VKEY_CORRUPTED               0xC000000D
 #define STATUS_PROCEDURE_NOT_FOUND          0xC000000E
+#define STATUS_SYMBOL_RESOLVE_NOT_FOUND     0xC000000F
 
 VOID
 VEAPI
@@ -711,3 +702,106 @@ LdrInitLoadBootDriver(
 );
 
 extern BOOLEAN BvFooterHeaderState;
+
+/* FIX ODR WARNING OF VKEY */
+#pragma pack(push, 1)
+
+// This is key header
+typedef struct _KEY_FILE_HEADER {
+    ULONG Signature;              // Magic Signature File (misal: "KEY1" / 0x3159454B)
+    ULONG PrimarySequence;        // Sequence counter utama (untuk validasi flush/write)
+    ULONG SecondarySequence;      // Sequence counter cadangan
+    CHAR     ReservedInCHAR1[10];    // Area reserved awal
+    ULONG Checksum;               // Checksum XOR / CRC32 header
+    CHAR     ReservedInCHAR2[4070];  // Padding otomatis agar pas tepat 0x1000 byte (4 KB)
+} KEY_FILE_HEADER, *PKEY_FILE_HEADER;
+
+// This is key base block
+typedef struct _KEY_BASE_BLOCK {
+    ULONG Signature;              // Magic Signature Bin (misal: "BIN1" / 0x314E4942)
+    ULONG RelativeOffset;         // Offset relatif blok ini dari awal Base Block (0x0, 0x1000, dst)
+    ULONG Size;                   // Ukuran total blok ini (misal: 0x1000 = 4096 byte)
+    ULONGLONG LastWriteTime;          // Timestamp modifikasi terakhir (64-bit Epoch / FILETIME)
+    ULONG Spare;                  // Alignment / Cadangan
+} KEY_BASE_BLOCK, *PKEY_BASE_BLOCK;
+
+// This is key directory node
+typedef struct _KEY_DIRECTORY_NODE {
+    LONG  CellSize;               // Ukuran sel (Nilai Negatif = Teralokasi / Used)
+    USHORT Signature;              // "DN" (Directory Node = 0x4E44)
+    USHORT Flags;                  // Flags (misal: 0x01 = Root, 0x02 = ReadOnly)
+    ULONG ParentOffset;           // Pointer Offset menunjuk ke Parent Folder
+    ULONG FirstSubKeyOffset;      // Pointer Offset menunjuk ke Anak Folder Pertama
+    ULONG NextSiblingOffset;      // Pointer Offset menunjuk ke Folder Samping/Sejajar
+    ULONG FirstValueOffset;       // Pointer Offset menunjuk ke File/Value Pertama
+    ULONG SubKeyCount;            // Total jumlah sub-folder di dalam folder ini
+    USHORT NameLength;             // Panjang string nama folder
+    CHAR     Name[];                 // Flexible Array Member: String Nama Folder
+} KEY_DIRECTORY_NODE, *PKEY_DIRECTORY_NODE;
+
+// this is key file node
+typedef struct _KEY_FILE_NODE {
+    LONG  CellSize;               // Ukuran sel (Nilai Negatif = Teralokasi / Used)
+    USHORT Signature;              // "FN" (File Node = 0x4E46)
+    ULONG NextValueOffset;        // Pointer Offset menunjuk ke File/Value Sejajar
+    USHORT NameLength;             // Panjang string nama file/value
+    ULONG DataPOffset;            // Offset lokasi payload data (atau Inline Data jika data kecil)
+    ULONG DataLength;             // Ukuran payload data dalam byte
+    ULONG Type;                   // Tipe Data (1 = String, 2 = Int32, 3 = Binary, dll)
+    USHORT Flags;                  // Flags tambahan
+    CHAR     Name[];                 // Flexible Array Member: String Nama File/Value
+} KEY_FILE_NODE, *PKEY_FILE_NODE;
+
+#pragma pack(pop)
+
+// Key Header
+#define KEY_HEADER_SIG  0x3159454B  // "KEY1"
+#define KEY_BIN_SIG     0x314E4942  // "BIN1"
+#define KEY_DIR_SIG     0x4E44      // "DN"
+#define KEY_FILE_SIG    0x4E46      // "FN"
+
+// Key Directory Flags
+#define KEY_DIR_ROOT (1 << 0)
+#define KEY_DIR_READ_ONLY (1 << 1)
+#define KEY_DIR_SYSTEM (1 << 2)
+#define KEY_DIR_HIDDEN (1 << 3)
+#define KEY_DIR_VOLATILE (1 << 4)
+#define KEY_DIR_SYMLINK (1 << 5)
+#define KEY_DIR_DELETED (1 << 6)
+
+// Key File Flags
+#define KEY_FILE_DEFAULT            (1 << 0)
+#define KEY_FILE_READ_ONLY          (1 << 1)
+#define KEY_FILE_HIDDEN             (1 << 2)
+#define KEY_FILE_INLINE             (1 << 3)
+#define KEY_FILE_COMPRESSED         (1 << 4)
+#define KEY_FILE_VOLATILE           (1 << 10)
+#define KEY_FILE_SYMLINK_VOLATILE   (1 << 15)
+
+// Key Type
+#define FILE_KEY_NONE           0   // No type / Raw Null
+#define FILE_KEY_STRING         1   // String Text (UTF-8 / ASCII)
+#define FILE_KEY_DWORD          2   // 32-bit Unsigned Integer (ULONG)
+#define FILE_KEY_BINARY         3   // Raw Binary Data / Byte Array Buffer
+#define FILE_KEY_MULTI_STRING   4   // Array String (Multiple strings separated by \0)
+#define FILE_KEY_QWORD          5   // 64-bit Unsigned Integer (ULONGLONG / Timestamp)
+#define FILE_KEY_EXPAND_STRING  6   // String with Environment Variables (%VAR% / $VAR)
+#define FILE_KEY_BOOLEAN        7   // Boolean Flag (1 byte: 0 = false, 1 = true)
+#define FILE_KEY_GUID           8   // 16-Byte Unique Identifier (UUID / GUID)
+#define FILE_KEY_LINK           9   // Only supported for VOLATILE KEY now
+
+static inline void pic_disable_all(void) {
+    asm volatile (
+        "movb $0xFF, %%al \n\t"
+        "outb %%al, $0x21 \n\t" // Mask Master PIC
+        "outb %%al, $0xA1 \n\t" // Mask Slave PIC
+        :
+        :
+        : "al"
+    );
+}
+
+
+VOID
+VEAPI
+LdrInitializeGdtTss(IN OUT BLOCK_BOOT_2 *BlockBoot2);

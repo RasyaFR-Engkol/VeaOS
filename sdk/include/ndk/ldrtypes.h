@@ -103,6 +103,17 @@ typedef struct _BOOT_DEVICE_IDENTIFIER {
     } u;
 } BOOT_DEVICE_IDENTIFIER, *PBOOT_DEVICE_IDENTIFIER;
 
+typedef struct _BOOT_DRIVER_LIST_ENTRY 
+{
+    LIST_ENTRY Link;              // Doubly-linked list pointer (Flink/Blink)
+    ANSI_STRING FilePath;      // Path file, misal: L"\System32\Drivers\ahci.ko"
+    ANSI_STRING RegistryPath;  // Path registry, misal: L"\Services\ahci"
+    PVOID ImageBase;             // Alamat virtual .ko di RAM
+    ULONG ImageSize;             // Ukuran file/memory .ko
+    PVOID EntryPoint;            // Pointer ke EntryMain / DriverEntry
+    ULONG Flags;                 // Status (LDRP_DRIVER_LOADED, dll)
+} BOOT_DRIVER_LIST_ENTRY, *PBOOT_DRIVER_LIST_ENTRY;
+
 typedef struct _BLOCK_BOOT_2
 {
     ULONG Size;
@@ -130,3 +141,6 @@ typedef struct _BLOCK_BOOT_2
 } BLOCK_BOOT_2, *PBLOCK_BOOT_2;
 
 #pragma pack(pop)
+
+/* BootDriver flags */
+#define LDRP_DRIVER_LOADED 0x00000001
