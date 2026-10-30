@@ -65,7 +65,7 @@ foreach(C_FILE ${KERNEL_C_SOURCES})
     add_custom_command(
         OUTPUT ${OBJ_FILE}
         # PASTIKAN -DBUILDING_VEAKRNL ADA DI SINI
-        COMMAND clang --target=i686-pc-none-elf -march=i686 -m32 -ffreestanding -nostdlib -fno-builtin -DBUILDING_VEAKRNL ${VEA_INCLUDES} -c ${C_FILE} -o ${OBJ_FILE} -std=gnu23 -fshort-wchar -fms-extensions
+        COMMAND clang --target=i686-pc-none-elf -march=i686 -m32 -ffreestanding -nostdlib -fno-builtin -fno-builtin-memcpy -c -g -DBUILDING_VEAKRNL ${VEA_INCLUDES} -c ${C_FILE} -o ${OBJ_FILE} -std=gnu23 -fshort-wchar -fms-extensions -fstack-protector-all -Wthread-safety -Wthread-safety-analysis -Werror=thread-safety -fmacro-prefix-map=/home/xvrasya/VeaOS/=
         DEPENDS ${C_FILE}
         COMMENT "Compiling C: ${SAFE_NAME}"
     )
@@ -76,7 +76,7 @@ endforeach()
 # Target Clangd
 add_library(clangd_kernel_dummy OBJECT EXCLUDE_FROM_ALL ${KERNEL_C_SOURCES} ${HCT_C_SOURCES})
 target_compile_options(clangd_kernel_dummy PRIVATE 
-    --target=i686-pc-none-elf -march=i686 -m32 -ffreestanding -nostdlib -fno-builtin -ggdb -std=gnu23 -fshort-wchar -fms-extensions
+    --target=i686-pc-none-elf -march=i686 -m32 -ffreestanding -nostdlib -fno-builtin -fno-builtin-memcpy -ggdb -std=gnu23 -fshort-wchar -fms-extensions
 )
 target_include_directories(clangd_kernel_dummy PRIVATE 
     ${KERNEL_INCLUDE_DIR}
