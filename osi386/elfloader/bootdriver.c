@@ -68,11 +68,15 @@ LdrpFindKernelSymbol(
 
     if (!SymTab || !StrTab) return 0;
 
+    ULONG SymbolNameLength = (ULONG)RtlRawStringLength(SymbolName);
+
     /* Search Symbol Name */
     for (ULONG i = 0; i < SymCount; i++)
     {
         PSTR Name = StrTab + SymTab[i].st_name;
-        if (SymTab[i].st_name != 0 && RtlRawStringCompareN(Name, SymbolName, RtlRawStringLength(SymbolName)) == 0)
+        if (SymTab[i].st_name != 0 &&
+            RtlRawStringLength(Name) == (LONG)SymbolNameLength &&
+            RtlRawStringCompareN(Name, SymbolName, SymbolNameLength) == 0)
         {
             /* 
              * st_value di kernel ELF adalah alamat Virtual/Memory tempat
@@ -83,6 +87,89 @@ LdrpFindKernelSymbol(
     }
 
     return 0; /* Symbol tidak ditemukan */
+}
+
+static PVOID
+LdrpFindDriverEntryPoint(
+    IN PVOID DriverBuffer
+)
+{
+    Elf32_Ehdr* DriverEhdr = (Elf32_Ehdr*)DriverBuffer;
+    Elf32_Shdr* SectionHeaders;
+    Elf32_Sym* SymbolTable = NULL;
+    PSTR StringTable = NULL;
+    ULONG SymbolCount = 0;
+
+    if (!DriverEhdr)
+    {
+        return NULL;
+    }
+
+    SectionHeaders = (Elf32_Shdr*)((PUCHAR)DriverBuffer + DriverEhdr->e_shoff);
+
+    for (ULONG i = 0; i < DriverEhdr->e_shnum; i++)
+    {
+        if (SectionHeaders[i].sh_type == SHT_SYMTAB)
+        {
+            SymbolTable = (Elf32_Sym*)(
+                (PUCHAR)DriverBuffer + SectionHeaders[i].sh_offset
+            );
+            SymbolCount = SectionHeaders[i].sh_size / sizeof(Elf32_Sym);
+
+            if (SectionHeaders[i].sh_link >= DriverEhdr->e_shnum)
+            {
+                return NULL;
+            }
+
+            StringTable = (PSTR)(
+                (PUCHAR)DriverBuffer +
+                SectionHeaders[SectionHeaders[i].sh_link].sh_offset
+            );
+            break;
+        }
+    }
+
+    if (!SymbolTable || !StringTable)
+    {
+        return NULL;
+    }
+
+    for (ULONG i = 0; i < SymbolCount; i++)
+    {
+        PSTR SymbolName;
+        Elf32_Shdr* SymbolSection;
+
+        if (SymbolTable[i].st_name == 0 ||
+            SymbolTable[i].st_shndx == SHN_UNDEF ||
+            SymbolTable[i].st_shndx >= DriverEhdr->e_shnum)
+        {
+            continue;
+        }
+
+        SymbolName = StringTable + SymbolTable[i].st_name;
+        if (RtlRawStringCompareN(
+                SymbolName,
+                "DriverEntry",
+                RtlRawStringLength("DriverEntry")) != 0 ||
+            RtlRawStringLength(SymbolName) != RtlRawStringLength("DriverEntry"))
+        {
+            continue;
+        }
+
+        SymbolSection = &SectionHeaders[SymbolTable[i].st_shndx];
+        if (SymbolTable[i].st_value >= SymbolSection->sh_size)
+        {
+            return NULL;
+        }
+
+        return (PVOID)(
+            (PUCHAR)DriverBuffer +
+            SymbolSection->sh_offset +
+            SymbolTable[i].st_value
+        );
+    }
+
+    return NULL;
 }
 
 VEASTATUS
@@ -149,7 +236,9 @@ LdrResolveBootDriverWithKernel(
                 if (SymbolAddress == 0)
                 {
                     LdrWarning("Undefined Kernel Symbol:\n");
-                    return STATUS_PROCEDURE_NOT_FOUND;
+                    BvPrintLog(SymName);
+                    while(1);
+                    return STATUS_SYMBOL_RESOLVE_NOT_FOUND;
                 }
             }
             /* Case 2: Simbol internal milik Driver sendiri */
@@ -249,13 +338,27 @@ LdrInitLoadBootDriver(
     /* Fill drier metadata */
     DriverEntry->ImageBase = FileBuffer;
     DriverEntry->ImageSize = FileInfo.FileSize;
-    DriverEntry->EntryPoint = (PVOID)((PUCHAR)FileBuffer + Header->e_entry);
+    DriverEntry->EntryPoint = LdrpFindDriverEntryPoint(FileBuffer);
+    if (!DriverEntry->EntryPoint)
+    {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
     DriverEntry->Flags      = 0x00000001; // LDRP_DRIVER_LOADED / RELOCATED
+
+    /* Build string */
+    CHAR RegistryPrefix[53];
+    RtlCopyMemory(RegistryPrefix, "/REGISTRY/MACHINE/SYSTEM/CurrentControlSet/Services/", 53);
+    ULONG RegistryPrefixLen = (ULONG)RtlRawStringLength(RegistryPrefix);
     
+    /* Calculate string size */
     ULONG PathLen = (ULONG)RtlRawStringLength(ResolvedPath);
     ULONG ServiceLen = (ULONG)RtlRawStringLength(ServiceName);
+    ULONG RegistryPathLen = RegistryPrefixLen + ServiceLen;
     PSTR FilePathBuf = (PSTR)LmAllocatePool(LdrUnreclaimablePool, (PathLen + 1));
-    PSTR RegPathBuf  = (PSTR)LmAllocatePool(LdrUnreclaimablePool, (ServiceLen + 1));
+    PSTR RegPathBuf  = (PSTR)LmAllocatePool(
+        LdrUnreclaimablePool,
+        RegistryPathLen + 1
+    );
 
     if (!FilePathBuf || !RegPathBuf)
     {
@@ -263,14 +366,24 @@ LdrInitLoadBootDriver(
     }
 
     RtlCopyRawString(FilePathBuf, ResolvedPath);
-    RtlCopyRawString(RegPathBuf, ServiceName);
+    
+    /* Fill first registry prefix first and append it */
+    RtlCopyRawString(RegPathBuf, RegistryPrefix);
+    if (!RtlAppendRawString(
+            RegPathBuf,
+            RegistryPathLen + 1,
+            ServiceName))
+    {
+        return STATUS_NAME_TOO_LONG;
+    }
 
+    /* Fill the FilePath and RegistryPath */
     DriverEntry->FilePath.Buffer = FilePathBuf;
-    DriverEntry->FilePath.Length = PathLen + 1;
-    DriverEntry->FilePath.MaximumLength = DriverEntry->FilePath.Length;
+    DriverEntry->FilePath.Length = (USHORT)PathLen;
+    DriverEntry->FilePath.MaximumLength = (USHORT)(PathLen + 1);
     DriverEntry->RegistryPath.Buffer = RegPathBuf;
-    DriverEntry->RegistryPath.Length = ServiceLen + 1;
-    DriverEntry->RegistryPath.MaximumLength = DriverEntry->RegistryPath.Length;
+    DriverEntry->RegistryPath.Length = (USHORT)RegistryPathLen;
+    DriverEntry->RegistryPath.MaximumLength = (USHORT)(RegistryPathLen + 1);
 
     InsertTailList(&LdrBlockBoot->BootDriverList, &DriverEntry->Link);
 

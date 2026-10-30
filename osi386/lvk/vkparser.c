@@ -8,7 +8,7 @@
  ----- Effective since 08-2026 til FOREVER ------------------------------- */
 
 #include <osi386.h>
-#include <../ndk/vktypes.h>
+#include <../ndk/veastatus.h>
 
 /* Revision History ------------------------------------------------------
  * DATE       : 04-08-2026
@@ -299,8 +299,6 @@ VEAPI
 LvkLoadBootDrivers(VOID)
 {
     if (!LvkParserReady) return FALSE;
-    BvClearScreen();
-    BvRerenderLayout();
 
     /* Get ControlSet001 */
     PKEY_DIRECTORY_NODE ServicesNode = LvkOpenKey("/ControlSet001/Services");
@@ -364,6 +362,8 @@ LvkLoadBootDrivers(VOID)
                     BvPrintLog(RawImagePath);
                     BvPrintLog("\n");
                 }
+                else
+                    LdrError(Status);
             }
             else
             {

@@ -50,10 +50,11 @@ LdrCreateInitialThreadAndProcess(IN OUT BLOCK_BOOT_2 *BlockBoot2)
     Thread->Peb = NULL;
     Thread->VRuntime = 0;
     Thread->Weight = 1024;
+    Thread->Queue = NULL;
     InitializeListHead(&Thread->WaitListEntry);
 
     /* Make kernel stack now*/
-    ULONG StackSize = 8192; // 8KB
+    ULONG StackSize = 16384; // 8KB
     PVOID StackBase = LmAllocatePool(LdrUnreclaimablePool, StackSize);
     if (!StackBase)
     {

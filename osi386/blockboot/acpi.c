@@ -1,5 +1,111 @@
 #include <osi386.h>
 
+#pragma pack(push, 1)
+typedef struct _ACPI_MCFG_ALLOCATION {
+    ULONGLONG BaseAddress;
+    USHORT SegmentGroup;
+    UCHAR StartBus;
+    UCHAR EndBus;
+    ULONG Reserved;
+} ACPI_MCFG_ALLOCATION, *PACPI_MCFG_ALLOCATION;
+#pragma pack(pop)
+
+static
+VOID
+AcpiMapMcfgConfigurationSpace(PACPI_HEADER McfgTable)
+{
+    ULONG AllocationCount;
+    PACPI_MCFG_ALLOCATION Allocations;
+    extern PAGE_ENTRY *g_KernelPageDirectory;
+
+    if (!McfgTable || McfgTable->Length < sizeof(ACPI_HEADER) + sizeof(ULONGLONG)) {
+        return;
+    }
+
+    AllocationCount = (McfgTable->Length -
+                       (sizeof(ACPI_HEADER) + sizeof(ULONGLONG))) /
+                      sizeof(ACPI_MCFG_ALLOCATION);
+    Allocations = (PACPI_MCFG_ALLOCATION)(
+        (PUCHAR)McfgTable + sizeof(ACPI_HEADER) + sizeof(ULONGLONG));
+
+    for (ULONG Index = 0; Index < AllocationCount; Index++) {
+        PACPI_MCFG_ALLOCATION Allocation = &Allocations[Index];
+        ULONGLONG BusCount;
+        ULONGLONG MappingSize;
+
+        if (Allocation->EndBus < Allocation->StartBus ||
+            Allocation->BaseAddress > 0xFFFFFFFFULL)
+        {
+            continue;
+        }
+
+        BusCount = (ULONGLONG)Allocation->EndBus -
+                   (ULONGLONG)Allocation->StartBus + 1;
+        MappingSize = BusCount << 20;
+
+        if (MappingSize > 0xFFFFFFFFULL ||
+            Allocation->BaseAddress + MappingSize > 0x100000000ULL)
+        {
+            continue;
+        }
+
+        /*
+         * The kernel's ECAM reader currently uses the physical ECAM address
+         * as its virtual address. Keep that contract by identity-mapping the
+         * complete MCFG bus range before entering the kernel.
+         */
+        LmMapVirtualMemory(
+            g_KernelPageDirectory,
+            (ULONG)Allocation->BaseAddress,
+            (ULONG)Allocation->BaseAddress,
+            (ULONG)(MappingSize / PAGE_SIZE)
+        );
+    }
+}
+
+static
+VOID
+AcpiMapDsdtFromFadt(PACPI_HEADER FadtTable)
+{
+    ULONG DsdtPhysical;
+    ULONG DsdtLength;
+    ULONG PageCount;
+    ULONG_PTR DsdtAddress;
+    PACPI_HEADER DsdtHeader;
+    extern PAGE_ENTRY *g_KernelPageDirectory;
+
+    if (!FadtTable) return;
+
+    /* FADT offsets are fixed by the ACPI specification. */
+    DsdtPhysical = *(PULONG)((PUCHAR)FadtTable + 40);
+    DsdtAddress = DsdtPhysical;
+
+    if (FadtTable->Revision >= 2)
+    {
+        ULONGLONG XDsdt = *(PULONGLONG)((PUCHAR)FadtTable + 140);
+        if (XDsdt != 0 && XDsdt <= 0xFFFFFFFFULL)
+        {
+            DsdtAddress = (ULONG_PTR)XDsdt;
+        }
+    }
+
+    if (DsdtAddress == 0) return;
+
+    DsdtHeader = (PACPI_HEADER)LmMapIoSpace(DsdtAddress, sizeof(ACPI_HEADER));
+    if (!DsdtHeader || DsdtHeader->Length <= sizeof(ACPI_HEADER)) return;
+
+    DsdtLength = DsdtHeader->Length;
+    PageCount = (DsdtLength + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    /* The kernel consumes ACPI table pointers as identity-mapped addresses. */
+    LmMapVirtualMemory(
+        g_KernelPageDirectory,
+        (ULONG)DsdtAddress,
+        (ULONG)DsdtAddress,
+        PageCount
+    );
+}
+
 int IsValidRSDP(LPRSDP Rsdp)
 {
     uint8_t sum = 0;
@@ -113,6 +219,12 @@ AcpiMapExtendedPointer(
                     if (ChildHeader && ChildHeader->Length > 0) {
                         // Map full child table dan TIMPA POINTERNYA dengan Virtual Address
                         PVOID ChildVirt = LmMapIoSpace(ChildPhys, ChildHeader->Length);
+                        if (cmemcmp(ChildHeader->Signature, "FACP", 4) == 0) {
+                            AcpiMapDsdtFromFadt((PACPI_HEADER)ChildVirt);
+                        }
+                        if (cmemcmp(ChildHeader->Signature, "MCFG", 4) == 0) {
+                            AcpiMapMcfgConfigurationSpace((PACPI_HEADER)ChildVirt);
+                        }
                         Entries[i] = (ULONGLONG)(ULONG_PTR)ChildVirt; 
                     }
                 }
@@ -145,6 +257,12 @@ AcpiMapExtendedPointer(
                     if (ChildHeader && ChildHeader->Length > 0) {
                         // Map full child table dan TIMPA POINTERNYA dengan Virtual Address
                         PVOID ChildVirt = LmMapIoSpace(ChildPhys, ChildHeader->Length);
+                        if (cmemcmp(ChildHeader->Signature, "FACP", 4) == 0) {
+                            AcpiMapDsdtFromFadt((PACPI_HEADER)ChildVirt);
+                        }
+                        if (cmemcmp(ChildHeader->Signature, "MCFG", 4) == 0) {
+                            AcpiMapMcfgConfigurationSpace((PACPI_HEADER)ChildVirt);
+                        }
                         Entries[i] = (ULONG)(ULONG_PTR)ChildVirt; 
                     }
                 }
