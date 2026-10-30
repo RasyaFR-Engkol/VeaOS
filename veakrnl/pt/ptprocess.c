@@ -2,6 +2,17 @@
 
 ULONG PtUniqueProcessId = 100;
 
+static inline VOID PiSwapProcess(PKPROCESS TargetProcess) {
+    ULONG_PTR DirectoryTableBase = TargetProcess->DirectoryTableBase; 
+
+    __asm__ __volatile__(
+        "mov %0, %%cr3"
+        : // Tidak ada output
+        : "r" (DirectoryTableBase) // Input operand
+        : "memory" // Clobber untuk mencegah reordering oleh kompiler
+    );
+}
+
 ULONG
 VEAPI
 PtCounterUniqueProcessId(VOID)
@@ -10,44 +21,144 @@ PtCounterUniqueProcessId(VOID)
     return PtUniqueProcessId;
 }
 
-PEPROCESS
+VEASTATUS
 VEAPI
-PtCreateSystemProcess(
-    VOID
+PtpCreateProcess(
+    OUT PHANDLE ProcessHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+    IN HANDLE ParentProcess OPTIONAL,
+    IN ULONG Flags,
+    IN HANDLE SectionHandle OPTIONAL,
+    IN HANDLE DebugPort OPTIONAL,
+    IN HANDLE ExceptionPort OPTIONAL
 )
 {
-    PEPROCESS Process = NULL;
+    PEPROCESS Parent, Process;
+    VEASTATUS Status;
+    PULONG_PTR VirtualAddress;
+    PULONG SystemPageDir;
+    ULONG PdeFlags;
 
-    VEASTATUS Status = ObCreateObject(
-        KernelMode,
+    UNREFERENCED_PARAMETER(SectionHandle);
+    UNREFERENCED_PARAMETER(DebugPort);
+    UNREFERENCED_PARAMETER(ExceptionPort);
+    UNREFERENCED_PARAMETER(Flags);
+
+    if (ParentProcess)
+    {
+        Status = ObReferenceObjectByHandle(
+            ParentProcess,
+            0x1000, /* TODO: ACCESS_MASK lebih jelas nanti*/
+            PtEprocessType,
+            KernelMode, /* TODO: Get more Good Access*/
+            (PVOID*)&Parent
+        );
+
+        if (!VEA_SUCCESS(Status))
+        {
+            return Status;
+        }
+    }
+    else
+    {
+        Parent = NULL;
+    }
+
+    Status = ObCreateObject(
+        KernelMode, /* TODO: Get more Good Access */
         PtEprocessType,
-        NULL,
+        ObjectAttributes,
         KernelMode,
         NULL,
         sizeof(EPROCESS),
         0,
         0,
-        (PVOID)&Process
+        (PVOID*)&Process
     );
-    
-    if (!VEA_SUCCESS(Status))
+    if (!VEA_SUCCESS(Status)) return Status;
+
+    RtlZeroMemory(Process, sizeof(EPROCESS));
+
+    if (Parent)
+        Process->ParentProcess = Parent;
+
+    Process->Cid.UniqueProcess = PtCounterUniqueProcessId();
+
+    if (ObjectAttributes && ObjectAttributes->ObjectName && ObjectAttributes->ObjectName->Buffer)
     {
-        KdPrintf("ERROR: Failed to create System Process. Status 0x%x\n\r", Status);
-        return NULL;
+        RtlCopyRawStringN(Process->ImageFileName, (PCHAR)ObjectAttributes->ObjectName->Buffer, 15);
+    }
+    else if (Parent)
+    {
+        RtlCopyRawStringN(Process->ImageFileName, Parent->ImageFileName, 15);
+    }
+    else
+    {
+        RtlCopyRawStringN(Process->ImageFileName, "SystemProcess", 15);
     }
 
-    Process->Cid.UniqueProcess = 4; 
-    RtlCopyRawStringN(Process->ImageFileName, "System", 15);
+    Process->ObjectTable = UlCreateHandleTable(TEMPORARY_MAX_HANDLE);
 
-    Process->ObjectTable = UlCreateHandleTable(100);
-    Process->Pcb.DirectoryTableBase = (ULONG_PTR)MiGetSystemPageDirectoryTableBase();
-    Process->Pcb.BasePriority = 8; // Prioritas bawaan kernel (Normal/Higher)
+    Status = MmInitializeProcessDirectoryBase(Process);
+    if (!VEA_SUCCESS(Status))
+    {
+        if (Parent) ObDereferenceObject(Parent);
+        ObDereferenceObject(Process);
+        return Status;
+    }
+
+    Process->Pcb.BasePriority = 0;
     Process->Pcb.State = Initialized;
-
     InitializeListHead(&Process->Pcb.ThreadListHead);
+
     InsertTailList(&PtProcessList, &Process->ActiveProcessLinks);
 
-    return Process;
+    if (ProcessHandle)
+    {
+        Status = ObInsertObject(
+            Process,
+            NULL,
+            DesiredAccess,
+            0,
+            NULL,
+            ProcessHandle
+        );
+
+        if (!VEA_SUCCESS(Status))
+        {
+            if (Parent) ObDereferenceObject(Parent);
+            ObDereferenceObject(Process);
+            return Status;
+        }
+    }
+
+    if (Parent)
+    {
+        ObDereferenceObject(Parent);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+VEASTATUS
+VEAPI
+PtCreateSystemProcess(
+    OUT PHANDLE ProcessHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjAttr
+)
+{
+    return PtpCreateProcess(
+        ProcessHandle,
+        DesiredAccess,
+        ObjAttr,
+        NULL,
+        0,
+        NULL,
+        NULL,
+        NULL
+    );
 }
 
 PEPROCESS
@@ -79,7 +190,7 @@ PtCreateProcess(
     // Inisialisasi struct EPROCESS
     Process->Cid.UniqueProcess = PtCounterUniqueProcessId();
     RtlCopyRawStringN(Process->ImageFileName, ImageFileName, 15);
-    Process->ObjectTable = UlCreateHandleTable(100);
+    Process->ObjectTable = UlCreateHandleTable(TEMPORARY_MAX_HANDLE);
 
     Process->Pcb.DirectoryTableBase = MmAllocatePhysicalPage();
     if(!Process->Pcb.DirectoryTableBase)
@@ -126,4 +237,79 @@ PtInsertProcess(
     if(!Process) return;
 
     InsertTailList(&PtProcessList, &Process->ActiveProcessLinks);
+}
+
+VOID
+VEAPI
+PtAttachProcess(
+    IN PKPROCESS Process
+)
+{
+    PKTHREAD CurrentThread = PtGetCurrentThread();
+    KIRQL OldIrql;
+
+    if (CurrentThread->ApcState.Process == Process) {
+        return;
+    }
+
+    if (CurrentThread->ApcStateIndex != OriginalApcEnvironment || 
+        KsDpcRoutineRunning()) {
+        KsBugCheckEx(
+            INVALID_OBJECT_ATTACH,
+            (ULONG_PTR)Process,
+            (ULONG_PTR)CurrentThread->ApcState.Process,
+            CurrentThread->ApcStateIndex,
+            KsDpcRoutineRunning()
+        );
+    }
+
+    InterlockedIncrement((PLONG)&Process->StackCount);
+    KsAcquireSpinLock(&CurrentThread->ApcQueueLock, &OldIrql);
+
+    CurrentThread->SavedApcState = CurrentThread->ApcState;
+
+    InitializeListHead(&CurrentThread->ApcState.ApcListHead[0]);
+    InitializeListHead(&CurrentThread->ApcState.ApcListHead[1]);
+    CurrentThread->ApcState.Process = Process;
+    CurrentThread->ApcState.KernelApcInProgress = FALSE;
+    CurrentThread->ApcState.KernelApcPending = FALSE;
+    CurrentThread->ApcState.UserApcPending = FALSE;
+
+    CurrentThread->ApcStatePointer[OriginalApcEnvironment] = &CurrentThread->SavedApcState;
+    CurrentThread->ApcStatePointer[AttachedApcEnvironment] = &CurrentThread->ApcState;
+    CurrentThread->ApcStateIndex = AttachedApcEnvironment;
+
+    KsReleaseSpinLock(&CurrentThread->ApcQueueLock, OldIrql);
+
+    PiSwapProcess(Process);
+}
+
+VOID
+VEAPI
+PtDetachProcess(VOID)
+{
+    PKTHREAD CurrentThread = PtGetCurrentThread();
+    KIRQL OldIrql;
+
+    if (CurrentThread->ApcStateIndex == OriginalApcEnvironment) {
+        return; 
+    }
+
+    PKPROCESS AttachedProcess = CurrentThread->ApcState.Process;
+    PKPROCESS OriginalProcess = CurrentThread->SavedApcState.Process;
+
+    KsAcquireSpinLock(&CurrentThread->ApcQueueLock, &OldIrql);
+
+    CurrentThread->ApcState = CurrentThread->SavedApcState;
+    CurrentThread->SavedApcState.Process = NULL;
+
+    CurrentThread->ApcStatePointer[OriginalApcEnvironment] = &CurrentThread->ApcState;
+    CurrentThread->ApcStatePointer[AttachedApcEnvironment] = &CurrentThread->SavedApcState;
+    CurrentThread->ApcStateIndex = OriginalApcEnvironment;
+
+    KsReleaseSpinLock(&CurrentThread->ApcQueueLock, OldIrql);
+
+    InterlockedDecrement((PLONG)&AttachedProcess->StackCount);
+
+    PiSwapProcess(OriginalProcess);
 }

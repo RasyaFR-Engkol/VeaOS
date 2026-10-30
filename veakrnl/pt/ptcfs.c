@@ -1,5 +1,30 @@
 #include <veakrnl.h>
 
+#define PT_CFS_BASE_WEIGHT 1024UL
+BOOLEAN
+VEAPI
+PtSetThreadPriority(
+    IN PKTHREAD Thread,
+    IN CHAR Priority
+)
+{
+    ULONG WeightShift;
+
+    if (!Thread)
+        return FALSE;
+
+    if (Priority < 0)
+        Priority = 0;
+
+    WeightShift = (ULONG)Priority / 8;
+    if (WeightShift > 5)
+        WeightShift = 5;
+
+    Thread->Priority = Priority;
+    Thread->Weight = (ULONGLONG)PT_CFS_BASE_WEIGHT << WeightShift;
+    return TRUE;
+}
+
 LONG
 VEAPI
 PtCfsCompareRoutine(
@@ -28,12 +53,14 @@ PtEnqueueThreadCfs(
 {
     if (!RunQueue || !Thread) return;
 
+    ULONG_PTR Flags = PtpSaveAndDisableInterrupts();
+
     // Bersihkan pointer node sebelum dimasukkan ke tree
     Thread->CfsNode.Left = NULL;
     Thread->CfsNode.Right = NULL;
     Thread->CfsNode.Parent = NULL;
 
-    // Ubah status thread menjadi Ready (menunggu jatah CPU)
+    // Ubah status thread menjadi Ready
     Thread->State = Ready;
 
     // Masukkan ke dalam Red-Black Tree CFS
@@ -42,6 +69,8 @@ PtEnqueueThreadCfs(
     // Update akumulasi statistik RunQueue
     RunQueue->RunningTasks++;
     RunQueue->TotalWeight += Thread->Weight;
+
+    PtpRestoreInterrupts(Flags);
 }
 
 VOID
@@ -53,10 +82,10 @@ PtDequeueThreadCfs(
 {
     if (!RunQueue || !Thread) return;
 
-    // Hapus node dari RBT
+    ULONG_PTR Flags = PtpSaveAndDisableInterrupts();
+
     RtlDeleteElementRb(&RunQueue->CfsTree, &Thread->CfsNode);
 
-    // Potong statistik RunQueue
     if (RunQueue->RunningTasks > 0) {
         RunQueue->RunningTasks--;
     }
@@ -64,34 +93,38 @@ PtDequeueThreadCfs(
     if (RunQueue->TotalWeight >= Thread->Weight) {
         RunQueue->TotalWeight -= Thread->Weight;
     } else {
-        RunQueue->TotalWeight = 0; // Proteksi underflow
+        RunQueue->TotalWeight = 0;
     }
+
+    PtpRestoreInterrupts(Flags);
 }
 
 PKTHREAD
 VEAPI
 PtPickNextThreadCfs(PKRUNQUEUE RunQueue)
 {
+    PKTHREAD NextThread = NULL;
+
     if (!RunQueue) return NULL;
 
-    // Ambil node paling kiri (Leftmost) dalam O(1)
+    ULONG_PTR Flags = PtpSaveAndDisableInterrupts();
+
     PRTL_BALANCED_NODE LeftmostNode = RtlGetLeftmostNodeRb(&RunQueue->CfsTree);
 
-    // Jika RBT kosong, tidak ada task yang "Ready" (CPU Idle)
     if (!LeftmostNode) {
         RunQueue->CurrentThread = NULL;
+        PtpRestoreInterrupts(Flags);
         return NULL;
     }
 
-    // Rekonstruksi pointer KTHREAD dari RTL_BALANCED_NODE
-    PKTHREAD NextThread = CONTAINING_RECORD(LeftmostNode, KTHREAD, CfsNode);
+    NextThread = CONTAINING_RECORD(LeftmostNode, KTHREAD, CfsNode);
 
-    // CABUT dari RBT agar VRuntime-nya bisa di-update bebas tanpa merusak tree
     RtlDeleteElementRb(&RunQueue->CfsTree, &NextThread->CfsNode);
 
-    // Ubah status ke Running dan set sebagai CurrentThread
     NextThread->State = Running;
     RunQueue->CurrentThread = NextThread;
+
+    PtpRestoreInterrupts(Flags);
 
     return NextThread;
 }
