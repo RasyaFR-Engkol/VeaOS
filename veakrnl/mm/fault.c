@@ -47,16 +47,17 @@ MmAccessFault(
 
         if (MmPipDatabase[Index].ShareCount == 1) 
         {
-            // cuma proses ini yang pegang -> gak perlu copy, langsung writable
             pte->bits.rw = 1;
             pte->bits.COW = 0;
         } 
         else
         {
-            // masih di-share -> alokasi page baru, copy isi, lepas 1 referensi lama
             ULONG NewPhys = MmAllocatePhysicalPage();
+            if (NewPhys == 0) {
+                return FALSE; 
+            }
             MmpCopyPhysicalPage(NewPhys, OldPhys);
-            MmFreePhysicalPage(OldPhys);          // decrement ShareCount lama
+            MmFreePhysicalPage(OldPhys); 
             pte->bits.frame = NewPhys >> 12;
             pte->bits.rw = 1;
             pte->bits.COW = 0;

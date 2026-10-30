@@ -1,5 +1,45 @@
 #include <veakrnl.h>
 
+PHYSICAL_ADDRESS
+VEAPI
+MmGetPhysicalAddress(
+    IN PVOID BaseAddress
+)
+{
+    PHYSICAL_ADDRESS PhysicalAddress;
+    ULONG VirtualAddress;
+    PAGE_ENTRY *Pde;
+    PAGE_ENTRY *Pte;
+
+    PhysicalAddress.QuadPart = 0;
+    VirtualAddress = (ULONG)BaseAddress;
+    Pde = MM_GET_PDE(VirtualAddress);
+
+    if (!Pde->bits.present)
+    {
+        return PhysicalAddress;
+    }
+
+    if (Pde->bits.ps_or_pat)
+    {
+        PhysicalAddress.QuadPart =
+            ((ULONGLONG)(*(ULONG *)Pde & 0xFFC00000)) |
+            (VirtualAddress & 0x003FFFFF);
+        return PhysicalAddress;
+    }
+
+    Pte = MM_GET_PTE(VirtualAddress);
+    if (!Pte->bits.present)
+    {
+        return PhysicalAddress;
+    }
+
+    PhysicalAddress.QuadPart =
+        ((ULONGLONG)(*(ULONG *)Pte & 0xFFFFF000)) |
+        (VirtualAddress & 0x00000FFF);
+    return PhysicalAddress;
+}
+
 PVOID
 VEAPI
 MmMapIoSpace(
@@ -8,12 +48,10 @@ MmMapIoSpace(
     MEMORY_CACHING_TYPE CacheType
 )
 {
-    // 1. Hitung berapa page yang dibutuhkan (Page Aligned)
     ULONG Offset = PhysicalAddress & 4095;
     ULONG AlignedPhys = PhysicalAddress & ~4095;
     ULONG PageCount = (NumberOfBytes + Offset + 4095) / 4096;
 
-    // 2. Minta rentang Virtual Address kosong dari AVL Tree kernel lu
     ULONG BaseVa = MmAllocateVirtualRange(PageCount);
     if (BaseVa == 0) {
         kdp_print("MM: MmMapIoSpace failed to allocate virtual range!\n\r");
@@ -23,16 +61,15 @@ MmMapIoSpace(
     ULONG CurrentVa = BaseVa;
     ULONG CurrentPhys = AlignedPhys;
 
-    // 3. Lakukan mapping manual ke Page Table
     for (ULONG i = 0; i < PageCount; i++) {
+        
         PAGE_ENTRY *pde = MM_GET_PDE(CurrentVa);
         
-        // JIKA PAGE TABLE BELUM ADA: Kita harus bikin PT baru (Sama kayak di MmAllocatePoolPages)
         if (!pde->bits.present) {
-            ULONG NewPtPhys = MmAllocatePhysicalPage(); // Ambil 1 page fisik murni untuk Page Table
+            ULONG NewPtPhys = MmAllocatePhysicalPage(); 
             if (NewPtPhys == 0) {
                 kdp_print("MM: MmMapIoSpace OOM creating Page Table!\n\r");
-                // TODO: Rollback virtual range if necessary
+                MmUnmapIoSpace((PVOID)BaseVa, i * 4096);
                 return NULL;
             }
             
@@ -43,12 +80,37 @@ MmMapIoSpace(
             RtlZeroMemory(PtVirtualAddr, 4096);
         }
 
-        // Tembak langsung alamat fisik MMIO ke PTE
         PAGE_ENTRY *pte = MM_GET_PTE(CurrentVa);
-        
-        // Setup bit PTE: Present, Writable. 
-        // Untuk MMIO (LAPIC), tambahkan bit PCD (Page Cache Disable) jika struktur PAGE_ENTRY lu mendukung.
+        if (pte->bits.present)
+        {
+            KsBugCheckEx(
+                MEMORY_MANAGEMENT_ERROR,
+                MM_BUGCHECK_PTE_CORRUPTED,
+                CurrentVa,
+                pte->raw,
+                CurrentPhys
+            );
+        }
+
         MMI_WRITE_PTE_VALID(pte, CurrentPhys >> 12);
+
+        switch (CacheType)
+        {
+            case MmNonCached:
+            case MmNonCachedUnordered:
+                pte->bits.cache_disable = 1;
+                pte->bits.write_through = 1;
+                break;
+
+            case MmWriteCombined:
+                // TODO: PAT need to be programmed. Fallback to unchached.
+                pte->bits.cache_disable = 1;
+                pte->bits.write_through = 1;
+                break;
+
+            default:
+                break;
+        }
         
         // Refresh TLB CPU
         MMI_INVALIDATE_TLB(CurrentVa);
@@ -57,7 +119,6 @@ MmMapIoSpace(
         CurrentPhys += 4096;
     }
 
-    // Kembalikan alamat virtual yang sudah ditambah offset aslinya
     return (PVOID)(BaseVa + Offset);
 }
 
@@ -102,3 +163,101 @@ MiGetSystemPageDirectoryTableBase(VOID)
 
     return (PVOID)Cr3;
 }   
+
+VOID
+VEAPI
+MmProbeAndLockPages(
+    PMDL Mdl,
+    KPROCESSOR_MODE AccessMode,
+    LOCK_OPERATION Operation
+)
+{
+    ULONG PageCount;
+    ULONG CurrentVa;
+    ULONG i;
+    PAGE_ENTRY *Pte;
+
+    /* Can't lock MDL again */
+    if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
+    {
+        KsBugCheckEx(MEMORY_MANAGEMENT_ERROR, 0x1111, (ULONG_PTR)Mdl, 0, 0);
+    }
+
+    PageCount = (Mdl->ByteCount + Mdl->ByteOffset + 4095) / 4096;
+    CurrentVa = (ULONG)Mdl->StartVa;
+
+    for (i = 0; i < PageCount; i++)
+    {
+        volatile UCHAR *TouchVa = (volatile UCHAR *)CurrentVa;
+
+RetryFault:
+        /* Cek apakah Page Directory atau Page Table belum ada */
+        if (!MM_GET_PDE(CurrentVa)->bits.present || 
+            !MM_GET_PTE(CurrentVa)->bits.present)
+        {
+            if (Operation != IoReadAccess) {
+                // Paksa Write Fault (Membaca lalu menulis ulang hal yang sama)
+                *TouchVa = *TouchVa;
+            } else {
+                // Paksa Read Fault (Cukup baca 1 byte)
+                (void)*TouchVa;
+            }
+            
+            // Setelah hardware #PF tertangani oleh ISR kamu, cek PTE lagi!
+            goto RetryFault;
+        }
+
+        Pte = MM_GET_PTE(CurrentVa);
+
+        /* Cek apakah butuh Write tapi page masih Read-Only (CoW scenario) */
+        if (Operation != IoReadAccess && !Pte->bits.rw) {
+            
+            // Paksa Write Fault untuk memicu Copy-On-Write
+            *TouchVa = *TouchVa;
+            
+            goto RetryFault;
+        }
+
+        /* Kalau sudah lolos semua, berarti halaman fisik SIAP dan VALID */
+        ULONG PhysAddress = Pte->bits.frame << 12;
+
+        MmReferencePhysicalPage(PhysAddress);
+
+        Mdl->PfnArray[i] = Pte->bits.frame;
+
+        CurrentVa += PAGE_SIZE;
+    }
+
+    Mdl->MdlFlags |= MDL_PAGES_LOCKED;
+}
+
+VOID
+VEAPI
+MmUnlockPages(
+    IN PMDL Mdl
+)
+{
+    ULONG PageCount;
+    ULONG i;
+
+    if ((Mdl->MdlFlags & MDL_PAGES_LOCKED) == 0) {
+        DPRINT("MM FATAL: Tried to unlock an MDL that is not locked!\n\r");
+        KsBugCheckEx(MEMORY_MANAGEMENT_ERROR, 0x4444, (ULONG_PTR)Mdl, 0, 0);
+        return;
+    }
+
+    if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
+    {
+        KsBugCheckEx(MEMORY_MANAGEMENT_ERROR, 0x5555, (ULONG_PTR)Mdl, 0, 0);
+    }
+
+    PageCount = (Mdl->ByteCount + Mdl->ByteOffset + (PAGE_SIZE - 1)) / PAGE_SIZE;
+
+    for (i = 0; i < PageCount; i++) {
+        ULONG PhysAddress = Mdl->PfnArray[i] << 12;
+
+        MmDereferencePhysicalPage(PhysAddress);
+    }
+
+    Mdl->MdlFlags &= ~MDL_PAGES_LOCKED;
+}
