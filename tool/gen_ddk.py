@@ -7,6 +7,56 @@ def remove_comments(text):
     text = re.sub(r'//.*', '', text)
     return text
 
+def split_c_statements(text):
+    statements = []
+    start = 0
+    brace_depth = 0
+    function_body = False
+    quote = None
+    escaped = False
+
+    for index, char in enumerate(text):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+
+        if char in ('"', "'"):
+            quote = char
+        elif char == '{':
+            if brace_depth == 0:
+                prefix = text[start:index]
+                function_body = (
+                    '(' in prefix
+                    and ')' in prefix
+                    and '=' not in prefix
+                    and not re.search(r'\b(struct|union|enum)\b', prefix)
+                )
+            brace_depth += 1
+        elif char == '}':
+            brace_depth -= 1
+            if brace_depth == 0 and function_body:
+                statement = text[start:index + 1].strip()
+                if statement:
+                    statements.append(statement)
+                start = index + 1
+                function_body = False
+        elif char == ';' and brace_depth == 0:
+            statement = text[start:index].strip()
+            if statement:
+                statements.append(statement + ';')
+            start = index + 1
+
+    remainder = text[start:].strip()
+    if remainder:
+        statements.append(remainder)
+
+    return statements
+
 def parse_header_files(header_files):
     macros = {}
     statements = []
@@ -50,17 +100,17 @@ def parse_header_files(header_files):
 
             # Split C Statement berdasarkan titik koma (;)
             clean_text = "\n".join(non_macro_lines)
-            for stmt in clean_text.split(';'):
+            for stmt in split_c_statements(clean_text):
                 s_clean = re.sub(r'\s+', ' ', stmt).strip()
                 if s_clean:
-                    statements.append(s_clean + ";")
+                    statements.append(s_clean)
 
     return macros, statements
 
 def find_prototype(symbol, statements):
     pattern = r'\b' + re.escape(symbol) + r'\b'
     for stmt in statements:
-        if re.search(pattern, stmt, re.IGNORECASE) and '(' in stmt and ')' in stmt:
+        if '{' not in stmt and re.search(pattern, stmt, re.IGNORECASE) and '(' in stmt and ')' in stmt:
             return stmt
     return None
 
@@ -118,8 +168,14 @@ def main():
         if sym_lower in processed_symbols:
             continue
 
-        # Jika simbol adalah Macro (#define)
-        if sym_lower in macros_lower:
+        # Prefer the function declaration over a conditional macro alias.
+        proto = find_prototype(sym, statements)
+        if proto:
+            declarations.append(f"VEA_EXPORT {proto}")
+            processed_symbols.add(sym_lower)
+
+        # Export a macro only when no function declaration exists.
+        elif sym_lower in macros_lower:
             actual_macro_name = macros_lower[sym_lower]
             macro_def = macros[actual_macro_name]
             
@@ -134,14 +190,8 @@ def main():
             declarations.append(macro_def)
             processed_symbols.add(sym_lower)
 
-        # Jika simbol adalah Fungsi Biasa
         else:
-            proto = find_prototype(sym, statements)
-            if proto:
-                declarations.append(f"VEA_EXPORT {proto}")
-                processed_symbols.add(sym_lower)
-            else:
-                declarations.append(f"// WARNING: Prototype/Macro for '{sym}' was not found in kernel headers!")
+            declarations.append(f"// WARNING: Prototype/Macro for '{sym}' was not found in kernel headers!")
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -174,6 +224,7 @@ def main():
         "#define _VEADDK_H_",
         "",
         "#include <procbind.h>",
+        "#include <guid.h>",
         '#include "veadrvtype.h"',
         "",
         "#ifdef __cplusplus",
