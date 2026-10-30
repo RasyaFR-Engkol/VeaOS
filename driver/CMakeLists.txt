@@ -38,10 +38,10 @@ function(add_vea_driver)
         add_custom_command(
             OUTPUT ${OBJ_FILE}
             COMMAND clang --target=i686-pc-none-elf -march=i686 -m32 -ffreestanding -nostdlib -fno-builtin 
-                    -fno-pic -fno-pie -fno-common -fno-asynchronous-unwind-tables
+                    -fno-pic -fno-pie -fno-common -fno-asynchronous-unwind-tables -fmacro-prefix-map=/home/xvrasya/VeaOS/=
                     ${VEA_INCLUDES} 
                     -I${CMAKE_CURRENT_SOURCE_DIR}
-                    -c ${C_FILE} -o ${OBJ_FILE} -std=gnu23 -fshort-wchar -fms-extensions
+                    -c ${C_FILE} -o ${OBJ_FILE} -std=gnu23 -fshort-wchar -fms-extensions -g
             DEPENDS ${C_FILE}
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
             COMMENT "[${DRIVER_NAME}] Compiling C: ${SAFE_NAME}"
