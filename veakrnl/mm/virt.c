@@ -1,11 +1,12 @@
 #include <veakrnl.h>
 
 PMM_VAD MmVadRoot = NULL;
-static RTL_AVL_TREE MmKernelVadTree;
+RTL_AVL_TREE MmKernelVadTree;
 static PMM_VAD MmBootstrapPool = NULL;
 static ULONG MmBootstrapIndex = 0;
 static PMM_VAD MmVadFreeList = NULL;
-static KSPIN_LOCK MmVmmLock;
+KSPIN_LOCK MmVmmLock;
+RTL_AVL_TREE MmSectionBasedTree;
 
 static 
 LONG 
@@ -119,7 +120,7 @@ static PMM_VAD VEAPI MmpAllocateVadNode(VOID)
     return &NewPageVa[0];
 }
 
-static VOID VEAPI MmpFreeVadNode(PMM_VAD VadNode)
+VOID VEAPI MmpFreeVadNode(PMM_VAD VadNode)
 {
     KIRQL OldIrql;
     KsAcquireSpinLock(&MmVmmLock, &OldIrql);
@@ -131,7 +132,6 @@ static VOID VEAPI MmpFreeVadNode(PMM_VAD VadNode)
     KsReleaseSpinLock(&MmVmmLock, OldIrql);
 }
 
-static 
 PMM_VAD 
 VEAPI
 MmpFindVadByVpn(PRTL_BALANCED_NODE Node, ULONG Vpn)
@@ -311,3 +311,76 @@ MmGetVirtualRangePageCount(ULONG VirtualAddress)
     KsReleaseSpinLock(&MmVmmLock, OldIrql);
     return PageCount;
 }
+
+LONG VEAPI MmpCompareBasedNode(PRTL_BALANCED_NODE NodeA, PRTL_BALANCED_NODE NodeB)
+{
+    PSECTION SecA = (PSECTION)NodeA;
+    PSECTION SecB = (PSECTION)NodeB;
+
+    if (SecA->Address.StartingVpn < SecB->Address.StartingVpn) return -1;
+    if (SecA->Address.StartingVpn > SecB->Address.StartingVpn) return 1;
+    return 0;
+}
+
+VEASTATUS
+VEAPI
+MiFindEmptyAddressRangeDownBasedTree(
+    IN SIZE_T Size,
+    IN ULONG_PTR HighestAddress,
+    IN ULONG Alignment,
+    IN PRTL_AVL_TREE Tree,
+    OUT ULONG_PTR *BaseAddress
+)
+{
+    ULONG_PTR TargetAddress = HighestAddress - Size;
+    TargetAddress &= ~(Alignment - 1);
+
+    if (!Tree->Root)
+    {
+        *BaseAddress = TargetAddress;
+        return STATUS_SUCCESS;
+    }
+
+    // Cari gap kosong dengan mengiterasi node dari kanan ke kiri (Top-Down)
+    PRTL_BALANCED_NODE Current = Tree->Root;
+    ULONG_PTR Candidate = TargetAddress;
+
+    while (Current)
+    {
+        PSECTION Sec = (PSECTION)Current;
+        ULONG_PTR SecStart = Sec->Address.StartingVpn;
+        ULONG_PTR SecEnd = Sec->Address.EndingVpn;
+
+        // Jika bentrok dengan section yang ada, geser alamat ke bawah section ini
+        if (Candidate < SecEnd && (Candidate + Size) > SecStart)
+        {
+            Candidate = (SecStart - Size) & ~(Alignment - 1);
+            Current = Tree->Root; // Reset pencarian dari root untuk alamat baru
+            continue;
+        }
+
+        Current = Current->Left;
+    }
+
+    if (Candidate < 0x00010000) // Di bawah 64KB User Space
+    {
+        return STATUS_NO_MEMORY;
+    }
+
+    *BaseAddress = Candidate;
+    return STATUS_SUCCESS;
+}
+
+VOID
+VEAPI
+MiInsertBasedSection(IN PSECTION Section)
+{
+    if (!MmSectionBasedTree.CompareRoutine)
+    {
+        MmSectionBasedTree.CompareRoutine = MmpCompareBasedNode;
+    }
+
+    RtlInsertElementAvl(&MmSectionBasedTree, (PRTL_BALANCED_NODE)Section);
+}
+
+/* EOF */

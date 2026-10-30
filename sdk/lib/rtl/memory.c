@@ -73,3 +73,16 @@ SIZE_T RtlCompareMemory(
 
     return Matched;
 }
+
+BOOLEAN RtlEqualMemory(PVOID Source1, PVOID Source2, SIZE_T Length) {
+    const unsigned char *p1 = (const unsigned char *)Source1;
+    const unsigned char *p2 = (const unsigned char *)Source2;
+
+    for (SIZE_T i = 0; i < Length; i++) {
+        if (p1[i] != p2[i]) {
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}

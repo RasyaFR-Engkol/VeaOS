@@ -42,10 +42,14 @@ typedef union _PAGE_ENTRY {
 } PAGE_ENTRY;
 #pragma pack(pop)
 
+struct _CONTROL_AREA;
+
 typedef struct _MM_VAD {
     RTL_BALANCED_NODE CoreNode; // WAJIB ditaruh di paling atas
     ULONG StartingVpn;
     ULONG EndingVpn;
+    struct _CONTROL_AREA *ControlArea;
+    ULONG Protection;
 } MM_VAD, *PMM_VAD;
 
 /* FOR ULPOOL */
@@ -507,5 +511,92 @@ typedef struct _MM_SECTION_SEGMENT
 #define MM_SEGMENT_INDELETE                 (0x4)
 #define MM_SEGMENT_INCREATE                 (0x8)
 #define MM_IMAGE_SECTION_FLUSH_DELETE       (0x10)
+
+typedef struct _SECTION_IMAGE_INFORMATION
+{
+    PVOID TransferAddress;
+    ULONG ZeroBits;
+    SIZE_T MaximumStackSize;
+    SIZE_T CommittedStackSize;
+    ULONG SubSystemType;
+    union
+    {
+        struct
+        {
+            USHORT SubSystemMinorVersion;
+            USHORT SubSystemMajorVersion;
+        };
+        ULONG SubSystemVersion;
+    };
+    ULONG GpValue;
+    USHORT ImageCharacteristics;
+    USHORT DllCharacteristics;
+    USHORT Machine;
+    BOOLEAN ImageContainsCode;
+    union
+    {
+        struct
+        {
+            UCHAR ComPlusNativeReady:1;
+            UCHAR ComPlusILOnly:1;
+            UCHAR ImageDynamicallyRelocated:1;
+            UCHAR ImageMappedFlat:1;
+            UCHAR Reserved:4;
+        };
+        UCHAR ImageFlags;
+    };
+    ULONG LoaderFlags;
+    ULONG ImageFileSize;
+    ULONG CheckSum;
+} SECTION_IMAGE_INFORMATION, *PSECTION_IMAGE_INFORMATION;
+
+typedef struct _MM_IMAGE_SECTION_OBJECT
+{
+    LONG64 RefCount;
+    PFILE_OBJECT FileObject;
+    ULONG SectionCount;
+    LONG MapCount;
+    ULONG SegFlags;
+
+    SECTION_IMAGE_INFORMATION ImageInformation;
+    PVOID BasedAddress;
+    ULONG NrSegments;
+    PMM_SECTION_SEGMENT Segments;
+} MM_IMAGE_SECTION_OBJECT, *PMM_IMAGE_SECTION_OBJECT;
+
+typedef struct _SECTION_OBJECT_POINTERS {
+    PVOID DataSectionObject;
+    PVOID SharedCacheMap;
+    PVOID ImageSectionObject;
+} SECTION_OBJECT_POINTERS, *PSECTION_OBJECT_POINTERS;
+
+//
+// MM Protection Mask flags
+//
+
+#define MM_NOCACHE            0x08
+#define MM_GUARDPAGE          0x10
+#define MM_WRITECOMBINE       0x18
+#define MM_PROTECT_SPECIAL    0x18
+
+#define MM_ZERO_ACCESS         0
+#define MM_READONLY            1
+#define MM_EXECUTE             2
+#define MM_EXECUTE_READ        3
+#define MM_READWRITE           4
+#define MM_WRITECOPY           5
+#define MM_EXECUTE_READWRITE   6
+#define MM_EXECUTE_WRITECOPY   7
+#define MM_PROTECT_ACCESS      7
+
+#define MM_DECOMMIT           (MM_ZERO_ACCESS | MM_GUARDPAGE)
+#define MM_NOACCESS           (MM_ZERO_ACCESS | MM_WRITECOMBINE)
+#define MM_OUTSWAPPED_KSTACK  (MM_EXECUTE_WRITECOPY | MM_WRITECOMBINE)
+#define MM_INVALID_PROTECTION  0xFFFFFFFF
+
+extern RTL_AVL_TREE MmSectionBasedTree;
+extern RTL_AVL_TREE MmKernelVadTree;
+
+#define SEC_BASED 0x00200000
 
 /* EOF */

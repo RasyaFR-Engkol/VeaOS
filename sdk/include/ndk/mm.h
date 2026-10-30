@@ -262,3 +262,59 @@ MmUnmapViewOfSection(
 VOID
 VEAPI
 MmInitSectionImplementation(VOID);
+
+#define PAGE_ALIGN_DOWN(va) ((ULONG_PTR)(va) & ~(PAGE_SIZE - 1))
+#define PAGE_ALIGN_UP(va)   (((ULONG_PTR)(va) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1))
+
+VOID
+VEAPI
+MiInsertBasedSection(IN PSECTION Section);
+
+VEASTATUS
+VEAPI
+MiFindEmptyAddressRangeDownBasedTree(
+    IN SIZE_T Size,
+    IN ULONG_PTR HighestAddress,
+    IN ULONG Alignment,
+    IN PRTL_AVL_TREE Tree,
+    OUT ULONG_PTR *BaseAddress
+);
+
+LONG VEAPI MmpCompareBasedNode(PRTL_BALANCED_NODE NodeA, PRTL_BALANCED_NODE NodeB);
+
+VOID
+VEAPI
+MmDereferenceSegmentWithLock(
+    IN PMM_SECTION_SEGMENT Segment,
+    IN KIRQL OldIrql
+);
+
+/* THIS IS HACK */
+#define MiAcquirePfnLock() KsAcquireDispatcherLock()
+#define MiReleasePfnLock(_Irql) KsReleaseDispatcherLock(_Irql)
+
+#define PAGE_ROUND_DOWN(x)                                  \
+    (((ULONG_PTR)(x))&(~(PAGE_SIZE-1)))
+#define PAGE_ROUND_UP(x)                                    \
+    ( (((ULONG_PTR)(x)) + PAGE_SIZE-1)  & (~(PAGE_SIZE-1)) )
+
+BOOLEAN
+VEAPI
+MmpEnsurePageTable(ULONG VirtualAddress);
+
+PMM_VAD 
+VEAPI
+MmpFindVadByVpn(PRTL_BALANCED_NODE Node, ULONG Vpn);
+
+extern PMM_VAD MmVadRoot;
+
+VOID VEAPI MmpFreeVadNode(PMM_VAD VadNode);
+
+VEASTATUS
+VEAPI
+MmUnmapViewOfSection(
+    IN PEPROCESS Process,
+    IN PVOID BaseAddress
+);
+
+/* EOF */

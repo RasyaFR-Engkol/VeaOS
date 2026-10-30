@@ -261,3 +261,39 @@ MmUnlockPages(
 
     Mdl->MdlFlags &= ~MDL_PAGES_LOCKED;
 }
+
+BOOLEAN
+VEAPI
+MmpEnsurePageTable(ULONG VirtualAddress)
+{
+    PAGE_ENTRY *pde = MM_GET_PDE(VirtualAddress);
+
+    DPRINT("[PDE TRACE] MmpEnsurePageTable for VA 0x%08X -> PDE Addr: 0x%p, Present: %d\n\r", 
+           VirtualAddress, pde, pde->bits.present);
+
+    if (pde->bits.present)
+    {
+        return TRUE;
+    }
+
+    ULONG NewPtPhys = MmAllocatePhysicalPage();
+    if (NewPtPhys == 0)
+    {
+        DPRINT("[PDE TRACE] FAIL: MmAllocatePhysicalPage for PT returned 0!\n\r");
+        return FALSE;
+    }
+
+    DPRINT("[PDE TRACE] New PT Physical Page: 0x%08X\n\r", NewPtPhys);
+
+    PVOID DirectPtVa = (PVOID)(NewPtPhys + 0xC0000000);
+    RtlZeroMemory(DirectPtVa, PAGE_SIZE);
+
+    MMI_WRITE_PDE_VALID(pde, NewPtPhys >> 12);
+
+    PVOID PtVirtualAddr = (PVOID)MM_GET_PTE(VirtualAddress);
+    MMI_INVALIDATE_TLB((ULONG)PtVirtualAddr);
+    MMI_INVALIDATE_TLB(VirtualAddress);
+
+    DPRINT("[PDE TRACE] PDE Validated Successfully!\n\r");
+    return TRUE;
+}
