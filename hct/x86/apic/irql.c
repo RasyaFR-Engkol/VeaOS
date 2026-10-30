@@ -1,8 +1,8 @@
 #include <veakrnl.h>
 #include "apic.h"
 
-KIRQL KiCurrentIrql = HIGH_LEVEL;
-KIRQL KiTprIrql     = HIGH_LEVEL;
+KIRQL KiCurrentIrql = PASSIVE_LEVEL;
+KIRQL KiTprIrql     = PASSIVE_LEVEL;
 
 VOID
 VEAPI
@@ -10,10 +10,12 @@ ApicInitLazyIrql(VOID)
 {
     __asm__ __volatile__("cli");
 
-    KiCurrentIrql = HIGH_LEVEL;
-    KiTprIrql     = HIGH_LEVEL;
+    // The loader initializes the PCR at PASSIVE_LEVEL; keep all IRQL state aligned.
+    KiCurrentIrql = PASSIVE_LEVEL;
+    KiTprIrql     = PASSIVE_LEVEL;
 
-    ApicWrite(APIC_REG_TPR, IrqlToApicVector(HIGH_LEVEL));
+    ApicWrite(APIC_REG_TPR, IrqlToApicVector(PASSIVE_LEVEL));
+    KeGetPcr()->Irql = PASSIVE_LEVEL;
 }
 
 KIRQL
@@ -21,9 +23,11 @@ VEAPI
 HctRaiseIrql(KIRQL NewIrql)
 {
     KIRQL OldIrql = KiCurrentIrql;
+    KIRQL IrqlFromPcr = KeGetCurrentIrql();
 
     if (NewIrql < OldIrql)
     {
+        DPRINT("UNSYNCHRONIZED IRQL: %d vs %d\n", OldIrql, IrqlFromPcr);
         KsBugCheck(IRQL_NOT_LESS_OR_EQUAL);
     }
 
@@ -53,9 +57,19 @@ HctLowerIrql(KIRQL NewIrql)
     // Jika ada pending Self-IPI di IRR LAPIC, LAPIC akan langsung
     // menembakkannya ke CPU tepat saat TPR ini ditulis.
     //
-    ApicWriteIrql(NewIrql);
     KiTprIrql = NewIrql;
     KeGetPcr()->Irql = KiTprIrql;
+    ApicWriteIrql(NewIrql);
+}
+
+VOID
+VEAPI
+HctSetIrql(KIRQL Irql)
+{
+    KiCurrentIrql = Irql;
+    KiTprIrql = Irql;
+    KeGetPcr()->Irql = KiTprIrql;
+    ApicWriteIrql(Irql);
 }
 
 KIRQL
@@ -95,6 +109,7 @@ HctBeginSystemInterrupt(
     *OldIrql = CurrentIrql;
     KiCurrentIrql = InterruptIrql;
     KiTprIrql     = InterruptIrql;
+    KeGetPcr()->Irql = InterruptIrql;
     ApicWriteIrql(InterruptIrql);
 
     return TRUE;
