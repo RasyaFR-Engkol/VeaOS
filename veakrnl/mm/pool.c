@@ -4,37 +4,43 @@ PVOID
 VEAPI
 MmAllocatePoolPages(POOL_TYPE PoolType, ULONG NumberOfPages)
 {
-    // 1. Minta rentang Virtual Address ke AVL/VAD 
-    ULONG VirtualAddress = MmAllocateVirtualRange(NumberOfPages); 
-    if (VirtualAddress == 0) {
-        kdp_print("MM FATAL: Failed to get Virtual Range for Pool!\n\r");
-        return NULL; 
+    ULONG ReservedPages;
+    ULONG VirtualAddress;
+    ULONG CurrentVa;
+    ULONG MappedPages = 0;
+
+    if (PoolType >= MaxPoolType ||
+        NumberOfPages == 0 ||
+        NumberOfPages == (ULONG)-1)
+    {
+        return NULL;
     }
 
-    ULONG CurrentVa = VirtualAddress;
+    /* Keep one unmapped page after each pool allocation as an overrun guard. */
+    ReservedPages = NumberOfPages + 1;
+    VirtualAddress = MmAllocateVirtualRange(ReservedPages);
+    if (VirtualAddress == 0) {
+        kdp_print("MM FATAL: Failed to get Virtual Range for Pool!\n\r");
+        return NULL;
+    }
 
-    // 2. Map Virtual Address ke Physical Pages satu per satu
+    CurrentVa = VirtualAddress;
+
     for (ULONG i = 0; i < NumberOfPages; i++) {
-        
-        // Minta memori fisik dari PIP Database
-        ULONG PhysPage = MmAllocatePhysicalPage(); 
+        ULONG PhysPage = MmAllocatePhysicalPage();
         if (PhysPage == 0) {
-            // TODO: Bikin logic rollback untuk ngebebasin VAD dan phys page 
-            // yang udah terlanjur dialokasikan kalau OOM di tengah jalan.
-            kdp_print("MM FATAL: Out of Physical Memory during Pool allocation!\n\r");
-            return NULL;
+            kdp_print("MM: Out of physical memory during pool allocation.\n\r");
+            goto Failure;
         }
 
-        // Ambil Page Directory Entry (PDE)
         PAGE_ENTRY *pde = MM_GET_PDE(CurrentVa);
-        
-        // JIKA PAGE TABLE BELUM ADA: Bikin Page Table baru (Sama kayak di MmMapPip)
         if (!pde->bits.present) {
-            ULONG NewPtPhys = MmAllocatePhysicalPage(); // Pinjam 1 page untuk PT
+            ULONG NewPtPhys = MmAllocatePhysicalPage();
             if (NewPtPhys == 0) {
-                return NULL; // OOM saat bikin Page Table
+                MmFreePhysicalPage(PhysPage);
+                goto Failure;
             }
-            
+
             MMI_WRITE_PDE_VALID(pde, NewPtPhys >> 12);
 
             PVOID PtVirtualAddr = (PVOID)((ULONG)MM_GET_PTE(CurrentVa) & 0xFFFFF000);
@@ -42,17 +48,44 @@ MmAllocatePoolPages(POOL_TYPE PoolType, ULONG NumberOfPages)
             RtlZeroMemory(PtVirtualAddr, 4096);
         }
 
-        // Ambil Page Table Entry (PTE) dan validasi mapping-nya
         PAGE_ENTRY *pte = MM_GET_PTE(CurrentVa);
+        if (pte->bits.present) {
+            MmFreePhysicalPage(PhysPage);
+            goto Failure;
+        }
+
         MMI_WRITE_PTE_VALID(pte, PhysPage >> 12);
-        
-        // Beri tahu CPU ada mapping baru di TLB
         MMI_INVALIDATE_TLB(CurrentVa);
 
+        MappedPages++;
         CurrentVa += 4096;
     }
 
+    {
+        ULONG GuardVa = VirtualAddress + NumberOfPages * PAGE_SIZE;
+        PAGE_ENTRY *GuardPde = MM_GET_PDE(GuardVa);
+
+        if (GuardPde->bits.present &&
+            MM_GET_PTE(GuardVa)->bits.present)
+        {
+            KsBugCheckEx(BAD_POOL_HEADER, 14, GuardVa,
+                         MM_GET_PTE(GuardVa)->raw, NumberOfPages);
+            return NULL;
+        }
+    }
+
     return (PVOID)VirtualAddress;
+
+Failure:
+    if (MappedPages != 0)
+    {
+        MmFreePoolPages((PVOID)VirtualAddress, MappedPages);
+    }
+    else
+    {
+        MmFreeVirtualRange(VirtualAddress);
+    }
+    return NULL;
 }
 
 PVOID
@@ -61,6 +94,97 @@ MmAllocatePoolPage(POOL_TYPE PoolType)
 {
     // Cukup panggil versi jamaknya dengan jumlah 1 Page
     return MmAllocatePoolPages(PoolType, 1);
+}
+
+PVOID
+VEAPI
+MmAllocateContiguousMemory(
+    IN SIZE_T NumberOfBytes,
+    IN PHYSICAL_ADDRESS HighestAcceptableAddress
+)
+{
+    ULONG PageCount;
+    ULONG PhysicalAddress;
+    ULONGLONG LastPhysicalAddress;
+    PVOID VirtualAddress;
+
+    if (NumberOfBytes == 0 || NumberOfBytes > 0xFFFFFFFFUL - (PAGE_SIZE - 1))
+    {
+        return NULL;
+    }
+
+    PageCount = ((ULONG)NumberOfBytes + PAGE_SIZE - 1) / PAGE_SIZE;
+    PhysicalAddress = MmAllocateContiguousPhysicalPages(PageCount);
+    if (PhysicalAddress == 0)
+    {
+        return NULL;
+    }
+
+    LastPhysicalAddress = (ULONGLONG)PhysicalAddress +
+                          ((ULONGLONG)PageCount * PAGE_SIZE) - 1;
+    if (LastPhysicalAddress > (ULONGLONG)HighestAcceptableAddress.QuadPart)
+    {
+        MmFreeContiguousPhysicalPages(PhysicalAddress, PageCount);
+        return NULL;
+    }
+
+    VirtualAddress = MmMapIoSpace(
+        PhysicalAddress,
+        (ULONG)NumberOfBytes,
+        MmCached
+    );
+    if (!VirtualAddress)
+    {
+        MmFreeContiguousPhysicalPages(PhysicalAddress, PageCount);
+        return NULL;
+    }
+
+    return VirtualAddress;
+}
+
+VOID
+VEAPI
+MmFreeContiguousMemory(IN PVOID BaseAddress)
+{
+    PHYSICAL_ADDRESS BasePhysicalAddress;
+    PHYSICAL_ADDRESS CurrentPhysicalAddress;
+    ULONG PageCount;
+
+    if (BaseAddress == NULL)
+    {
+        return;
+    }
+
+    PageCount = MmGetVirtualRangePageCount((ULONG)BaseAddress);
+    if (PageCount == 0)
+    {
+        kdp_print("MM WARNING: Tried to free an invalid contiguous allocation!\n\r");
+        return;
+    }
+
+    BasePhysicalAddress = MmGetPhysicalAddress(BaseAddress);
+    if (BasePhysicalAddress.QuadPart == 0 ||
+        (BasePhysicalAddress.LowPart & (PAGE_SIZE - 1)) != 0)
+    {
+        kdp_print("MM WARNING: Contiguous allocation has no valid physical base!\n\r");
+        return;
+    }
+
+    for (ULONG i = 1; i < PageCount; i++)
+    {
+        CurrentPhysicalAddress = MmGetPhysicalAddress(
+            (PVOID)((ULONG)BaseAddress + i * PAGE_SIZE)
+        );
+        if (CurrentPhysicalAddress.QuadPart !=
+            BasePhysicalAddress.QuadPart + (ULONGLONG)i * PAGE_SIZE)
+        {
+            kdp_print("MM WARNING: Contiguous allocation mapping is not contiguous!\n\r");
+            return;
+        }
+    }
+
+    MmUnmapIoSpace(BaseAddress, PageCount * PAGE_SIZE);
+    MmFreeContiguousPhysicalPages(BasePhysicalAddress.LowPart, PageCount);
 }
 
 VOID
@@ -78,15 +202,13 @@ MmFreePoolPages(PVOID BaseAddress, ULONG NumberOfPages)
         if (pte->bits.present) {
             // Dapatkan alamat fisik murni (hilangkan 12 bit flag di bawah)
             ULONG PhysPage = (*(ULONG*)pte) & 0xFFFFF000; 
-            
-            // Kembalikan ke PIP Database (List halaman kosong)
-            MmFreePhysicalPage(PhysPage); 
-            
+
             // Hapus isi PTE sepenuhnya biar nggak ada sisa akses
             MI_WRITE_INVALID_PTE(pte);
-            
-            // Wajib! Kasih tau CPU kalau mapping ini udah musnah
             MMI_INVALIDATE_TLB(CurrentVa);
+
+            // Do not recycle the frame until its old virtual mapping is gone.
+            MmFreePhysicalPage(PhysPage);
         }
         CurrentVa += 4096;
     }

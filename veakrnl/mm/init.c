@@ -2,24 +2,38 @@
 
 PPIP MmPipDatabase = NULL;
 ULONG MmTotalPages = 0;
-ULONG MmFirstFreePip = 0xFFFFFFFF;
 
 BOOLEAN 
 VEAPI
 MmInitialize(PBLOCK_BOOT_2 BlockBoot)
 {
-    if(!MmInitializePip(BlockBoot))
+
+    if (UlpInitializationPhase == 0)
     {
-        return FALSE;
+        if(!MmInitializePip(BlockBoot))
+        {
+            return FALSE;
+        }
+        MmInitializeVmm();
+
+        UlInitializePools();
+
+        if (!MiInitializePipBitmap())
+        {
+            DPRINT("MM FATAL: Failed to initialize PIP Bitmap\n");
+            return FALSE;
+        }
+
+        MmpInitializeCowScratch();
+    }
+    else if (UlpInitializationPhase == 1)
+    {
+        MmInitSectionImplementation();
+        
+        MmInitializeZeroPageThreadEvent();
     }
 
-    MmInitializeVmm();
-
-    UlInitializePools();
-
-    MmpInitializeCowScratch();
-
-    kdp_print("MmInitialization Done.\n\r");
+    DPRINT("MmInitialize done in Phase %d\n", UlpInitializationPhase);
 
     return TRUE;
 }
