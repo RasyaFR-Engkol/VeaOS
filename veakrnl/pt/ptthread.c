@@ -10,6 +10,12 @@ PtEnqueueThreadCfs(
     PKTHREAD Thread
 );
 
+VOID
+VEAPI
+PtpExitThread(
+    VEASTATUS ExitStatus
+);
+
 ULONG
 VEAPI
 PtCounterUniqueThreadId(VOID)
@@ -33,7 +39,7 @@ PtpSystemThreadStartup(
     ((VOID (VEAPI*)(PVOID))StartAddress)(Argument);
 
     // 3. Jika fungsi selesai dan nge-return, hancurkan thread
-    // PtpExitThread(0);
+    PtpExitThread(STATUS_SUCCESS);
 }
 
 VOID
@@ -42,22 +48,84 @@ PtpExitThread(
     VEASTATUS ExitStatus
 )
 {
+    PKTHREAD KThread = PtGetCurrentThread();
+    if (!KThread)
+    {
+        // Safety net jika dipanggil di luar konteks thread valid
+        for (;;) { __Halt(); }
+    }
 
-    /*PETHREAD CurrentThread = PsGetCurrentThread(); 
+    PETHREAD CurrentThread = CONTAINING_RECORD(KThread, ETHREAD, Tcb);
+    ULONG_PTR Flags = PtpSaveAndDisableInterrupts();
+
     CurrentThread->ExitStatus = ExitStatus;
     CurrentThread->Tcb.State = Terminated;
 
-    RemoveEntryList(&CurrentThread->ThreadListEntry);
-    ObDereferenceObject(CurrentThread->Tcb.Process);
+    DPRINT("%p Thread exit with status: 0x%x\n", CurrentThread, CurrentThread->ExitStatus);
 
-    KiForcedContextSwitch();
-    */
-
-    // 6. Kode di bawah ini DIJAMIN TIDAK AKAN PERNAH DIJALANKAN
-    // karena CPU sudah pindah ke stack dan thread lain.
-    for(;;) {
-        asm volatile("hlt");
+    if (!IsListEmpty(&CurrentThread->ThreadListEntry))
+    {
+        RemoveEntryList(&CurrentThread->ThreadListEntry);
+        InitializeListHead(&CurrentThread->ThreadListEntry);
     }
+
+    if (CurrentThread->Tcb.ApcState.Process)
+    {
+        PEPROCESS ParentProcess = CONTAINING_RECORD(
+            CurrentThread->Tcb.ApcState.Process,
+            EPROCESS,
+            Pcb
+        );
+        ObDereferenceObject(ParentProcess);
+    }
+
+    InsertTailList(&PtDeadThreadListHead, &CurrentThread->ThreadListEntry);
+
+    PtpRestoreInterrupts(Flags);
+    PtYieldThread();
+
+    for (;;)
+    {
+        __Halt();
+    }
+}
+
+VOID
+VEAPI
+PiInitializeThread(
+    IN PKTHREAD Thread,
+    IN PVOID KernelStack,
+    IN PVOID InitialStack,
+    IN PVOID StackLimit,
+    IN CHAR Priority
+)
+{
+    RtlZeroMemory(Thread, sizeof(KTHREAD));
+
+    Thread->KernelStack = KernelStack;
+    Thread->InitialStack = InitialStack;
+    Thread->StackLimit = StackLimit;
+    Thread->Priority = Priority;
+    Thread->State = Initialized;
+
+    Thread->ApcStatePointer[OriginalApcEnvironment] = &Thread->ApcState;
+    Thread->ApcStatePointer[AttachedApcEnvironment] = &Thread->SavedApcState;
+    Thread->ApcStateIndex = OriginalApcEnvironment;
+
+    InitializeListHead(&Thread->ApcState.ApcListHead[KernelMode]);
+    InitializeListHead(&Thread->ApcState.ApcListHead[UserMode]);
+    InitializeListHead(&Thread->SavedApcState.ApcListHead[KernelMode]);
+    InitializeListHead(&Thread->SavedApcState.ApcListHead[UserMode]);
+
+    KsInitializeSpinlock(&Thread->ApcQueueLock);
+    InitializeListHead(&Thread->MutantListHead);
+    InitializeListHead(&Thread->WaitListEntry);
+
+    Thread->ApcQueueable = TRUE;
+    Thread->KernelApcDisable = 0;
+    Thread->SpecialApcDisable = 0;
+    Thread->Alertable = FALSE;
+    Thread->WaitMode = KernelMode;
 }
 
 PVOID
@@ -167,30 +235,48 @@ PtCreateSystemThread(
         return NULL;
     }
 
-    Thread->Cid.UniqueThread = PtCounterUniqueThreadId(); // Asumsi Anda punya fungsi ini
-    Thread->StartAddress = StartAddress;
-    Thread->ExitStatus = 0; // Belum exit
-
-    Thread->Tcb.ApcState.Process = &ParentProcess->Pcb;
-    Thread->Tcb.State = Initialized; 
-    Thread->Tcb.Priority = ParentProcess->Pcb.BasePriority;
-    Thread->Tcb.ContextSwitches = 0;
-
     PVOID StackBase = UlAllocatePoolWithTag(PoolType, PtThreadStackSize, 'Pt  ');
-    if(!StackBase)
+    if (!StackBase)
     {
-        // ObDestroyObject(Thread);
+        ObDereferenceObject(Thread);
         return NULL;
     }
 
-    Thread->Tcb.InitialStack = (PVOID)((ULONG_PTR)StackBase + PtThreadStackSize); 
-    Thread->Tcb.StackLimit = StackBase;
+    ObReferenceObject(ParentProcess);
 
-    Thread->Tcb.KernelStack = PtpSetupInitialThreadContext(Thread->Tcb.InitialStack, NULL, StartAddress, Argument, KernelMode);
+    PVOID InitialStack = (PVOID)((ULONG_PTR)StackBase + PtThreadStackSize);
+    PVOID StackLimit = StackBase;
+
+    PVOID KernelStack = PtpSetupInitialThreadContext(
+        InitialStack, 
+        NULL, 
+        StartAddress, 
+        Argument, 
+        KernelMode
+    );
+
+    PiInitializeThread(
+        &Thread->Tcb,
+        KernelStack,
+        InitialStack,
+        StackLimit,
+        ParentProcess->Pcb.BasePriority
+    );
+
+    Thread->Cid.UniqueThread = PtCounterUniqueThreadId();
+    Thread->StartAddress = StartAddress;
+    Thread->ExitStatus = 0;
+    Thread->Tcb.ApcState.Process = &ParentProcess->Pcb;
+    Thread->Tcb.Weight = 1024;
+    Thread->Tcb.VRuntime = 0;
+    KsInitializeTimer(&Thread->Tcb.Timer);
 
     InsertTailList(&ParentProcess->Pcb.ThreadListHead, &Thread->ThreadListEntry);
 
-    PtEnqueueThreadCfs(&PtRunQueue[0], &Thread->Tcb);
+    PtEnqueueThreadCfs(
+        &PtRunQueue[KeGetCurrentPrcb()->Number],
+        &Thread->Tcb
+    );
 
     return Thread;
 }
@@ -225,6 +311,10 @@ PtInitializeHandBuildThread(
     InitialThread->Priority = 0;
     InitialThread->State = Running; 
     InitialThread->TrapFrame = NULL;
+    InitialThread->Queue = NULL;
+    InitializeListHead(&InitialThread->MutantListHead);
+    InitialThread->Irql = PASSIVE_LEVEL;
+    KsInitializeTimer(&InitialThread->Timer);
     InitializeListHead(&InitialThread->WaitListEntry);
 
     // 2. ATTACH KE PROCESS 
@@ -255,3 +345,51 @@ PtInitializeHandBuildThread(
         InitialThread->KernelStack = InitialThread->InitialStack;
     }
 }
+
+VOID
+VEAPI
+PtpReaperThreadRoutine(
+    PVOID Context
+)
+{
+    UNREFERENCED_PARAMETER(Context);
+
+    KeLowerIrql(PASSIVE_LEVEL);
+    DPRINT("PtpReaperThreadRoutine()\n");
+
+    for (;;)
+    {
+        ULONG_PTR Flags = PtpSaveAndDisableInterrupts();
+
+        if (!IsListEmpty(&PtDeadThreadListHead))
+        {
+            // Ambil thread paling depan dari list mati
+            PLIST_ENTRY Entry = RemoveHeadList(&PtDeadThreadListHead);
+            PETHREAD DeadThread = CONTAINING_RECORD(Entry, ETHREAD, ThreadListEntry);
+
+            PtpRestoreInterrupts(Flags);
+
+            DPRINT("Freeing DeadThread %p\n", DeadThread);
+
+            // Bebaskan Kernel Stack (Aman karena CPU udah gak pake stack ini)
+            if (DeadThread->Tcb.StackLimit)
+            {
+                UlFreePool(DeadThread->Tcb.StackLimit);
+                DeadThread->Tcb.StackLimit = NULL;
+                DeadThread->Tcb.KernelStack = NULL;
+            }
+
+            // Hancurkan / dereference object ETHREAD
+            ObDereferenceObject(DeadThread);
+        }
+        else
+        {
+            PtpRestoreInterrupts(Flags);
+
+            // Kalau list kosong, mengalah dulu biar nggak bikin CPU 100%
+            PtYieldThread();
+        }
+    }
+}
+
+/* EOF */

@@ -1,5 +1,7 @@
 #include <veakrnl.h>
 
+#define PT_CFS_BASE_WEIGHT 1024UL
+
 KRUNQUEUE PtRunQueue[MAX_CPU];
 
 VOID 
@@ -27,6 +29,20 @@ PtEnqueueThreadCfs(
     PKTHREAD Thread
 );
 
+FORCEINLINE
+ULONG_PTR
+PtpSilentInterrupt(VOID)
+{
+    return __ReadEFlags();
+}
+
+static 
+VOID
+PtpRestoreInterrupt(ULONG_PTR Eflags)
+{
+    __WriteEFlags(Eflags);
+}
+
 VOID
 VEAPI
 PtInitializeRunQueues(VOID)
@@ -35,6 +51,7 @@ PtInitializeRunQueues(VOID)
     {
         RtlZeroMemory(&PtRunQueue[i], sizeof(KRUNQUEUE));
         RtlInitializeRbTree(&PtRunQueue[i].CfsTree, PtCfsCompareRoutine);
+        KsInitializeSpinlock(&PtRunQueue[i].SpinLock);
 
         PtRunQueue[i].RunningTasks = 0;
         PtRunQueue[i].TotalWeight = 0;
@@ -71,12 +88,12 @@ PtSelectNextThread(PKRUNQUEUE RunQueue)
 
     if (!NextThread)
     {
-        // RBT Kosong! Gunakan Idle Thread CPU saat ini
         UCHAR CpuId = KeGetCurrentProcessorNumber();
         NextThread = &PtSystemIdleThread[CpuId];
-        NextThread->State = Running;
-        RunQueue->CurrentThread = NextThread;
     }
+
+    NextThread->State = Running;
+    RunQueue->CurrentThread = NextThread;
 
     return NextThread;
 }
@@ -85,33 +102,97 @@ VOID
 VEAPI
 PtYieldThread(VOID)
 {
+    ULONG_PTR Flags = PtpSilentInterrupt();
     PKPRCB Prcb = KeGetCurrentPrcb();
     PKTHREAD CurrentThread = (PKTHREAD)Prcb->CurrentThread;
     PKRUNQUEUE RunQueue = &PtRunQueue[Prcb->Number];
+    PKTHREAD NextThread = PtSelectNextThread(RunQueue);
 
-    if (CurrentThread && CurrentThread != &PtSystemIdleThread[Prcb->Number])
+    // Ambil IRQL asli thread sebelum interupsi (jika tersimpan) atau simpan PASSIVE_LEVEL jika di-preempt
+    if (CurrentThread && CurrentThread != &PtSystemIdleThread[Prcb->Number] && CurrentThread->State == Running)
     {
         PtEnqueueThreadCfs(RunQueue, CurrentThread);
     }
-    
-    PKTHREAD NextThread = PtSelectNextThread(RunQueue);
 
-    // Lakukan Swap Context HANYA jika threadnya berbeda!
     if (CurrentThread != NextThread)
     {
         PtSetCurrentThread(NextThread);
 
-        // Amankan pointer dari kemungkinan NULL (Idle Thread tidak punya Process)
         PKPROCESS OldProcess = CurrentThread ? CurrentThread->ApcState.Process : NULL;
         PKPROCESS NewProcess = NextThread ? NextThread->ApcState.Process : NULL;
 
-        // Cek jika proses berbeda DAN proses baru itu valid (bukan NULL)
         if (OldProcess != NewProcess && NewProcess != NULL) 
         {
-            __asm__ volatile ("mov %0, %%cr3" : : "r"(NewProcess->DirectoryTableBase) : "memory");
+            __WriteCR3(NewProcess->DirectoryTableBase);
         }
 
         PtSwapContext(CurrentThread, NextThread);
+
+        // Setelah switch ke NextThread, Wajib Turunkan TPR ke IRQL milik ResumedThread (biasanya PASSIVE_LEVEL / 0)
+        PKTHREAD ResumedThread = PtGetCurrentThread();
+        if (ResumedThread)
+        {
+            KeSetCurrentIrql(ResumedThread->Irql); 
+        }
+        else
+        {
+            KeSetCurrentIrql(PASSIVE_LEVEL);
+        }
+    }
+
+    PtpRestoreInterrupt(Flags);
+}
+
+BOOLEAN
+VEAPI
+PtWakeThreadEx(
+    PKTHREAD Thread,
+    VEASTATUS WakeStatus
+)
+{
+    Thread->WaitStatus = WakeStatus;
+    return PtWakeThread(Thread);
+}
+
+BOOLEAN
+VEAPI
+PtWakeThread(
+    PKTHREAD Thread
+)
+{
+    PKPRCB Prcb;
+
+    if (!Thread || Thread->State != Waiting)
+        return FALSE;
+
+    Thread->State = Ready;
+
+    Prcb = KeGetCurrentPrcb();
+    PtEnqueueThreadCfs(&PtRunQueue[Prcb->Number], Thread);
+    return TRUE;
+}
+
+static
+VOID
+VEAPI
+PtpDelayExecutionDpcRoutine(
+    IN PKDPC Dpc,
+    IN PVOID DeferredContext,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2
+)
+{
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    PKTHREAD Thread = (PKTHREAD)DeferredContext;
+
+    if (Thread && Thread->State == Waiting)
+    {
+        // Set status sukses timeout lalu masukkan kembali thread ke CFS RunQueue
+        Thread->WaitStatus = STATUS_TIMEOUT;
+        PtWakeThread(Thread);
     }
 }
 
@@ -122,14 +203,28 @@ PtSchedulerTick(ULONGLONG DeltaTimeNs)
     PKPRCB Prcb = KeGetCurrentPrcb();
     PKTHREAD CurrentThread = (PKTHREAD)Prcb->CurrentThread;
     PKRUNQUEUE RunQueue = &PtRunQueue[Prcb->Number];
+    KIRQL OldIrql;
+    BOOLEAN ShouldYield = FALSE;
+    ULONG_PTR Eflags;
 
     if (!CurrentThread) return;
 
-    // A. Update VRuntime Thread yang sedang berjalan (O(1))
-    // Formula sederhana CFS: VRuntime += DeltaTime * (NICE_0_LOAD / Weight)
-    CurrentThread->VRuntime += DeltaTimeNs;
+    if (CurrentThread->Weight != 0)
+    {
+        ULONG WeightShift = 0;
+        ULONGLONG Weight = CurrentThread->Weight;
 
-    // B. Cek Preemption: Apakah ada thread lain di RBT yang VRuntime-nya JAUH lebih kecil?
+        while (Weight > PT_CFS_BASE_WEIGHT && WeightShift < 5)
+        {
+            Weight >>= 1;
+            WeightShift++;
+        }
+
+        CurrentThread->VRuntime += DeltaTimeNs >> WeightShift;
+    }
+
+    Eflags = PtpSaveAndDisableInterrupts();
+
     PRTL_BALANCED_NODE Leftmost = RtlGetLeftmostNodeRb(&RunQueue->CfsTree);
     if (Leftmost)
     {
@@ -139,8 +234,57 @@ PtSchedulerTick(ULONGLONG DeltaTimeNs)
         // (Bisa tambahkan threshold/granularity misal 1-2 ms biar gak terlalu sering switch)
         if (Candidate->VRuntime < CurrentThread->VRuntime)
         {
-            // Pemicu Involuntary Preemption!
-            PtYieldThread();
+            ShouldYield = TRUE;
         }
     }
+
+    PtpRestoreInterrupt(Eflags);
+
+    if (ShouldYield)
+    {
+        PtYieldThread();
+    }
 }
+
+VEASTATUS
+VEAPI
+KsDelayExecutionThread(
+    IN KPROCESSOR_MODE WaitMode,
+    IN BOOLEAN Alertable,
+    IN PLARGE_INTEGER Interval
+)
+{
+    PKTHREAD CurrentThread;
+    ULONG_PTR Flags;
+    KDPC DelayDpc;
+
+    if (!Interval) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    CurrentThread = PtGetCurrentThread();
+    if (!CurrentThread) {
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    // Amankan status interrupt
+    Flags = __ReadEFlags();
+    __Stop();
+
+    CurrentThread->WaitMode = WaitMode;
+    CurrentThread->Alertable = Alertable;
+    CurrentThread->WaitStatus = STATUS_PENDING;
+    CurrentThread->State = Waiting;
+
+    KsInitializeDpc(&DelayDpc, PtpDelayExecutionDpcRoutine, (PVOID)CurrentThread);
+
+    KsSetTimer(&CurrentThread->Timer, *Interval, 0, &DelayDpc);
+
+    PtYieldThread();
+
+    __WriteEFlags(Flags);
+
+    return CurrentThread->WaitStatus;
+}
+
+/* EOF */
