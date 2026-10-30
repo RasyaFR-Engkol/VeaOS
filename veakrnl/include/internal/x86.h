@@ -1,5 +1,6 @@
 #pragma once
 
+#include "potypes.h"
 #include <../ndk/ks.h>
 #include <procbind.h>
 
@@ -70,6 +71,47 @@ typedef struct _KTSSDESCRIPTOR32 {
         } Bits;
     } HighWord;
 } KTSSDESCRIPTOR32, *PKTSSDESCRIPTOR32;
+
+typedef struct _KTSSENTRY32 {
+    USHORT Link;
+    USHORT Reserved0;
+    ULONG  Esp0;
+    USHORT Ss0;
+    USHORT Reserved1;
+    ULONG  Esp1;
+    USHORT Ss1;
+    USHORT Reserved2;
+    ULONG  Esp2;
+    USHORT Ss2;
+    USHORT Reserved3;
+    ULONG  Cr3;
+    ULONG  Eip;
+    ULONG  Eflags;
+    ULONG  Eax;
+    ULONG  Ecx;
+    ULONG  Edx;
+    ULONG  Ebx;
+    ULONG  Esp;
+    ULONG  Ebp;
+    ULONG  Esi;
+    ULONG  Edi;
+    USHORT Es;
+    USHORT Reserved4;
+    USHORT Cs;
+    USHORT Reserved5;
+    USHORT Ss;
+    USHORT Reserved6;
+    USHORT Ds;
+    USHORT Reserved7;
+    USHORT Fs;
+    USHORT Reserved8;
+    USHORT Gs;
+    USHORT Reserved9;
+    USHORT Ldt;
+    USHORT Reserved10;
+    USHORT Trap;
+    USHORT IoMapBase;
+} KTSSENTRY32, *PKTSSENTRY32;
 
 typedef struct _KREGISTER_FRAME {
     // =========================================================================
@@ -221,6 +263,10 @@ extern void isr_14_entry(void);
 #define KGDT32_R3_DATA   0x23   // Index 4 (Offset 0x20 | 3) -> User Data
 #define KGDT32_TSS       0x28   // Index 5 (Offset 0x28), RPL 0 -> Task State Segment
 #define KGDT32_R0_PCR    0x30   // Index 6 (Offset 0x30), RPL 0 -> KPCR (FS Register)
+#define KGDT32_DF_TSS    0x38
+
+#define GDT_ENTRY_COUNT 8
+#define TSS_SIZE_32     104
 
 /* Where kernel bytes END? */
 extern ULONG _veaos_end;
@@ -232,7 +278,7 @@ extern ULONG _veaos_end;
 #define TIMER_INCREMENT         (TIMER_INTERVAL_MS * 10000) 
 
 typedef struct _VEA_TIB {
-    struct _EXCEPTION_REGISTRATION_RECORD *ExceptionList; // FS:[0x00]
+    PVOID ExceptionList;
     PVOID StackBase;                                      // FS:[0x04]
     PVOID StackLimit;                                     // FS:[0x08]
     PVOID SubSystemTib;                                   // FS:[0x0C]
@@ -245,38 +291,29 @@ typedef UCHAR KAFFINITY;
 
 #pragma pack(push, 4)
 
+#define NUMBER_POOL_LOOKASIDE_LISTS 32
+
 typedef struct _KPRCB {
-    // --- SCHEDULER STATE ---
     struct _KTHREAD *CurrentThread;  
     struct _KTHREAD *NextThread;     
     struct _KTHREAD *IdleThread;     
-
-    // --- SMP / CPU IDENTITY ---
-    UCHAR Number;                    // ID Core (0, 1, 2...)
-    KAFFINITY SetMember;             // Bitmask CPU ini (1 << Number), penting untuk IPI!
+    UCHAR Number;
+    KAFFINITY SetMember;
     UCHAR CpuType;
     UCHAR CpuID;
-    
-    // --- HAL / HARDWARE RESERVED ---
-    PVOID HalReserved[16];           // Tempat menyimpan LAPIC Base atau Local Timer
-
-    // --- DPC (DEFERRED PROCEDURE CALLS) ---
-    // PENTING UNTUK MASA DEPAN: Interrupt handler gak boleh lama-lama!
-    // Tugas berat dari interrupt dilempar ke antrean DPC ini.
+    PVOID HalReserved[16];
     KSPIN_LOCK DpcLock;
     LIST_ENTRY DpcListHead;
-    PVOID DpcStack;                  // Stack khusus saat mengeksekusi DPC
+    PVOID DpcStack;
     volatile UCHAR DpcRoutineActive;
     volatile UCHAR DpcInterruptRequested;
-
-    // --- IPI (INTER-PROCESSOR INTERRUPTS) ---
-    // Untuk nyuruh Core lain berhenti atau nembak TLB Flush
     volatile ULONG IpiFrozen;
     volatile PVOID WorkerRoutine;
-
-    // --- CONTEXT SWITCH & LOCKS ---
     ULONG ContextSwitches;
-    // Tambahkan variabel KSPIN_LOCK khusus untuk antrean scheduler di sini jika perlu
+    PP_LOOKASIDE_LIST PPLookasideList[16];
+    PP_LOOKASIDE_LIST PPNPagedLookasideList[NUMBER_POOL_LOOKASIDE_LISTS];
+    PP_LOOKASIDE_LIST PPPagedLookasideList[NUMBER_POOL_LOOKASIDE_LISTS];
+    PROCESSOR_POWER_STATE PowerState;
 } KPRCB, *PKPRCB;
 
 typedef struct _KPCR {
@@ -322,3 +359,94 @@ typedef struct _KIPCR {
 
 #define KeReloadFsPcr() \
     asm volatile("mov %0, %%fs" : : "r" ((USHORT)KGDT32_R0_PCR) : "memory")
+
+#include <irqtypes.h>
+
+struct _KINTERRUPT;
+
+typedef BOOLEAN (VEAPI KSERVICE_ROUTINE)
+    (IN struct _KINTERRUPT *Interrupt,
+     IN PVOID ServcieContext);
+typedef KSERVICE_ROUTINE *PKSERVICE_ROUTINE;
+
+typedef enum _KINTERRUPT_MODE {
+  LevelSensitive,
+  Latched,
+  Message
+} KINTERRUPT_MODE;
+
+typedef struct _KINTERRUPT
+{
+    SHORT Type;
+    SHORT Size;
+    KINTERRUPT_CONNECTION_TYPE ConnectionType;
+    ULONG IrqVector;
+    ULONG Vector;
+    KIRQL Irql;
+    KIRQL SynchronizeIrql;
+    KSPIN_LOCK SpinLock;
+    PKSPIN_LOCK ActualLock;
+    PKSERVICE_ROUTINE ServiceRoutine;
+    PVOID ServiceContext;
+    PKTRAP_FRAME *TrapFrame;
+    KINTERRUPT_MODE InterruptMode;
+    ULONG Number;
+    BOOLEAN Connected;
+    BOOLEAN MessageSignaled;
+    KINTERRUPT_MESSAGE Message;
+    ULONG MessageSize;
+} KINTERRUPT, *PKINTERRUPT;
+
+VOID
+VEAPI
+KsInitializeInterrupt(
+    IN PKINTERRUPT Interrupt,
+    IN PKSERVICE_ROUTINE ServiceRoutine,
+    IN PVOID ServiceContext,
+    IN KINTERRUPT_CONNECTION_TYPE ConnectionType,
+    IN ULONG Vector,
+    IN KIRQL Irql,
+    IN KIRQL SynchronizeIrql,
+    IN KINTERRUPT_MODE InterruptMode,
+    IN CHAR ProcessorNumber,
+    IN PKSPIN_LOCK SpinLock
+);
+
+VEASTATUS
+VEAPI
+KsConnectInterrupt(IN PKINTERRUPT Interrupt);
+
+VEASTATUS
+VEAPI
+KsDisconnectInterrupt(IN PKINTERRUPT Interrupt);
+
+VEASTATUS
+VEAPI
+ObioConnectInterrupt(
+    OUT PKINTERRUPT *InterruptObject,
+    IN PKSERVICE_ROUTINE ServiceRoutine,
+    IN PVOID ServiceContext,
+    IN PKSPIN_LOCK SpinLock,
+    IN ULONG Vector,
+    IN KIRQL Irql,
+    IN KIRQL SynchronizeIrql,
+    IN KINTERRUPT_MODE InterruptMode,
+    IN CHAR ProcessorNumber
+);
+
+VEASTATUS
+VEAPI
+ObioConnectMessageInterrupt(
+    OUT PKINTERRUPT *InterruptObject,
+    OUT PKINTERRUPT_MESSAGE InterruptMessage,
+    IN PKSERVICE_ROUTINE ServiceRoutine,
+    IN PVOID ServiceContext,
+    IN PKSPIN_LOCK SpinLock,
+    IN KIRQL Irql,
+    IN KIRQL SynchronizeIrql,
+    IN CHAR ProcessorNumber
+);
+
+VEASTATUS
+VEAPI
+ObioDisconnectInterrupt(IN PKINTERRUPT InterruptObject);
