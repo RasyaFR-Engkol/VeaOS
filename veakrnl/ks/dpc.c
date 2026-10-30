@@ -176,3 +176,10 @@ KsiRetireDpcList(IN PKPRCB Prcb)
     /* Yey we are done */
     Prcb->DpcRoutineActive = FALSE;
 }
+
+BOOLEAN
+VEAPI
+KsDpcRoutineRunning(VOID)
+{
+    return KeGetCurrentPrcb()->DpcRoutineActive;
+}

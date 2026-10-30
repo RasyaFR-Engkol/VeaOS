@@ -1,97 +1,78 @@
 #include <veakrnl.h>
 
-KIDTDESCRIPTOR32 KiIdt[256];
-KIDTR32 KsIdt32;
+VOID
+VEAPI
+HctInitializeDoubleFault(VOID);
 
 VOID
 VEAPI
-ks_setup_idt_trap(ULONG Vector, PVOID Routine, ULONG CS, ULONG Flags)
-{
-    if (Vector >= 256) return;
-
-    ULONG Address = (ULONG)Routine;
-    PKIDTDESCRIPTOR32 Entry = &KiIdt[Vector];
-
-    Entry->OffsetLow  = (USHORT)(Address & 0xFFFF);
-    Entry->Selector   = (USHORT)CS;
-    Entry->Reserved   = 0;
-    Entry->Attributes.Flags = (UCHAR)Flags;
-    Entry->OffsetHigh = (USHORT)((Address >> 16) & 0xFFFF);
-}
-
-VOID
-VEAPI
-KsRegisterSystemInterruptHandler(
-    PVOID Handler,
-    ULONG Vector
-)
-{
-    ks_setup_idt_trap(Vector, Handler, KGDT32_R0_CODE, IDT_FLAGS_INTR_RING0);
-}
+KsiDispatchException(
+    IN PKTRAP_FRAME TrapFrame,
+    IN ULONG Vector
+);
 
 VOID
 VEAPI
 ks_initialize_exception(VOID)
 {
-    ks_setup_idt_trap(0,  (PVOID)isr_0_entry,  KGDT32_R0_CODE, IDT_FLAGS_INTR_RING0);
-    ks_setup_idt_trap(1,  (PVOID)isr_1_entry,  KGDT32_R0_CODE, IDT_FLAGS_INTR_RING0);
-    ks_setup_idt_trap(2,  (PVOID)isr_2_entry,  KGDT32_R0_CODE, IDT_FLAGS_INTR_RING0);
-    ks_setup_idt_trap(3,  (PVOID)isr_3_entry,  KGDT32_R0_CODE, IDT_FLAGS_INTR_RING0);
-    ks_setup_idt_trap(6,  (PVOID)isr_6_entry,  KGDT32_R0_CODE, IDT_FLAGS_INTR_RING0);
-    ks_setup_idt_trap(8,  (PVOID)isr_8_entry,  KGDT32_R0_CODE, IDT_FLAGS_INTR_RING0);
-    ks_setup_idt_trap(13, (PVOID)isr_13_entry, KGDT32_R0_CODE, IDT_FLAGS_INTR_RING0);
-    ks_setup_idt_trap(14, (PVOID)isr_14_entry, KGDT32_R0_CODE, IDT_FLAGS_INTR_RING0);
+    HctInitializeIsr();
 
-    KsIdt32.Limit = (sizeof(KIDTDESCRIPTOR32) * 256) - 1;
-    KsIdt32.Base  = (ULONG)&KiIdt;
+    for (ULONG i = 0; i < 0x19; i++)
+    {
+        HctRegisterInterruptToIsr(i, KsiDispatchException);
+    }
 
-    // lidt
-    ks_load_idt(&KsIdt32);
+    /* Initialize Double Fault */
+    HctInitializeDoubleFault();
 }
 
 VOID
 VEAPI
-ksi_dispatch_exception(PKREGISTER_FRAME register_frame)
+KsiDispatchException(
+    IN PKTRAP_FRAME TrapFrame,
+    IN ULONG Vector
+)
 {
-    if(register_frame->Vector == KS_EXCEPTION_PAGE_FAULT)
+    if (KsiDispatchSehException(TrapFrame, STATUS_ACCESS_VIOLATION))
     {
-        // handle page fault
+        return;
+    }
+
+    if (Vector == KS_EXCEPTION_PAGE_FAULT)
+    {
         BOOLEAN Success = FALSE;
         ULONG Cr2;
+
         __asm__ __volatile__(
             "mov %%cr2, %0"
-            : "=r" (Cr2)  // Output operand: simpan hasil dari %0 ke variabel Cr2
-            :             // Input operand (kosong)
-            :             // Clobbered registers (kosong)
+            : "=r" (Cr2)
         );
 
-        BOOLEAN WriteFault = (register_frame->ErrorCode & 2) != 0;
-        BOOLEAN WasPresent = (register_frame->ErrorCode & 1) != 0;
+        // Pakai ErrCode dari KTRAP_FRAME
+        BOOLEAN WriteFault = (TrapFrame->ErrCode & 2) != 0;
+        BOOLEAN WasPresent = (TrapFrame->ErrCode & 1) != 0;
         
         if (MmAccessFault(Cr2, WriteFault, WasPresent))
         {
-            return; // fault ke-resolve, balik lanjut eksekusi normal (IRET)
+            return; // Page fault ter-resolve, IRET ke instruksi sebelumnya
         }
 
-        KsBugCheckEx(0x50, (ULONG_PTR)Cr2, register_frame->Vector, register_frame->ErrorCode, 0);
-        return; // jaga-jaga kalau KsBugCheckEx ternyata bisa return
+        KsBugCheckEx(PAGE_FAULT_IN_NONPAGED_AREA, (ULONG_PTR)Cr2, Vector, TrapFrame->ErrCode, 0);
+        return;
     }
-    else if(register_frame->Vector == KS_EXCEPTION_GENERAL_PROTECTION && (register_frame->Cs & RPL_MASK) == MODE_USER)
+    else if (Vector == KS_EXCEPTION_GENERAL_PROTECTION && (TrapFrame->SegCs & RPL_MASK) == MODE_USER)
     {
-        // handle GP caused by user
+        // Handle #GP yang disebabkan userland (SegCs padanan dari Cs)
     }
-    /* Debug Breakpoint or Debug by CPU */
-    else if (register_frame->Vector == KS_EXCEPTION_BREAKPOINT)
+    else if (Vector == KS_EXCEPTION_BREAKPOINT)
     {
-        /* Give this to Kdp */
-        BOOLEAN Handled = KdpHandleDebug(register_frame);
+        // Pass TrapFrame ke Kdp
+        BOOLEAN Handled = 0; //KdpHandleDebug(TrapFrame);
         if (Handled)
         {
             return;
         }
     }
 
-    /* Exception isn't handled */
-    KsBugCheckEx(KMODE_EXCEPTION_NOT_HANDLED, register_frame->Vector, register_frame->ErrorCode, 0, 0);
-    while(1) asm("hlt");
+    KsBugCheckEx(KMODE_EXCEPTION_NOT_HANDLED, Vector, TrapFrame->ErrCode, 0, 0);
 }

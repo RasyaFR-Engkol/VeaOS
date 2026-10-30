@@ -22,13 +22,18 @@ KsInitializeSpinlock(IN PKSPIN_LOCK Lock)
     __atomic_store_n(Lock, 0, __ATOMIC_RELEASE);
 }
 
+/* Use SPINLOCK_DBG for Spinlock Logging */
+#if defined(SPINLOCK_DBG)
+
 VOID
 VEAPI
 KsAcquireSpinLockInternal(IN PKSPIN_LOCK Lock, OUT PKIRQL OldIrql, const PCHAR Function, const PCHAR File, INT Line)
 {
 
 #if defined(SPINLOCK_DBG)
+    asm volatile ("cli");
     KdPrintf("[Ks] Function %s from %s and %d line try to aquire spinlock.\n", Function, File, Line);
+    asm volatile ("sti");
 #endif
 
     /*  Raise IRQL terlebih dahulu untuk mencegah preemption di CPU lokal */
@@ -52,7 +57,9 @@ VEAPI
 KsReleaseSpinLockInternal(IN PKSPIN_LOCK Lock, IN KIRQL OldIrql, const PCHAR Function, const PCHAR File, INT Line)
 {
 #if defined(SPINLOCK_DBG)
-    KdPrintf("[Ks] Function %s from %s and %d line try to aquire spinlock.\n", Function, File, Line);
+    asm volatile ("cli");
+    KdPrintf("[Ks] Function %s from %s and %d line try to release spinlock.\n", Function, File, Line);
+    asm volatile ("sti");
 #endif
     /* Lepas lock TERLEBIH DAHULU */
     __atomic_store_n(Lock, 0, __ATOMIC_RELEASE);
@@ -67,7 +74,9 @@ VEAPI
 KsAcquireSpinLockAtDpcLevelInternal(IN OUT PKSPIN_LOCK Lock, const PCHAR Function, const PCHAR File, INT Line)
 {
 #if defined(SPINLOCK_DBG)
+    asm volatile ("cli");
     KdPrintf("[Ks] Function %s from %s and %d line try to aquire spinlock.\n", Function, File, Line);
+    asm volatile ("sti");
 #endif
     // Safety check khusus Debug build (sangat direkomendasikan!)
     // VE_ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
@@ -87,13 +96,104 @@ VEAPI
 KsReleaseSpinLockFromDpcLevelInternal(IN OUT PKSPIN_LOCK Lock, const PCHAR Function, const PCHAR File, INT Line)
 {
 #if defined(SPINLOCK_DBG)
+    asm volatile ("cli");
     KdPrintf("[Ks] Function %s from %s and %d line try to aquire spinlock.\n", Function, File, Line);
+    asm volatile ("sti");
 #endif
     // VE_ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
 
     /* Langsung lepas lock tanpa utak-atik IRQL */
     __atomic_store_n(Lock, 0, __ATOMIC_RELEASE);
 }
+
+#else
+
+NO_THREAD_SAFETY_ANALYSIS
+VOID
+VEAPI
+KsAcquireSpinLock(
+    IN PKSPIN_LOCK Lock, 
+    OUT PKIRQL OldIrql)
+{
+    if (((KSPIN_LOCK)PtGetCurrentThread() | 1) == *Lock)
+    {
+        KsBugCheckEx(SPINLOCK_IS_ALREADY_OWNED, (ULONG_PTR)Lock, 0, 0, 0);
+    }
+
+    /*  Raise IRQL first */
+    if (KeGetCurrentIrql() < DISPATCH_LEVEL)
+        *OldIrql = KeRaiseIrql(DISPATCH_LEVEL);
+    else
+        *OldIrql = KeGetCurrentIrql();
+
+    /*  Acquire lock (Test-and-Set) */
+    while (__atomic_exchange_n(Lock, 1, __ATOMIC_ACQUIRE)) {
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#elif defined(__aarch64__)
+        __asm__ volatile("yield" ::: "memory");
+#endif
+    }
+
+    KsMemoryBarrierWithoutFence();
+
+    *Lock = (KSPIN_LOCK)PtGetCurrentThread() | 1;
+}
+
+NO_THREAD_SAFETY_ANALYSIS
+VOID
+VEAPI
+KsReleaseSpinLock(
+    IN PKSPIN_LOCK Lock,
+    IN KIRQL OldIrql
+)
+{
+    if (((KSPIN_LOCK)PtGetCurrentThread() | 1) != *Lock)
+    {
+        /* They don't, bugcheck */
+        KsBugCheckEx(SPINLOCK_IS_NOT_OWNED, (ULONG_PTR)Lock, 0, 0, 0);
+    }
+
+    /* Lepas lock TERLEBIH DAHULU */
+    __atomic_store_n(Lock, 0, __ATOMIC_RELEASE);
+
+    /* Baru turunkan IRQL ke level semula */
+    if (OldIrql < DISPATCH_LEVEL)
+        KeLowerIrql(OldIrql);
+
+    KsMemoryBarrierWithoutFence();
+}
+
+NO_THREAD_SAFETY_ANALYSIS
+VOID
+VEAPI
+KsAcquireSpinLockAtDpcLevel(
+    IN OUT PKSPIN_LOCK Lock
+)
+{
+    /* Instant lock */
+    while (__atomic_exchange_n(Lock, 1, __ATOMIC_ACQUIRE)) {
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#elif defined(__aarch64__)
+        __asm__ volatile("yield" ::: "memory");
+#endif
+    }
+}
+
+NO_THREAD_SAFETY_ANALYSIS
+VOID 
+VEAPI
+KsReleaseSpinLockFromDpcLevel
+(
+    IN OUT PKSPIN_LOCK Lock
+)
+{    
+     /* Langsung lepas lock tanpa utak-atik IRQL */
+    __atomic_store_n(Lock, 0, __ATOMIC_RELEASE);
+}
+
+#endif /* SPINLOCK_DBG */
 
 BOOLEAN
 VEAPI
@@ -135,4 +235,18 @@ KsTryToAcquireSpinLock(IN OUT PKSPIN_LOCK Lock, OUT PKIRQL OldIrql)
         KeLowerIrql(*OldIrql);
 
     return FALSE;
+}
+
+KIRQL
+VEAPI
+KsAcquireDispatcherLock(VOID)
+{
+    return KeRaiseIrql(SYNCH_LEVEL);
+}
+
+VOID
+VEAPI
+KsReleaseDispatcherLock(KIRQL OldIrql)
+{
+    KeLowerIrql(OldIrql);
 }
