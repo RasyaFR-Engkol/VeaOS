@@ -6,28 +6,29 @@ UlCreateHandleTable(
     ULONG InitialCapacity
 )
 {
-    PHANDLE_TABLE Table = UlAllocatePoolWithTag(PagedPool, sizeof(HANDLE_TABLE), 'TbHn');
+    PHANDLE_TABLE Table;
+    
+    if (InitialCapacity < 2) return NULL;
+
+    Table = UlAllocatePoolZero(NonPagedPool, sizeof(HANDLE_TABLE), 'TbHn');
     if (!Table) return NULL;
 
-    Table->Entries = UlAllocatePoolWithTag(PagedPool, sizeof(HANDLE_TABLE_ENTRY) * InitialCapacity, 'EnHn');
-    if (!Table->Entries) {
+    Table->Entries = UlAllocatePoolZero(NonPagedPool,
+                        sizeof(HANDLE_TABLE_ENTRY) * InitialCapacity, 'EnHn');
+    if (!Table->Entries)
+    {
         UlFreePoolWithTag(Table, 'TbHn');
         return NULL;
     }
 
-    Table->MaxEntries = InitialCapacity;
-    Table->HandleCount = 0;
-    Table->Entries[0].Object = NULL;
-    Table->Entries[0].NextFreeIndex = 0;
-
+    Table->MaxEntries     = InitialCapacity;
+    Table->HandleCount    = 0;
     Table->FirstFreeIndex = 1;
-    for (ULONG i = 1; i < InitialCapacity; i++) {
-        Table->Entries[i].Object = NULL;
-        Table->Entries[i].GrantedAccess = 0;
-        // Entry terakhir menunjuk ke 0 (menandakan list habis)
-        Table->Entries[i].NextFreeIndex = (i == InitialCapacity - 1) ? 0 : (i + 1);
-    }
 
+    for (ULONG i = 1; i < InitialCapacity; i++)
+        Table->Entries[i].NextFreeIndex = (i == InitialCapacity - 1) ? 0 : (i + 1);
+
+    KsInitializeSpinlock(&Table->Lock);
     return Table;
 }
 
@@ -39,15 +40,17 @@ UlCreateHandle(
     ULONG GrantedAccess
 )
 {
+    KIRQL OldIrql;
+    PVOID  Owner;
+    ULONG  CountNow;
+
     if (!Table || !Object) return NULL;
 
-    // TODO: Nanti pasang AcquireSpinLock(&Table->Lock) di sini
+    KsAcquireSpinLock(&Table->Lock, &OldIrql);
 
     // Cek apakah tabel penuh
     if (Table->FirstFreeIndex == 0) {
-        // TODO: Fase 2 - Implementasi Resize/Grow array di sini
-        // Untuk sekarang (Fase 1), kita tolak kalau penuh
-        // ReleaseSpinLock(&Table->Lock);
+        KsReleaseSpinLock(&Table->Lock, OldIrql);
         return NULL;
     }
 
@@ -60,15 +63,24 @@ UlCreateHandle(
 
     // Isi data objek ke entry tersebut
     Entry->Object = Object;
+    Entry->OwnerThread = PtGetCurrentThread();
+    Owner    = Entry->OwnerThread;
     Entry->GrantedAccess = GrantedAccess;
-    Entry->NextFreeIndex = 0; // Bersihkan sisa data
+    Entry->NextFreeIndex = 0; 
 
     Table->HandleCount++;
+    CountNow = Table->HandleCount;
 
-    // TODO: Nanti pasang ReleaseSpinLock(&Table->Lock) di sini
+    KsReleaseSpinLock(&Table->Lock, OldIrql);
 
-    // Kembalikan Handle (Index digeser 2 bit ke kiri ala NT)
-    return INDEX_TO_HANDLE(NewIndex);
+    /* Build the public handle value after the table entry is committed. */
+    HANDLE NewHandle = INDEX_TO_HANDLE(NewIndex);
+
+    /* Report that a new handle now owns a reference to the object. */
+    ObpReportLifecycle(NewHandle, CountNow, TRUE, TRUE, Owner, Object);
+
+    /* Return the handle with its index shifted two bits like NT handles. */
+    return NewHandle;
 }
 
 VEASTATUS
@@ -78,18 +90,20 @@ UlDestroyHandle(
     HANDLE Handle
 )
 {
-    if (!Table || !Handle) {
+    KIRQL OldIrql;
+
+    if (!Handle) {
         return STATUS_INVALID_PARAMETER;
     }
 
     // Ekstrak Index dari Handle
     ULONG Index = HANDLE_TO_INDEX(Handle);
 
-    // TODO: AcquireSpinLock(&Table->Lock)
+    KsAcquireSpinLock(&Table->Lock, &OldIrql);
 
     // Validasi Batas Index
     if (Index == 0 || Index >= Table->MaxEntries) {
-        // ReleaseSpinLock(&Table->Lock);
+        KsReleaseSpinLock(&Table->Lock, OldIrql);
         return STATUS_INVALID_HANDLE;
     }
 
@@ -97,8 +111,8 @@ UlDestroyHandle(
 
     // Pastikan slot ini memang sedang dipakai (Object tidak NULL)
     if (Entry->Object == NULL) {
-        // ReleaseSpinLock(&Table->Lock);
-        return STATUS_INVALID_HANDLE; // Handle sudah pernah ditutup (Double Close!)
+        KsReleaseSpinLock(&Table->Lock, OldIrql);
+        return STATUS_INVALID_HANDLE;
     }
 
     // Amankan pointer objek sebelum entry dihapus
@@ -106,18 +120,31 @@ UlDestroyHandle(
 
     // Bersihkan Entry dan kembalikan ke Free List
     Entry->Object = NULL;
+    PVOID OwnerThread = Entry->OwnerThread;
+    Entry->OwnerThread = NULL;
     Entry->GrantedAccess = 0;
     
     // Sambungkan NextFreeIndex ke kepala Free List yang lama
     Entry->NextFreeIndex = Table->FirstFreeIndex;
-    // Jadikan entry ini sebagai kepala Free List yang baru
     Table->FirstFreeIndex = Index;
 
     Table->HandleCount--;
 
-    // TODO: ReleaseSpinLock(&Table->Lock)
+    KsReleaseSpinLock(&Table->Lock, OldIrql);
 
-    // Dereferensi Objek (Sangat penting agar memori objek bisa bersih jika ini handle terakhir)
+    /* Report that this handle was removed from the table. */
+    ObpReportLifecycle(
+        Handle,
+        Table->HandleCount,
+        FALSE,
+        TRUE,
+        OwnerThread,
+        ObjectToDereference
+    );
+
+    ObpDeleteNameCheck(ObjectToDereference);
+
+    /* Dereference the object after removing and reporting the handle. */
     ObDereferenceObject(ObjectToDereference);
 
     return STATUS_SUCCESS;
