@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include "procbind.h"
 #include "veastatus.h"
+#include "../psdk/veaelf.h"
 
 /* TYPES */
 
@@ -670,5 +671,7 @@ RtlInitializeGenericTable(IN PRTL_GENERIC_TABLE Table,
                           IN PRTL_GENERIC_ALLOCATE_ROUTINE AllocateRoutine,
                           IN PRTL_GENERIC_FREE_ROUTINE FreeRoutine,
                           IN PVOID TableContext);
+
+BOOLEAN RtlEqualMemory(PVOID Source1, PVOID Source2, SIZE_T Length);
 
 /* EOF */
