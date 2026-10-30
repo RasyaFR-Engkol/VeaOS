@@ -28,7 +28,7 @@ ObpInitializeObjectManager(
     POBJECT_HEADER TypeHeader = (POBJECT_HEADER)RawTypeMem;
     TypeHeader->ReferenceCount = 1;
     TypeHeader->StackDepth = 1;
-    TypeHeader->Flags = OB_FLAG_HAS_NAME_INFO;
+    TypeHeader->Flags |= OB_FLAG_HAS_NAME_INFO;
     
     // PENTING: Solusi ayam & telur. Type dari "Type" adalah dirinya sendiri!
     POBJECT_TYPE TypeBody = (POBJECT_TYPE)(TypeHeader + 1);
@@ -81,18 +81,31 @@ ObpInitializeObjectManager(
 
     ObCreateObjectType("SymbolicLink", &SymlinkInitializer, &ObpSymbolicLinkObjectType);
     
-    kdp_print("OB: Object Manager successfully initialized!\n\r");
+    DPRINT("OB: Object Manager successfully initialized!\n\r");
 }
 
 BOOLEAN
 VEAPI
 ObInitSystem(VOID)
 {
-    ObpInitializeObjectManager();
+    VEASTATUS Status;
 
-    ObpCreateRootStructure();
+    DPRINT("ObInitSystem Phase %d\n", UlpInitializationPhase);
+    
+    if (UlpInitializationPhase == 0)
+    {
+        ObpInitializeObjectManager();
 
-    ObioInitSubsystem();
+        if (!ObpInitKernelHandleTable())
+            return FALSE;  
+    }
+    else if (UlpInitializationPhase == 1)
+    {
+        Status = ObpCreateRootStructure();
+        if (!VEA_SUCCESS(Status)) return FALSE;
+
+        ObioInitSubsystem();
+    }
 
     return TRUE;
 }

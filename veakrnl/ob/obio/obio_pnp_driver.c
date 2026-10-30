@@ -28,17 +28,17 @@ ObioPnpRootInterruptHandler(
     {
         case OIP_MJ_CREATE:
         case OIP_MJ_CLOSE:
-            Oip->IoStatus = STATUS_SUCCESS;
+            Oip->StatusInformation.Information = STATUS_SUCCESS;
             break;
 
         case OIP_MJ_PNP:
             // TODO: handle minor function PnP (start device, query resource, dst)
             // via Stack->Parameters / Stack->MinorFunction kalau lu punya field itu
-            Oip->IoStatus = STATUS_SUCCESS;
+            Oip->StatusInformation.Information = STATUS_SUCCESS;
             break;
 
         default:
-            Oip->IoStatus = STATUS_NOT_SUPPORTED;
+            Oip->StatusInformation.Information = STATUS_NOT_SUPPORTED;
             break;
     }
 

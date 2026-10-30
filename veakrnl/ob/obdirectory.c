@@ -23,6 +23,46 @@ ObpDirectoryCreateRoutine(
     return 0;
 }
 
+VOID
+VEAPI
+ObpRemoveEntryDirectory(
+    PVOID Object
+)
+{
+    if (!Object) return;
+
+    POBJECT_HEADER Header = OBJECT_TO_OBJECT_HEADER(Object);
+    if (!(Header->Flags & OB_FLAG_HAS_NAME_INFO)) return;
+
+    POBJECT_HEADER_NAME_INFO NameInfo = OBJECT_HEADER_TO_NAME_INFO(Header);
+    POBJECT_DIRECTORY Dir = NameInfo->Directory;
+
+    if (!Dir) return;
+
+    if (Dir->Head.Flink == NULL || Dir->Head.Blink == NULL) {
+        InitializeListHead(&Dir->Head);
+        NameInfo->Directory = NULL;
+        return;
+    }
+
+    PLIST_ENTRY Current = Dir->Head.Flink;
+    while (Current != &Dir->Head)
+    {
+        POBJECT_DIRECTORY_ENTRY Entry = CONTAINING_RECORD(Current, OBJECT_DIRECTORY_ENTRY, Chain);
+        
+        if (Entry->Object == Object)
+        {
+            RemoveEntryList(&Entry->Chain);
+            
+            UlFreePoolWithTag(Entry, 'ObEn');
+            
+            NameInfo->Directory = NULL;
+            break;
+        }
+        Current = Current->Flink;
+    }
+}
+
 VEASTATUS
 VEAPI
 ObpInsertDirectory(
@@ -35,6 +75,11 @@ ObpInsertDirectory(
     }
 
     POBJECT_DIRECTORY Dir = (POBJECT_DIRECTORY)DirectoryObject;
+
+    if (Dir->Head.Flink == NULL || Dir->Head.Blink == NULL) {
+        InitializeListHead(&Dir->Head);
+    }
+
     POBJECT_HEADER NewHeader = OBJECT_TO_OBJECT_HEADER(Object);
 
     if (!(NewHeader->Flags & OB_FLAG_HAS_NAME_INFO)) {
@@ -93,62 +138,232 @@ ObpInsertDirectory(
     return STATUS_SUCCESS;
 }
 
-VOID 
+static
+VEASTATUS
+VEAPI
+ObpCreateDirectory(
+    IN  PCHAR  Name OPTIONAL,          /* NULL = root */
+    IN  PVOID  Parent OPTIONAL,
+    OUT PVOID *Directory
+)
+{
+    OBJECT_ATTRIBUTES Attr;
+    ANSI_STRING       NameAnsi;
+    PVOID             Dir = NULL;
+    VEASTATUS         Status;
+
+    *Directory = NULL;
+
+    if (Name)
+    {
+        RtlInitAnsiString(&NameAnsi, Name);
+        InitializeObjectAttributes(&Attr, &NameAnsi, OBJ_CASE_INSENSITIVE, Parent, NULL);
+    }
+
+    Status = ObCreateObject(KernelMode, ObpDirectoryObjectType,
+                            Name ? &Attr : NULL, KernelMode,
+                            NULL, 0, 0, 0, &Dir);
+    if (!VEA_SUCCESS(Status))
+        return Status;
+
+    InitializeListHead(&((POBJECT_DIRECTORY)Dir)->Head);   /* hapus jika CreateRoutine sudah */
+
+    /* Pegang ref pembuat selamanya (objek permanent): minta pointer balik */
+    Status = ObInsertObject(Dir, NULL, 0, 0, &Dir, NULL);
+    if (!VEA_SUCCESS(Status))
+        return Status;               /* ObInsertObject sudah melepas objek saat gagal */
+
+    *Directory = Dir;
+    return STATUS_SUCCESS;
+}
+
+#if 0
+
+VEASTATUS
 VEAPI
 ObpCreateRootStructure(VOID)
 {
-    OBJECT_ATTRIBUTES Attr;
-    ANSI_STRING NameAnsi;
-    
-    // 1. Bikin Root Object "/" (ObjectSize = 0)
-    ObAllocateObject(ObpDirectoryObjectType, NULL, 0, &ObpRootDirectoryObject);
-    InitializeListHead(&((POBJECT_DIRECTORY)ObpRootDirectoryObject)->Head);
-    
-    // 2. Bikin sub-direktori "/Device"
-    RtlInitAnsiString(&NameAnsi, "Device");
-    InitializeObjectAttributes(&Attr, &NameAnsi, OBJ_CASE_INSENSITIVE, ObpRootDirectoryObject, NULL);
+    VEASTATUS Status;
 
-    ObAllocateObject(ObpDirectoryObjectType, &Attr, 0, &ObpDeviceDirectoryObject);
-    InitializeListHead(&((POBJECT_DIRECTORY)ObpDeviceDirectoryObject)->Head);
-    ObInsertObject(ObpDeviceDirectoryObject, &Attr);
-    
-    // 3. Bikin sub-direktori "/Driver"
-    RtlInitAnsiString(&NameAnsi, "Driver");
-    InitializeObjectAttributes(&Attr, &NameAnsi, OBJ_CASE_INSENSITIVE, ObpRootDirectoryObject, NULL);
-
-    ObAllocateObject(ObpDirectoryObjectType, &Attr, 0, &ObpDriverDirectoryObject);
-    InitializeListHead(&((POBJECT_DIRECTORY)ObpDriverDirectoryObject)->Head);
-    ObInsertObject(ObpDriverDirectoryObject, &Attr);
-
-    // 4. Bikin sub-direktori "/Types"
-    RtlInitAnsiString(&NameAnsi, "Types");
-    InitializeObjectAttributes(&Attr, &NameAnsi, OBJ_CASE_INSENSITIVE, ObpRootDirectoryObject, NULL);
-
-    ObAllocateObject(ObpDirectoryObjectType, &Attr, 0, &ObpTypesDirectoryObject);
-    InitializeListHead(&((POBJECT_DIRECTORY)ObpTypesDirectoryObject)->Head);
-    ObInsertObject(ObpTypesDirectoryObject, &Attr);
-
-    // Insert semua registered OBJECT_TYPE ke /Types directory
-    PLIST_ENTRY Curr = ObpTypeObjectList.Flink;
-    while (Curr != &ObpTypeObjectList) 
+    if (!ObpDirectoryObjectType)
     {
-        POBJECT_TYPE TypeObj = CONTAINING_RECORD(Curr, OBJECT_TYPE, TypeList);
-        POBJECT_HEADER Header = OBJECT_TO_OBJECT_HEADER(TypeObj);
-
-        // Hanya masukkan objek yang memiliki NameInfo
-        if (Header->Flags & OB_FLAG_HAS_NAME_INFO) 
-        {
-            POBJECT_HEADER_NAME_INFO NameInfo = OBJECT_HEADER_TO_NAME_INFO(Header);
-            NameInfo->Directory = ObpTypesDirectoryObject;
-            
-            // Masukkan ke folder /Types
-            ObpInsertDirectory(ObpTypesDirectoryObject, TypeObj);
-        }
-
-        Curr = Curr->Flink;
+        kdp_print("OB: FATAL: Directory type missing\n\r");
+        return STATUS_UNSUCCESSFUL;
     }
-    
+
+    /* 1. Root "\" : tanpa nama, jadi ObInsertObject tidak masuk ke namespace */
+    Status = ObpCreateDirectory(NULL, NULL, &ObpRootDirectoryObject);
+    if (!VEA_SUCCESS(Status)) goto fatal;
+
+    /* 2-4. Sub-direktori, semuanya anak dari root */
+    Status = ObpCreateDirectory("Device", ObpRootDirectoryObject, &ObpDeviceDirectoryObject);
+    if (!VEA_SUCCESS(Status)) goto fatal;
+
+    Status = ObpCreateDirectory("Driver", ObpRootDirectoryObject, &ObpDriverDirectoryObject);
+    if (!VEA_SUCCESS(Status)) goto fatal;
+
+    Status = ObpCreateDirectory("Types", ObpRootDirectoryObject, &ObpTypesDirectoryObject);
+    if (!VEA_SUCCESS(Status)) goto fatal;
+
+    /* 5. Type yang sudah terdaftar sebelum /Types ada */
+    for (PLIST_ENTRY Curr = ObpTypeObjectList.Flink;
+         Curr != &ObpTypeObjectList;
+         Curr = Curr->Flink)
+    {
+        POBJECT_TYPE   TypeObj = CONTAINING_RECORD(Curr, OBJECT_TYPE, TypeList);
+        POBJECT_HEADER Header  = OBJECT_TO_OBJECT_HEADER(TypeObj);
+
+        if (!(Header->Flags & OB_FLAG_HAS_NAME_INFO))
+            continue;
+
+        POBJECT_HEADER_NAME_INFO NI = OBJECT_HEADER_TO_NAME_INFO(Header);
+        if (!NI->Name.Buffer)
+            continue;                      /* belum punya nama final */
+
+        NI->Directory = (POBJECT_DIRECTORY)ObpTypesDirectoryObject;
+        Status = ObpInsertDirectory(ObpTypesDirectoryObject, TypeObj);
+        if (!VEA_SUCCESS(Status)) goto fatal;
+    }
+
     kdp_print("OB: Root tree structure (/, /Device, /Driver, /Types) created!\n\r");
+    return STATUS_SUCCESS;
+
+fatal:
+    DPRINT("OB: FATAL: root structure failed, status=%x\n\r", Status);
+    return Status;
+}
+
+#endif // Turn off legacy code (in case it still needed)
+
+VEASTATUS
+VEAPI
+ObpCreateRootStructure(VOID)
+{
+    VEASTATUS Status;
+    ANSI_STRING String;
+    OBJECT_ATTRIBUTES Attributes;
+    PLIST_ENTRY Curr;
+    HANDLE RootHandle, DeviceHandle, DriverHandle, TypeHandle;
+    
+    if (!ObpDirectoryObjectType)
+    {
+        return STATUS_OBJECT_TYPE_MISMATCH;
+    }
+
+    /* Make "/" */
+    RtlInitAnsiString(&String, "/");
+    InitializeObjectAttributes(&Attributes, &String, OBJ_PERMANENT, NULL, NULL);
+
+    Status = VeaCreateDirectoryNamespace(&RootHandle, 0x10000, &Attributes);
+    if (!VEA_SUCCESS(Status))
+        goto Failed;
+
+
+    /* Make "/Device"  */
+    RtlZeroMemory(&Attributes, sizeof(OBJECT_ATTRIBUTES));
+    RtlInitAnsiString(&String, "/Device");
+    InitializeObjectAttributes(&Attributes, &String, OBJ_PERMANENT, NULL, NULL);
+
+    Status = VeaCreateDirectoryNamespace(&DeviceHandle, 0x10000, &Attributes);
+    if (!VEA_SUCCESS(Status))
+        goto Failed;
+    
+
+    /* Make "/Driver" */
+    RtlZeroMemory(&Attributes, sizeof(OBJECT_ATTRIBUTES));
+    RtlInitAnsiString(&String, "/Driver");
+    InitializeObjectAttributes(&Attributes, &String, OBJ_PERMANENT, NULL, NULL);
+
+    Status = VeaCreateDirectoryNamespace(&DriverHandle, 0x10000, &Attributes);
+    if (!VEA_SUCCESS(Status))
+        goto Failed;
+
+
+    /* Make "/Types" */
+    RtlZeroMemory(&Attributes, sizeof(OBJECT_ATTRIBUTES));
+    RtlInitAnsiString(&String, "/Types");
+    InitializeObjectAttributes(&Attributes, &String, OBJ_PERMANENT, NULL, NULL);
+
+    Status = VeaCreateDirectoryNamespace(&TypeHandle, 0x10000, &Attributes);
+    if (!VEA_SUCCESS(Status))
+        goto Failed;
+
+
+    /* Reference it incase some Legacy Code needed */
+
+    // Root Handle
+    Status = ObReferenceObjectByHandle(
+        RootHandle,
+        0x10000,
+        ObpDirectoryObjectType,
+        KernelMode,
+        (PVOID*)&ObpRootDirectoryObject
+    );
+    if (!VEA_SUCCESS(Status)) goto Failed;
+
+    VeaClose(RootHandle);
+
+    // Device Handle
+    Status = ObReferenceObjectByHandle(
+        DeviceHandle,
+        0x10000,
+        ObpDirectoryObjectType,
+        KernelMode,
+        (PVOID*)&ObpDeviceDirectoryObject
+    );
+    if (!VEA_SUCCESS(Status)) goto Failed;
+
+    VeaClose(DeviceHandle);
+
+    // Driver Handle
+    Status = ObReferenceObjectByHandle(
+        DriverHandle,
+        0x10000,
+        ObpDirectoryObjectType,
+        KernelMode,
+        (PVOID*)&ObpDriverDirectoryObject
+    );
+    if (!VEA_SUCCESS(Status)) goto Failed;
+
+    VeaClose(DriverHandle);
+
+    // Type Handle
+    Status = ObReferenceObjectByHandle(
+        TypeHandle,
+        0x10000,
+        ObpDirectoryObjectType,
+        KernelMode,
+        (PVOID*)&ObpTypesDirectoryObject
+    );
+    if (!VEA_SUCCESS(Status)) goto Failed;
+
+    VeaClose(TypeHandle);
+
+    /* Insert every object */
+    for (PLIST_ENTRY Curr = ObpTypeObjectList.Flink;
+         Curr != &ObpTypeObjectList;
+         Curr = Curr->Flink)
+    {
+        POBJECT_TYPE   TypeObj = CONTAINING_RECORD(Curr, OBJECT_TYPE, TypeList);
+        POBJECT_HEADER Header  = OBJECT_TO_OBJECT_HEADER(TypeObj);
+
+        if (!(Header->Flags & OB_FLAG_HAS_NAME_INFO))
+            continue;
+
+        POBJECT_HEADER_NAME_INFO NI = OBJECT_HEADER_TO_NAME_INFO(Header);
+        if (!NI->Name.Buffer)
+            continue;
+
+        NI->Directory = (POBJECT_DIRECTORY)ObpTypesDirectoryObject;
+        Status = ObpInsertDirectory(ObpTypesDirectoryObject, TypeObj);
+        if (!VEA_SUCCESS(Status)) goto Failed;
+    }
+
+    return STATUS_SUCCESS;
+
+Failed:
+    DPRINT("VeaCreateDirectoryNamespace failed: 0x%x\n", Status);
+    return Status;
 }
 
 VEASTATUS
@@ -159,65 +374,248 @@ ObCreateSymbolicLink(
     PCHAR TargetPath
 )
 {
-    if (!ParentDirectory || !LinkName || !TargetPath) {
+    if (!ParentDirectory || !LinkName || !TargetPath ||
+        !ObpSymbolicLinkObjectType)
+    {
         return STATUS_INVALID_PARAMETER;
     }
 
     ANSI_STRING NameAnsi;
     RtlInitAnsiString(&NameAnsi, LinkName);
+    if (NameAnsi.Length == 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
 
     OBJECT_ATTRIBUTES Attr;
-    InitializeObjectAttributes(&Attr, &NameAnsi, 0, NULL, NULL);
+    // FIX 1: Set OBJ_PERMANENT agar Symbolic Link bertahan di namespace directory
+    InitializeObjectAttributes(&Attr, &NameAnsi, OBJ_PERMANENT, NULL, NULL);
 
-    // Hitung panjang string TargetPath secara manual
     USHORT PathLength = 0;
     while (TargetPath[PathLength] != '\0') {
+        if (PathLength == 0xFFFE)
+        {
+            return STATUS_NAME_TOO_LONG;
+        }
         PathLength++;
     }
 
     PVOID SymlinkObject = NULL;
-    LONG Status;
+    VEASTATUS Status;
 
-    // Alokasi Objek Symlink
     Status = ObAllocateObject(ObpSymbolicLinkObjectType, &Attr, sizeof(OBJECT_SYMBOLIC_LINK), &SymlinkObject);
-    if (Status != 0) {
-        return Status;
+    if (!VEA_SUCCESS(Status)) {
+        return (VEASTATUS)Status;
     }
-
-    POBJECT_SYMBOLIC_LINK SymlinkBody = (POBJECT_SYMBOLIC_LINK)SymlinkObject;
-
-    // Atur properti ANSI_STRING
-    SymlinkBody->LinkTarget.Length = PathLength;
-    SymlinkBody->LinkTarget.MaximumLength = PathLength + 1; // +1 untuk '\0'
-
-    // Alokasi buffer memori terpisah untuk menampung teks string-nya
-    SymlinkBody->LinkTarget.Buffer = UlAllocatePoolWithTag(
-        NonPagedPool, 
-        SymlinkBody->LinkTarget.MaximumLength, 
-        RTL_TAG // Tag buat String Buffer
-    );
-
-    if (!SymlinkBody->LinkTarget.Buffer) {
-        // Jika alokasi buffer teks gagal, lepas kembali objek symlink yang tadi dibuat
-        // Lu bisa panggil fungsi free pool untuk membuang (SymlinkObject - 1)
-        return -1;
-    }
-
-    // Copy data string asli ke buffer baru memakai fungsi lu
-    RtlCopyMemory(SymlinkBody->LinkTarget.Buffer, TargetPath, SymlinkBody->LinkTarget.MaximumLength);
 
     POBJECT_HEADER Header = OBJECT_TO_OBJECT_HEADER(SymlinkObject);
-    if (Header->Flags & OB_FLAG_HAS_NAME_INFO) 
+    Header->Flags |= OB_FLAG_PERMANENT; // Pastikan flag terpasang di Header
+
+    POBJECT_SYMBOLIC_LINK SymlinkBody = (POBJECT_SYMBOLIC_LINK)SymlinkObject;
+    SymlinkBody->LinkTarget.Length = PathLength;
+    SymlinkBody->LinkTarget.MaximumLength = PathLength + 1;
+    SymlinkBody->LinkTarget.Buffer = UlAllocatePoolWithTag(
+        NonPagedPool,
+        SymlinkBody->LinkTarget.MaximumLength,
+        RTL_TAG
+    );
+    if (!SymlinkBody->LinkTarget.Buffer) {
+        ObDereferenceObject(SymlinkObject);
+        return STATUS_INSUFFICIENT_MEMORY;
+    }
+
+    RtlCopyMemory(SymlinkBody->LinkTarget.Buffer, TargetPath, SymlinkBody->LinkTarget.MaximumLength);
+
+    if (Header->Flags & OB_FLAG_HAS_NAME_INFO)
     {
         POBJECT_HEADER_NAME_INFO NameInfo = OBJECT_HEADER_TO_NAME_INFO(Header);
         NameInfo->Directory = ParentDirectory;
         NameInfo->Name.Length = NameAnsi.Length;
         NameInfo->Name.MaximumLength = NameAnsi.Length + 1;
         NameInfo->Name.Buffer = UlAllocatePoolWithTag(PagedPool, NameInfo->Name.MaximumLength, 'NmOb');
-        RtlCopyRawString(NameInfo->Name.Buffer, LinkName);
+        if (!NameInfo->Name.Buffer)
+        {
+            ObDereferenceObject(SymlinkObject);
+            return STATUS_INSUFFICIENT_MEMORY;
+        }
+        RtlCopyMemory(NameInfo->Name.Buffer, LinkName, NameAnsi.Length);
+        NameInfo->Name.Buffer[NameAnsi.Length] = '\0';
+    }
+    else
+    {
+        ObDereferenceObject(SymlinkObject);
+        return STATUS_INSUFFICIENT_MEMORY;
     }
 
-    return ObpInsertDirectory(ParentDirectory, SymlinkObject);
+    Status = ObpInsertDirectory(ParentDirectory, SymlinkObject);
+    if (!VEA_SUCCESS(Status))
+    {
+        ObDereferenceObject(SymlinkObject);
+        return Status;
+    }
+
+    ObDereferenceObject(SymlinkObject);
+    return STATUS_SUCCESS;
+}
+
+VEASTATUS
+VEAPI
+ObCreateSymbolicLinkToObject(
+    PVOID ParentDirectory,
+    PCHAR LinkName,
+    PVOID TargetObject
+)
+{
+    ANSI_STRING Name;
+    OBJECT_ATTRIBUTES Attributes;
+    POBJECT_SYMBOLIC_LINK LinkObject;
+    POBJECT_HEADER Header;
+    POBJECT_HEADER_NAME_INFO NameInfo;
+    VEASTATUS Status;
+
+    if (!ParentDirectory || !LinkName || !TargetObject ||
+        !ObpSymbolicLinkObjectType)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlInitAnsiString(&Name, LinkName);
+    if (Name.Length == 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // FIX 1: Set OBJ_PERMANENT
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_PERMANENT, NULL, NULL);
+    Status = ObAllocateObject(ObpSymbolicLinkObjectType,
+                              &Attributes,
+                              sizeof(OBJECT_SYMBOLIC_LINK),
+                              (PVOID *)&LinkObject);
+    if (!VEA_SUCCESS(Status))
+    {
+        return (VEASTATUS)Status;
+    }
+
+    Header = OBJECT_TO_OBJECT_HEADER(LinkObject);
+    Header->Flags |= OB_FLAG_PERMANENT; // Pastikan flag permanent aktif di Header
+
+    if (!(Header->Flags & OB_FLAG_HAS_NAME_INFO))
+    {
+        ObDereferenceObject(LinkObject);
+        return STATUS_INSUFFICIENT_MEMORY;
+    }
+
+    NameInfo = OBJECT_HEADER_TO_NAME_INFO(Header);
+    NameInfo->Directory = ParentDirectory;
+    NameInfo->Name.Length = Name.Length;
+    NameInfo->Name.MaximumLength = Name.Length + 1;
+    NameInfo->Name.Buffer = UlAllocatePoolWithTag(
+        PagedPool,
+        NameInfo->Name.MaximumLength,
+        'NmOb'
+    );
+    if (!NameInfo->Name.Buffer)
+    {
+        ObDereferenceObject(LinkObject);
+        return STATUS_INSUFFICIENT_MEMORY;
+    }
+
+    RtlCopyMemory(NameInfo->Name.Buffer, LinkName, Name.Length);
+    NameInfo->Name.Buffer[Name.Length] = '\0';
+    LinkObject->TargetObject = TargetObject;
+    ObReferenceObject(TargetObject);
+
+    Status = ObpInsertDirectory(ParentDirectory, LinkObject);
+    ObDereferenceObject(LinkObject);
+    return Status;
+}
+
+VEASTATUS
+VEAPI
+ObDeleteSymbolicLink(
+    PVOID ParentDirectory,
+    PCHAR LinkName
+)
+{
+    POBJECT_DIRECTORY Directory;
+    ANSI_STRING Name;
+    PLIST_ENTRY Current;
+
+    if (!ParentDirectory || !LinkName)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlInitAnsiString(&Name, LinkName);
+    if (Name.Length == 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Directory = (POBJECT_DIRECTORY)ParentDirectory;
+    Current = Directory->Head.Flink;
+    while (Current != &Directory->Head && Current != NULL)
+    {
+        POBJECT_DIRECTORY_ENTRY Entry;
+        POBJECT_HEADER Header;
+        POBJECT_HEADER_NAME_INFO NameInfo;
+        BOOLEAN Match;
+
+        Entry = CONTAINING_RECORD(Current, OBJECT_DIRECTORY_ENTRY, Chain);
+        Current = Current->Flink;
+        Header = OBJECT_TO_OBJECT_HEADER(Entry->Object);
+
+        if (!(Header->Flags & OB_FLAG_HAS_NAME_INFO))
+        {
+            continue;
+        }
+
+        NameInfo = OBJECT_HEADER_TO_NAME_INFO(Header);
+        if (!NameInfo->Name.Buffer || NameInfo->Name.Length != Name.Length)
+        {
+            continue;
+        }
+
+        Match = TRUE;
+        for (USHORT i = 0; i < Name.Length; i++)
+        {
+            CHAR ExistingCharacter = NameInfo->Name.Buffer[i];
+            CHAR RequestedCharacter = Name.Buffer[i];
+
+            if (ExistingCharacter >= 'A' && ExistingCharacter <= 'Z')
+            {
+                ExistingCharacter += 'a' - 'A';
+            }
+            if (RequestedCharacter >= 'A' && RequestedCharacter <= 'Z')
+            {
+                RequestedCharacter += 'a' - 'A';
+            }
+
+            if (ExistingCharacter != RequestedCharacter)
+            {
+                Match = FALSE;
+                break;
+            }
+        }
+
+        if (Match)
+        {
+            PVOID Object = Entry->Object;
+
+            if (Header->Type != ObpSymbolicLinkObjectType)
+            {
+                return STATUS_OBJECT_TYPE_MISMATCH;
+            }
+
+            // FIX 2: Manfaatkan ObMakeTemporaryObject!
+            // Fungsi ini akan menghapus flag OBJ_PERMANENT, mencabut node dari Directory, 
+            // melepaskan Directory Reference, dan membebas memori secara aman.
+            ObMakeTemporaryObject(Object);
+            return STATUS_SUCCESS;
+        }
+    }
+
+    return STATUS_OBJECT_NAME_NOT_FOUND;
 }
 
 VOID
@@ -226,9 +624,24 @@ ObpDeleteSymbolicLink(
     PVOID Object
 )
 {
-    POBJECT_SYMBOLIC_LINK SymLink = (POBJECT_SYMBOLIC_LINK)Object;
-    if (SymLink->LinkTarget.Buffer != NULL) {
+    POBJECT_SYMBOLIC_LINK SymLink;
+
+    if (!Object)
+    {
+        return;
+    }
+
+    SymLink = (POBJECT_SYMBOLIC_LINK)Object;
+    if (SymLink->LinkTarget.Buffer != NULL)
+    {
         UlFreePoolWithTag(SymLink->LinkTarget.Buffer, RTL_TAG);
+        SymLink->LinkTarget.Buffer = NULL;
+    }
+
+    if (SymLink->TargetObject != NULL)
+    {
+        ObDereferenceObject(SymLink->TargetObject);
+        SymLink->TargetObject = NULL;
     }
 }
 
@@ -237,17 +650,21 @@ VEAPI
 ObpParseSymbolicLink(
     PVOID ParseObject,
     POB_LOOKUP_CONTEXT LookupContext,
+    PVOID Context,
     PVOID *ResolvedObject
 )
 {
-    if (!ParseObject || !LookupContext) {
+    if (!ParseObject || !LookupContext || !ResolvedObject) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    // Parameter ini tidak dipakai langsung dalam proses reparse
-    (VOID)ResolvedObject;
-
     POBJECT_SYMBOLIC_LINK SymLink = (POBJECT_SYMBOLIC_LINK)ParseObject;
+    if (SymLink->TargetObject)
+    {
+        *ResolvedObject = SymLink->TargetObject;
+        return STATUS_SUCCESS;
+    }
+
     ULONG TempLen = 0;
     ULONG MaxLen = sizeof(LookupContext->ReparseBuffer) - 1;
 
@@ -323,7 +740,7 @@ ObpDumpObjectTreeRecursive(
             kdp_print("    ");
         }
 
-        KdPrintf("|--/ %s [%s]\n\r", ObjectName, TypeName);
+        KdPrintf("|--/ %s [%s] [Reference: %u]\n\r", ObjectName, TypeName, Header->ReferenceCount);
 
         if (Header && Header->Type == ObpDirectoryObjectType) {
             ObpDumpObjectTreeRecursive(Entry->Object, Depth + 1);
@@ -407,6 +824,7 @@ ObpMatchToken(
 )
 {
     ULONG i;
+    
     for(i = 0; i < TokenLength; i++)
     {
         CHAR c1 = EntryName[i];
@@ -446,10 +864,21 @@ ObpLookupEntryDirectory(
         if (EntryHeader->Flags & OB_FLAG_HAS_NAME_INFO) {
             POBJECT_HEADER_NAME_INFO NameInfo = OBJECT_HEADER_TO_NAME_INFO(EntryHeader);
             
+            if (!NameInfo->Name.Buffer)
+            {
+                DPRINT("OB: BAD dir entry obj=%p type=%s ref=%d dir=%p\n",
+                        Entry->Object,
+                        EntryHeader->Type ? EntryHeader->Type->TypeName : "?",
+                        EntryHeader->ReferenceCount,
+                        NameInfo->Directory);
+                CurrentEntry = CurrentEntry->Flink;
+                continue;
+            }
+
             if(ObpMatchToken(TokenStart, TokenLength, NameInfo->Name.Buffer, CaseInsensitive))
             {
                 FoundObject = Entry->Object;
-                break; // Ketemu!
+                break;
             }
         }
         CurrentEntry = CurrentEntry->Flink;
@@ -468,32 +897,142 @@ ObpLookupObjectName(
     PVOID *FoundObject
 )
 {
-    if (!ObjectAttributes || !ObjectAttributes->ObjectName || !FoundObject) {
+    PVOID          RootObject = NULL;
+    POBJECT_HEADER FinalHeader;
+    VEASTATUS      Status;
+
+    if (!ObjectAttributes || !ObjectAttributes->ObjectName ||
+        !LookupContext || !FoundObject) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    LookupContext->RootDirectory = ObjectAttributes->RootDirectory;
-    LookupContext->CaseInsensitive = (ObjectAttributes->Attributes & OBJ_CASE_INSENSITIVE) != 0;
-    LookupContext->ReparseCount = 0;
+    *FoundObject = NULL;
 
-    if (ObjectAttributes->RootDirectory) {
-        LookupContext->CurrentDirectory = ObjectAttributes->RootDirectory;
-    } else {
+    LookupContext->RootDirectory   = ObjectAttributes->RootDirectory;   /* HANDLE */
+    LookupContext->RootObject      = NULL;
+    LookupContext->CaseInsensitive = (ObjectAttributes->Attributes & OBJ_CASE_INSENSITIVE) != 0;
+    LookupContext->ReparseCount    = 0;
+
+    if (ObjectAttributes->RootDirectory)
+    {
+        Status = ObReferenceObjectByHandle(ObjectAttributes->RootDirectory, 0, NULL,
+                                           LookupContext->AccessMode, &RootObject);
+        if (!VEA_SUCCESS(Status))
+            return Status;                    /* belum ada yang perlu dilepas */
+
+        LookupContext->RootObject       = RootObject;
+        LookupContext->CurrentDirectory = RootObject;          /* <-- yang hilang */
+    }
+    else
+    {
         LookupContext->CurrentDirectory = ObpRootDirectoryObject;
     }
 
     LookupContext->RemainingName = *ObjectAttributes->ObjectName;
-    
-    PCHAR TokenStart = NULL;
-    ULONG TokenLength = 0;
 
-    while(ObpGetNextPathToken(LookupContext, &TokenStart, &TokenLength))
+    /* Loop utama Object Manager */
+    while (TRUE)
     {
         POBJECT_HEADER CurrentHeader = OBJECT_TO_OBJECT_HEADER(LookupContext->CurrentDirectory);
 
-        if(CurrentHeader->Type != ObpDirectoryObjectType)
+        if (CurrentHeader->Type->ParseRoutine != NULL)
         {
-            return STATUS_OBJECT_TYPE_MISMATCH;
+            PVOID ResolvedObject = NULL;
+
+            VEASTATUS ParseStatus = CurrentHeader->Type->ParseRoutine(
+                LookupContext->CurrentDirectory,
+                LookupContext,
+                LookupContext->ParseContext,
+                &ResolvedObject
+            );
+
+            if (ParseStatus == STATUS_SUCCESS)
+            {
+                if (ResolvedObject == NULL)
+                {
+                    Status = LookupContext->InsertMode ? STATUS_SUCCESS
+                                                       : STATUS_OBJECT_NAME_NOT_FOUND;
+                    goto Exit;                /* *FoundObject sudah NULL */
+                }
+
+                if (CurrentHeader->Type == ObpSymbolicLinkObjectType)
+                {
+                    while (LookupContext->RemainingName.Buffer != NULL &&
+                           LookupContext->RemainingName.Length > 0 &&
+                           (*LookupContext->RemainingName.Buffer == '/' ||
+                            *LookupContext->RemainingName.Buffer == '\\'))
+                    {
+                        LookupContext->RemainingName.Buffer++;
+                        LookupContext->RemainingName.Length--;
+                    }
+
+                    if (++LookupContext->ReparseCount > 32)
+                    {
+                        DPRINT("Object symbolic-link chain exceeded the reparse limit\n");
+                        Status = STATUS_REPARSE_OBJECT_MAY_LOOP;
+                        goto Exit;
+                    }
+
+                    LookupContext->CurrentDirectory = ResolvedObject;
+                    continue;
+                }
+
+                if (LookupContext->ExpectedType != NULL &&
+                    OBJECT_TO_OBJECT_HEADER(ResolvedObject)->Type != LookupContext->ExpectedType)
+                {
+                    DPRINT("[OB] Mismatch in ExpectedType: got %s, expected %s\n",
+                           OBJECT_TO_OBJECT_HEADER(ResolvedObject)->Type->TypeName,
+                           LookupContext->ExpectedType->TypeName);
+                    Status = STATUS_OBJECT_TYPE_MISMATCH;
+                    goto Exit;
+                }
+
+                ObReferenceObject(ResolvedObject);
+                *FoundObject = ResolvedObject;
+                Status = STATUS_SUCCESS;
+                goto Exit;
+            }
+            else if (ParseStatus == STATUS_REPARSE)
+            {
+                if (++LookupContext->ReparseCount > 32)
+                {
+                    Status = STATUS_REPARSE_OBJECT_MAY_LOOP;
+                    goto Exit;
+                }
+
+                if (LookupContext->ReparseBuffer[0] == '/' ||
+                    LookupContext->ReparseBuffer[0] == '\\')
+                {
+                    LookupContext->CurrentDirectory = ObpRootDirectoryObject;
+                }
+                else if (LookupContext->RootObject != NULL)
+                {
+                    LookupContext->CurrentDirectory = LookupContext->RootObject;
+                }
+
+                continue;
+            }
+            else
+            {
+                Status = ParseStatus;
+                goto Exit;
+            }
+        }
+
+        if (CurrentHeader->Type != ObpDirectoryObjectType)
+        {
+            DPRINT("Object path has remaining components but current object type is %s\n",
+                   CurrentHeader->Type ? CurrentHeader->Type->TypeName : "<null>");
+            Status = STATUS_OBJECT_TYPE_MISMATCH;
+            goto Exit;
+        }
+
+        PCHAR TokenStart = NULL;
+        ULONG TokenLength = 0;
+
+        if (!ObpGetNextPathToken(LookupContext, &TokenStart, &TokenLength))
+        {
+            break;      /* path habis: hasilnya CurrentDirectory sendiri */
         }
 
         PVOID NextObject = ObpLookupEntryDirectory(
@@ -504,109 +1043,97 @@ ObpLookupObjectName(
             LookupContext
         );
 
-        if (!NextObject) {
-            // Kalau ini token terakhir dan kita ada di InsertMode,
-            // return sukses (tapi FoundObject = NULL) supaya ObInsertObject bisa langsung tanam di CurrentDirectory!
-            if (LookupContext->InsertMode && LookupContext->RemainingName.Length == 0) {
-                *FoundObject = NULL; 
-                return STATUS_SUCCESS; 
-            }
-            return STATUS_OBJECT_NAME_NOT_FOUND;
-        }
-        
-        POBJECT_HEADER NextHeader = OBJECT_TO_OBJECT_HEADER(NextObject);
-
-        if(NextHeader->Type->ParseRoutine != NULL)
+        if (!NextObject)
         {
-            PVOID ResolvedObject = NULL;
-
-            VEASTATUS ParseStatus = NextHeader->Type->ParseRoutine(
-                NextObject, 
-                LookupContext, 
-                &ResolvedObject
-            );
-
-            if (ParseStatus == STATUS_SUCCESS) 
-            { 
-                if (LookupContext->ExpectedType != NULL)
-                {
-                    POBJECT_HEADER ResolvedHeader = OBJECT_TO_OBJECT_HEADER(ResolvedObject);
-                    if (ResolvedHeader->Type != LookupContext->ExpectedType)
-                    {
-                        return STATUS_OBJECT_TYPE_MISMATCH;
-                    }
-                }
-
-                *FoundObject = ResolvedObject;
-                return STATUS_SUCCESS;
-            } 
-            else if (ParseStatus == STATUS_REPARSE)
-            {
-                LookupContext->ReparseCount++;
-
-                if (LookupContext->ReparseCount > 32)
-                {
-                    return STATUS_REPARSE_OBJECT_MAY_LOOP;
-                }
-
-                // Copy sisa path ke ReparseBuffer milik struct LookupContext (bukan stack lokal!)
-                USHORT CopyLen = LookupContext->RemainingName.Length;
-                if (CopyLen >= sizeof(LookupContext->ReparseBuffer)) {
-                    CopyLen = sizeof(LookupContext->ReparseBuffer) - 1;
-                }
-
-                if (LookupContext->RemainingName.Buffer != NULL) {
-                    for (ULONG i = 0; i < CopyLen; i++) {
-                        LookupContext->ReparseBuffer[i] = LookupContext->RemainingName.Buffer[i];
-                    }
-                }
-                LookupContext->ReparseBuffer[CopyLen] = '\0';
-
-                // Arahkan RemainingName ke ReparseBuffer internal
-                LookupContext->RemainingName.Buffer = LookupContext->ReparseBuffer;
-                LookupContext->RemainingName.Length = CopyLen;
-                LookupContext->RemainingName.MaximumLength = sizeof(LookupContext->ReparseBuffer);
-
-                // Reset directory jika path bersifat Absolute
-                if (LookupContext->ReparseBuffer[0] == '/' || LookupContext->ReparseBuffer[0] == '\\')
-                {
-                    LookupContext->CurrentDirectory = ObpRootDirectoryObject;
-                }
-                else if (LookupContext->RootDirectory != NULL)
-                {
-                    LookupContext->CurrentDirectory = LookupContext->RootDirectory;
-                }
-
-                continue;
-            }
-            else 
-            {
-                // ParseRoutine gagal (misal file gak ketemu di disk)
-                return ParseStatus; 
-            }
+            Status = (LookupContext->InsertMode && LookupContext->RemainingName.Length == 0)
+                     ? STATUS_SUCCESS : STATUS_OBJECT_NAME_NOT_FOUND;
+            goto Exit;  /* *FoundObject masih NULL */
         }
 
         LookupContext->CurrentDirectory = NextObject;
+
+        while (LookupContext->RemainingName.Length > 0 &&
+               (LookupContext->RemainingName.Buffer[0] == '/' ||
+                LookupContext->RemainingName.Buffer[0] == '\\'))
+        {
+            LookupContext->RemainingName.Buffer++;
+            LookupContext->RemainingName.Length--;
+        }
+
+        if (LookupContext->RemainingName.Length == 0 &&
+            OBJECT_TO_OBJECT_HEADER(NextObject)->Type->ParseRoutine == NULL)
+        {
+            break;
+        }
     }
 
-    POBJECT_HEADER FinalHeader = OBJECT_TO_OBJECT_HEADER(LookupContext->CurrentDirectory);
+    /* Hasil akhir = CurrentDirectory */
+    FinalHeader = OBJECT_TO_OBJECT_HEADER(LookupContext->CurrentDirectory);
     if (LookupContext->ExpectedType != NULL && FinalHeader->Type != LookupContext->ExpectedType)
     {
-        return STATUS_OBJECT_TYPE_MISMATCH;
+        DPRINT("Object path resolved to type %s, expected %s\n",
+               FinalHeader->Type ? FinalHeader->Type->TypeName : "<null>",
+               LookupContext->ExpectedType->TypeName);
+        Status = STATUS_OBJECT_TYPE_MISMATCH;
+        goto Exit;
     }
 
-    ObReferenceObject(LookupContext->CurrentDirectory);
-
+    ObReferenceObject(LookupContext->CurrentDirectory);   /* ref hasil DULU */
     *FoundObject = LookupContext->CurrentDirectory;
-    return STATUS_SUCCESS;
+    Status = STATUS_SUCCESS;
+
+Exit:
+    if (RootObject)
+        ObDereferenceObject(RootObject);                  /* lepas ref root TERAKHIR */
+    return Status;
+}
+
+VOID
+VEAPI
+ObpDeleteNameCheck(IN PVOID Object)
+{
+    POBJECT_HEADER Header = OBJECT_TO_OBJECT_HEADER(Object);
+    POBJECT_HEADER_NAME_INFO NameInfo;
+
+    if (Header->Flags & OB_FLAG_PERMANENT) {
+        return;
+    }
+
+    if (Header->Flags & OB_FLAG_HAS_NAME_INFO)
+    {
+        NameInfo = OBJECT_HEADER_TO_NAME_INFO(Header);
+
+        if (NameInfo->Directory != NULL)
+        {
+            ObpRemoveEntryDirectory(Object);
+        }
+    }
+}
+
+VOID
+VEAPI
+ObMakeTemporaryObject(IN PVOID Object)
+{
+    POBJECT_HEADER Header;
+
+    if (!Object) return;
+
+    Header = OBJECT_TO_OBJECT_HEADER(Object);
+    Header->Flags &= ~OB_FLAG_PERMANENT;
+
+    ObpDeleteNameCheck(Object);
 }
 
 VEASTATUS
 VEAPI
-VeaCreateDirectoryNamespace(POBJECT_ATTRIBUTES ObjectAttributes)
+VeaCreateDirectoryNamespace(
+    OUT PHANDLE Handle,
+    IN ACCESS_MASK Mask,
+    IN POBJECT_ATTRIBUTES ObjectAttributes)
 {
     VEASTATUS Status;
     PVOID ReturnedObject;
+    HANDLE PointerHandle;
 
     Status = ObCreateObject(
         KernelMode,
@@ -614,21 +1141,41 @@ VeaCreateDirectoryNamespace(POBJECT_ATTRIBUTES ObjectAttributes)
         ObjectAttributes,
         KernelMode,
         NULL,
-        0, // 0 = Fallback ke ObpDirectoryObjectType->ObjectSize (sizeof(OBJECT_DIRECTORY))
+        0,
         0,
         0,
         &ReturnedObject
     );
 
-    if(!VEA_SUCCESS(Status))
+    if (!VEA_SUCCESS(Status))
     {
+        DPRINT("VeaCreateDirectoryNamespace ObCreateObject failed: 0x%x\n");
         return Status;
     }
 
-    Status = ObInsertObject(ReturnedObject, ObjectAttributes);
-    if(!VEA_SUCCESS(Status))
+    // Pakai 6 parameter versi baru
+    Status = ObInsertObject(
+        ReturnedObject,
+        NULL,   // AccessState
+        Mask,      // DesiredAccess
+        0,      // ObjectPointerBias
+        NULL,   // NewObject
+        &PointerHandle
+    );
+
+    if (!VEA_SUCCESS(Status))
     {
+        DPRINT("VeaCreateDirectoryNamespace ObInsertObject failed: 0x%x\n", Status);
         return Status;
+    }
+
+    if (Handle)
+    {
+        *Handle = PointerHandle;
+    }
+    else
+    {
+        VeaClose(PointerHandle);
     }
 
     return STATUS_SUCCESS;
