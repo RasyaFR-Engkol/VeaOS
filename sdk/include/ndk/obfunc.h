@@ -871,4 +871,24 @@ ObioInitializeIoTimer(
     IN PVOID Context
 );
 
+VEASTATUS
+VEAPI
+VeaCreateFile(
+    OUT PHANDLE FileHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes,
+    OUT POIP_INFORMATION IoStatusBlock,
+    IN PLARGE_INTEGER AllocationSize OPTIONAL,
+    IN ULONG FileAttributes,
+    IN ULONG ShareAccess,
+    IN ULONG CreateDisposition,
+    IN ULONG CreateOptions,
+    IN PVOID EaBuffer OPTIONAL,
+    IN ULONG EaLength
+);
+
+VEASTATUS
+VEAPI
+VeaLoadDriver(IN PANSI_STRING DriverServiceName);
+
 /* EOF */

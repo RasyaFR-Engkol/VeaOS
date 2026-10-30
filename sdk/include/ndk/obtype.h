@@ -1016,6 +1016,7 @@ typedef struct _FILE_OBJECT
     PVOID           FsContext, FsContext2;
     VEASTATUS       FinalStatus;
     struct _FILE_OBJECT* RelatedFileObject;
+    PSECTION_OBJECT_POINTERS SectionObjectPointer;
     BOOLEAN         LockOperation;
     BOOLEAN         LockPending;
     BOOLEAN         ReadAccess;
