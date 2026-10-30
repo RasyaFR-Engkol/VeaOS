@@ -8,6 +8,8 @@
  ----- Effective since 08-2026 til FOREVER ------------------------------- */
 
 #include <veakrnl.h>
+#include "../Include/table.h"
+#include "acpi_pnp.h"
 
 /* Revision History ------------------------------------------------------
  * DATE       : 06-08-2026
@@ -27,27 +29,21 @@ VEAPI
 HctInitializePnp(VOID)
 {
     VEASTATUS Status;
-    PACPI_HEADER MADT, MCFG, FADT;
+    PACPI_HEADER MADT, MCFG, FADT, DSDT;
 
     DPRINT("Initializing ACPI PNP Subsystem\n");
 
     MADT = HctFindAcpiTable("APIC");
     MCFG = HctFindAcpiTable("MCFG");
     FADT = HctFindAcpiTable("FACP");
+    DSDT = HctFindAcpiTable("DSDT");
 
-    if(MADT)
+    HctpDumpCachedAcpiTable();
+
+    Status = HctInitializeIoApic(MADT);
+    if (!VEA_SUCCESS(Status))
     {
-
-    }
-
-    if(MCFG)
-    {
-
-    }
-
-    if(FADT)
-    {
-
+        DPRINT("IOAPIC/GSI initialization failed: 0x%X\n", Status);
     }
 
     Status = ObioCreateDriver(
@@ -76,9 +72,10 @@ HctInitializePnp(VOID)
     PHCT_PDO_EXTENSION PdoExt = (PHCT_PDO_EXTENSION)HctRootPdo->DeviceExtension;
 
     if (PdoExt != NULL) {
+        PdoExt->MagicSignature = ACPI_HCT_PDO_SIGNATURE;
         PdoExt->Self       = HctRootPdo;
         PdoExt->PdoType    = HctDeviceRootPdo;
-        PdoExt->HardwareID = "ACPI_HAL\\PNP0A08"; // PCI Express Host Bridge ID
+        PdoExt->HardwareID = "ACPI_HAL/PNP0A08"; // PCI Express Host Bridge ID
         PdoExt->MadtTable  = MADT;
         PdoExt->McfgTable  = MCFG;
         PdoExt->FadtTable  = FADT;
@@ -87,5 +84,5 @@ HctInitializePnp(VOID)
 
     HctRootPdo->Flags &= ~DEVICE_INITIALIZING;
     
-    ObioRegisterRootDeviceNode(HctRootPdo, "ACPI_HAL/PNP0A08");
+    ObioRegisterRootDeviceNode(HctRootPdo, "ACPI_HCT/PNP0A08");
 }

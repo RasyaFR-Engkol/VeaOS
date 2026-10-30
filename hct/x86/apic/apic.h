@@ -68,6 +68,21 @@ typedef union _APIC_LVT_TIMER_REGISTER {
 #define APIC_REG_EOI                0x0B0
 #define APIC_ICR_SHORTHAND_SELF     0x00040000
 #define APIC_ICR_LEVEL_ASSERT       0x00004000
+#define HCT_MAX_IOAPICS       8
+#define HCT_MAX_GSI_COUNT     1024
+#define HCT_MAX_ISA_IRQS      16
+
+#define IOAPIC_REGSEL         0x00
+#define IOAPIC_IOWIN          0x10
+#define IOAPIC_REG_VERSION    0x01
+#define IOAPIC_REG_REDIR_BASE 0x10
+#define IOAPIC_REDIR_MASKED   (1u << 16)
+#define IOAPIC_REDIR_POLARITY (1u << 13)
+#define IOAPIC_REDIR_TRIGGER  (1u << 15)
+#define APIC_REG_ID           0x020
+
+#define MADT_ENTRY_IO_APIC    1
+#define MADT_ENTRY_ISO        2
 
 // 
 // APIC Configuration

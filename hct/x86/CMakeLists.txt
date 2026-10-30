@@ -36,7 +36,7 @@ foreach(C_FILE ${HCT_C_SOURCES})
         COMMAND clang --target=i686-pc-none-elf -march=i686 -m32 -ffreestanding -nostdlib -fno-builtin -fPIC 
                 -I${CMAKE_CURRENT_SOURCE_DIR}/include 
                 ${VEA_INCLUDES} 
-                -c ${C_FILE} -o ${OBJ_FILE} -fms-extensions
+            -g -c ${C_FILE} -o ${OBJ_FILE} -fms-extensions
         DEPENDS ${C_FILE}
         COMMENT "Compiling HCT C: ${SAFE_NAME}"
     )

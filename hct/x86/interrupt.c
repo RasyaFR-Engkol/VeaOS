@@ -25,6 +25,12 @@ HctRequestSoftwareInterrupt(IN KIRQL Irql)
 
     // Konversi level IRQL ke Vektor Interupsi APIC
     TargetVector = IrqlToApicVector(Irql);
+    
+    // If APC_LEVEL, send request for 0x1F instead
+    if (Irql == APC_LEVEL)
+    {
+        TargetVector = 0x1F;
+    }
 
     // Kirimkan Self-IPI ke LAPIC CPU saat ini
     ApicRequestSoftwareInterrupt(TargetVector);
@@ -33,30 +39,27 @@ HctRequestSoftwareInterrupt(IN KIRQL Irql)
 /* IRQL Interrupt Handler*/
 VOID
 VEAPI
-HctpDispatcherHandler(IN PKREGISTER_FRAME Frame)
+HctpDispatcherHandler(IN PKTRAP_FRAME Frame, IN ULONG Stubs)
 {
     KIRQL OldIrql;
-
-    // Kita pake mekanisme LazyIrql jadi kita harus BeginSystemInterrupt
-    if(!HctBeginSystemInterrupt(DISPATCH_LEVEL, IrqlToApicVector(DISPATCH_LEVEL), &OldIrql))
-    {
-        // SPURIOUS
-        return;
-    }
 
     // EOI agar timer bisa masuk
     ApicEndSystemInterrupt();
 
-    asm volatile("sti");
+    __Start();
     KsiDispatchInterrupt();
-    asm volatile("cli");
-
-    HctEndSystemInterrupt(OldIrql);
+    __Stop();
 }
 
 VOID
 VEAPI
-HctpApcHandler(IN PKREGISTER_FRAME Frame)
+HctpApcHandler(IN PKTRAP_FRAME Frame, IN ULONG Stubs)
 {
+    ApicEndSystemInterrupt();
 
+    __Start();
+
+    KsDeliverApc(KernelMode, NULL, Frame);
+
+    __Stop();
 }

@@ -8,6 +8,30 @@ VOID HctpDispatch(VOID);
 // Variable used to save HCT System Data Time
 ULARGE_INTEGER KsiTick = {.QuadPart = 0};
 ULONGLONG      KsiTotalSeconds = 0;
+static ULONG HctTscCyclesPerMicrosecond = 0;
+
+static
+ULONGLONG
+HctpReadTimestampCounter(VOID)
+{
+    ULONG LowPart;
+    ULONG HighPart;
+
+    __asm__ __volatile__ ("rdtsc" : "=a" (LowPart), "=d" (HighPart));
+    return ((ULONGLONG)HighPart << 32) | LowPart;
+}
+
+VOID
+VEAPI
+HctApicTimerTickC(IN PKTRAP_FRAME Frame, IN ULONG Stubs);
+
+VOID
+VEAPI
+HctpDispatcherHandler(IN PKTRAP_FRAME Frame, IN ULONG Stubs);
+
+VOID
+VEAPI
+HctpApcHandler(IN PKTRAP_FRAME Frame, IN ULONG Stubs);
 
 VOID
 VEAPI
@@ -32,8 +56,9 @@ ApicInitializeTimerInterrupt(VOID)
     ApicWrite(APIC_REG_TIMER_INIT_COUNT, 0);
 
     // Daftarkan handler punya Hct
-    KsRegisterSystemInterruptHandler((PVOID)HctApicTimerTick, IrqlToApicVector(CLOCK_LEVEL));
-    KsRegisterSystemInterruptHandler((PVOID)HctpDispatch, IrqlToApicVector(DISPATCH_LEVEL));
+    HctRegisterSystemIsr(IrqlToApicVector(CLOCK_LEVEL), HctApicTimerTickC);
+    HctRegisterSystemIsr(IrqlToApicVector(DISPATCH_LEVEL), HctpDispatcherHandler);
+    HctRegisterSystemIsr(0x1F, HctpApcHandler);
 }
 
 VOID
@@ -44,6 +69,8 @@ ApicStartTimer(IN ULONG PeriodicInterrupt)
     ULONG TicksElapsed;
     ULONG TicksPerSecond;
     ULONG TargetInitialCount;
+    ULONGLONG TscStart;
+    ULONGLONG TscEnd;
 
     // Cegag PeriodicInterrupt 0
     if (PeriodicInterrupt == 0)
@@ -70,10 +97,14 @@ ApicStartTimer(IN ULONG PeriodicInterrupt)
     // Tulis Initial Count bernilai MAX (0xFFFFFFFF) untuk mulai hitung mundur
     ApicWrite(APIC_REG_TIMER_INIT_COUNT, 0xFFFFFFFF);
 
+    TscStart = HctpReadTimestampCounter();
     while ((IoReadPortByte(0x61) & 0x20) == 0)
     {
         // Polling tunggu 10 ms...
     }
+    TscEnd = HctpReadTimestampCounter();
+    HctTscCyclesPerMicrosecond =
+        ((ULONG)(TscEnd - TscStart) + 9999) / 10000;
 
     // Hitung berapa tick APIC yang berkurang selama sampel 10 ms
     TicksElapsed = 0xFFFFFFFF - ApicRead(APIC_REG_TIMER_CURR_COUNT);
@@ -90,6 +121,29 @@ ApicStartTimer(IN ULONG PeriodicInterrupt)
 
     ApicWrite(APIC_REG_LVT_TIMER, LvtTimer.Value);
     ApicWrite(APIC_REG_TIMER_INIT_COUNT, TargetInitialCount);
+}
+
+VOID
+VEAPI
+HctStallExecutionProcessor(
+    IN ULONG Microseconds
+)
+{
+    ULONGLONG TargetCycles;
+    ULONGLONG StartCycles;
+
+    if (Microseconds == 0 || HctTscCyclesPerMicrosecond == 0)
+    {
+        return;
+    }
+
+    TargetCycles = (ULONGLONG)Microseconds * HctTscCyclesPerMicrosecond;
+
+    StartCycles = HctpReadTimestampCounter();
+    while (HctpReadTimestampCounter() - StartCycles < TargetCycles)
+    {
+        __asm__ __volatile__ ("pause");
+    }
 }
 
 VOID
@@ -115,16 +169,9 @@ HctDumpTimeRun(IN ULONGLONG InputSecond)
 
 VOID
 VEAPI
-HctApicTimerTickC(IN PKREGISTER_FRAME Frame)
+HctApicTimerTickC(IN PKTRAP_FRAME Frame, IN ULONG Stubs)
 {
     KIRQL OldIrql;
-    
-    /* Begin system interrupt (also check if it's spurious interrupt or not) */
-    if (!HctBeginSystemInterrupt(CLOCK_LEVEL, APIC_TIMER_INTERRUPT_VECTOR, &OldIrql))
-    {
-        /* Directly return to ASM stub */
-        return;
-    }
     
     /* Increase Time */
     KsiTick.QuadPart++;
@@ -137,7 +184,4 @@ HctApicTimerTickC(IN PKREGISTER_FRAME Frame)
 
     /* After CLOCK_LEVEL, we should DISPATCH then */
     HctRequestSoftwareInterrupt(DISPATCH_LEVEL);
-
-    /* End system interrupt */
-    HctEndSystemInterrupt(OldIrql);
 }
