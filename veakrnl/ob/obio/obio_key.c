@@ -18,28 +18,27 @@
 VEASTATUS
 VEAPI
 ObioOpenVeaKey(
+    IN HANDLE RootDirectory OPTIONAL,
     OUT PHANDLE Handle, 
     IN PANSI_STRING KeyName,
     IN ACCESS_MASK DesiredAccess
 )
 {
     OBJECT_ATTRIBUTES Attributes;
-    PEPROCESS Process = (PEPROCESS)PtGetCurrentProcess();
 
-    if (!Process) return STATUS_UNSUCCESSFULL;
+    /* Validate the wrapper arguments before constructing attributes. */
+    if (!Handle || !KeyName || !KeyName->Buffer || KeyName->Length == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
 
-    InitializeObjectAttributes(&Attributes, KeyName, 0, NULL, NULL);
+    *Handle = NULL;
 
-    // Lewat ObOpenObjectByName langsung -- BUKAN VeaCreateKey.
-    // Ini beneran cuma "open", gak ada efek samping create sama sekali.
-    return ObOpenObjectByName(
-        Process->ObjectTable,
-        &Attributes,
-        VkKeyObjectType,
-        KernelMode,
-        DesiredAccess,
-        Handle
-    );
+    /* Keep RootDirectory as a handle; VeaOpenVeaKey resolves it before the
+       object-manager lookup. */
+    InitializeObjectAttributes(&Attributes, KeyName, 0, RootDirectory, NULL);
+
+    /* Open an existing key only; this path never creates a missing key. */
+    return VeaOpenVeaKey(Handle, DesiredAccess, &Attributes);
 }
 
 VEASTATUS
@@ -62,6 +61,106 @@ ObioCreateVeaKey(
     if (!VEA_SUCCESS(Status))
     {
         return Status;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+VEASTATUS
+VEAPI
+ObioGetValueKey(
+    IN HANDLE Handle,
+    IN PANSI_STRING ValueName,
+    OUT PVOID Buffer,
+    IN ULONG BufferSize,
+    OUT PULONG Type,
+    OUT PULONG ResultSizeOut
+)
+{
+    VEASTATUS Status;
+    ULONG ResultSize, AvailSize;
+    ULONG Disposition;
+    ULONG TypeLocal;
+    PVOID LocalBuffer;
+
+    /* Condition checking */
+    if (!Handle || 
+        !ValueName || 
+        !ValueName->Buffer ||
+        ValueName->Length == 0
+    ) return STATUS_INVALID_PARAMETER;
+
+    /* Get the value */
+    Status = VeaQueryValueKey(
+        Handle,
+        ValueName,
+        NULL,
+        NULL,
+        0,
+        &ResultSize
+    );
+
+    /* Is status okay? */
+    if (Status != STATUS_BUFFER_TOO_SMALL)
+    {
+        /* Another Status */
+        return Status;
+    }
+
+    /* Make sure caller buffer size is enough */
+    if (BufferSize < ResultSize)
+    {
+        /* Caller must know size of the data so it can be allocated 
+           as flexible. 
+        */
+        if (ResultSizeOut)
+            *ResultSizeOut = ResultSize;
+
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    /* Set AvailSize */
+    AvailSize = ResultSize;
+
+    LocalBuffer = UlAllocatePoolZero(NonPagedPool, ResultSize, TAG_VEAKEY_BUFFER);
+    if (!LocalBuffer) return STATUS_INSUFFICIENT_MEMORY;
+
+    /* Easy to get the buffer now */
+    Status = VeaQueryValueKey(
+        Handle,
+        ValueName,
+        &TypeLocal,
+        LocalBuffer,
+        AvailSize,
+        &ResultSize
+    );
+
+    if (!VEA_SUCCESS(Status))
+    {
+        DPRINT("ERR: VeaQueryValueKey failed: 0x%x\n", Status);
+        return Status;
+    }
+
+    /* I hope the buffer is okay. We can copy it directly */
+    RtlCopyMemory(
+        Buffer,
+        LocalBuffer,
+        ResultSize
+    );
+
+    if (Type)
+    {
+        *Type = TypeLocal;
+    }
+
+    if (ResultSizeOut)
+    {
+        *ResultSizeOut = ResultSize;
+    }
+
+    if (LocalBuffer)
+    {
+        UlFreePoolWithTag(LocalBuffer, TAG_VEAKEY_BUFFER);
     }
 
     return STATUS_SUCCESS;

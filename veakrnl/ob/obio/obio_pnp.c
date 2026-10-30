@@ -15,6 +15,12 @@
  * REVISION   : Creating file obio_pnp.c
  * --------------------------------------------------------------------- */
 
+typedef struct _PNP_EVENT_ENTRY
+{
+    LIST_ENTRY ListEntry;
+    PLUGPLAY_EVENT_BLOCK Event;
+} PNP_EVENT_ENTRY, *PPNP_EVENT_ENTRY;
+
 PDRIVER_OBJECT ObioPnpRootDriver;
 PDEVICE_NODE ObioRootDeviceNode;
 
@@ -30,6 +36,13 @@ ObioInitializePnPService(VOID)
     PDEVICE_OBJECT PnpPdo;
     PCHAR PnpDevNodeRoot = "HTREE/ROOT/0";
 
+    /* Initialie ListHead*/
+    InitializeListHead(&ObioDeviceActionRequestList);
+    InitializeListHead(&ObioPnpNotificationList);
+
+    /* Initialize SpinLock */
+    KsInitializeSpinlock(&ObioDeviceTreeLock);
+
     /* Initialize Group Order Load */
     ObioInitGroupOrderLoad();
 
@@ -42,10 +55,11 @@ ObioInitializePnPService(VOID)
        3. DeviceClasses at Control in CurrentControlSet */
 
     /* Open CCS Key */
-    Status = ObioOpenVeaKey(&CCSHandle, &CCSString, KEY_ALL_ACCESS);
+    Status = ObioOpenVeaKey(NULL, &CCSHandle, &CCSString, KEY_ALL_ACCESS);
     if(!VEA_SUCCESS(Status))
     {
         DPRINT("CCS Fail to open.\n");
+        ObDumpObjectTree();
         return Status;
     }
 
@@ -86,10 +100,10 @@ ObioInitializePnPService(VOID)
             return Status;
         }
 
-        // VeaClose(DeviceClassesHandle);
+        VeaClose(DeviceClassesHandle);
     }
 
-    // VeaClose(ControlHandle);
+    VeaClose(ControlHandle);
 
     /* Create Enum Key */
     RtlInitAnsiString(&KeyName, "Enum");
@@ -116,16 +130,17 @@ ObioInitializePnPService(VOID)
         &Disposition,
         &RootHandle
     );
-    // VeaClose(ParentHandle);
+    VeaClose(RootHandle);
     if(!VEA_SUCCESS(Status))
     {
         return Status;
     }
-    // VeaClose(EnumHandle);
+    VeaClose(EnumHandle);
 
     /* Open Root Key now bro */
     RtlInitAnsiString(&KeyName, "/REGISTRY/MACHINE/SYSTEM/CurrentControlSet/Enum");
     Status = ObioOpenVeaKey(
+        NULL,
         &EnumHandle,
         &KeyName,
         KEY_ALL_ACCESS
@@ -148,13 +163,13 @@ ObioInitializePnPService(VOID)
     );
 
     /* Close old Enum KEY */
-    // VeaClose(EnumHandle);
+    VeaClose(EnumHandle);
     if (!VEA_SUCCESS(Status))
     {
         DPRINT("ERROR: Gagal bikin HTREE/ROOT/0\n");
         return Status; 
     }
-    // VeaClose(TreeHandle);
+    VeaClose(TreeHandle);
 
     /* Create our PNP driver Node */
     Status = ObioCreateDriver("PnpManager", ObioPnpRootDriverEntry, &ObioPnpRootDriver);
@@ -209,6 +224,6 @@ ObioInitializePnPService(VOID)
     ObioRootDeviceNode->InstancePath.MaximumLength = RtlRawStringLength(PnpDevNodeRoot);
 
     /* Enumerate them */
-    // ObioQueueDeviceAction(PnpPdo, PiActionEnumRootDevices, NULL, NULL);
+    ObioQueueDeviceAction(PnpPdo, PiActionEnumRootDevices, NULL, NULL);
     return STATUS_SUCCESS;
 }
