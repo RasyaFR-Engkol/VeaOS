@@ -76,11 +76,9 @@ BvpPutPixel(
     IN ULONG Y2,
     IN ULONG Color);
 
-static KTIMER BvFadeTimer;
-static KDPC BvFadeDpc;
 static ULONG BvFadeCurrentStep = 0;
 static ULONG BvFadeTotalSteps = 30;
-static ULONG BvFadeIntervalMs = 100;
+static ULONG BvFadeIntervalMs = 33;
 static ULONG BvFadeStartX = 0;
 static ULONG BvFadeStartY = 0;
 static ULONG BvFadeWidth = 0;
@@ -178,33 +176,31 @@ BvDrawLogoWithAlpha(IN UCHAR Alpha)
 static
 VOID
 VEAPI
-BvFadeLogoDpcRoutine(
-    IN PKDPC Dpc,
-    IN PVOID DeferredContext,
-    IN PVOID SystemArgument1,
-    IN PVOID SystemArgument2)
+BvLogoFadeThreadRoutine(IN PVOID Context)
 {
-    UNREFERENCED_PARAMETER(Dpc);
-    UNREFERENCED_PARAMETER(DeferredContext);
-    UNREFERENCED_PARAMETER(SystemArgument1);
-    UNREFERENCED_PARAMETER(SystemArgument2);
+    UNREFERENCED_PARAMETER(Context);
 
-    if (!BvDoWeHaveOwnership() || !BvFadeActive) {
-        return;
+    KeLowerIrql(PASSIVE_LEVEL);
+
+    LARGE_INTEGER DelayInterval;
+    DelayInterval.QuadPart = -((LONGLONG)BvFadeIntervalMs * 10000LL);
+
+    for (ULONG Step = 0; Step <= BvFadeTotalSteps; Step++)
+    {
+        if (!BvDoWeHaveOwnership() || !BvFadeActive) {
+            break;
+        }
+
+        UCHAR Alpha = (UCHAR)((Step * 255) / BvFadeTotalSteps);
+
+        BvDrawLogoWithAlpha(Alpha);
+
+        KsDelayExecutionThread(KernelMode, FALSE, &DelayInterval);
     }
 
-    if (BvFadeCurrentStep < BvFadeTotalSteps)
+    while (TRUE)
     {
-        BvFadeCurrentStep++;
-    }
-
-    UCHAR Alpha = (UCHAR)((BvFadeCurrentStep * 255) / BvFadeTotalSteps);
-    BvDrawLogoWithAlpha(Alpha);
-
-    if (BvFadeCurrentStep >= BvFadeTotalSteps)
-    {
-        KsCancelTimer(&BvFadeTimer);
-        BvFadeActive = FALSE;
+        __YieldProcessor();
     }
 }
 
@@ -213,13 +209,14 @@ VOID
 VEAPI
 BvStartLogoFade(VOID)
 {
-    KsInitializeTimer(&BvFadeTimer);
-    KsInitializeDpc(&BvFadeDpc, BvFadeLogoDpcRoutine, NULL);
+    PKTHREAD Thread;
 
-    LARGE_INTEGER DueTime;
-    DueTime.QuadPart = -((ULONGLONG)BvFadeIntervalMs * 30000ULL);
-
-    KsSetTimer(&BvFadeTimer, DueTime, (LONG)BvFadeIntervalMs, &BvFadeDpc);
+    Thread = (PKTHREAD)PtCreateSystemThread(
+        (PEPROCESS)PtGetCurrentProcess(),
+        BvLogoFadeThreadRoutine,
+        NULL,
+        NonPagedPool
+    );
 }
 
 //
@@ -580,3 +577,4 @@ BvDisplayBootLogoFadeIn(VOID)
     BvClearScreen();
     BvStartLogoFade();
 }
+
