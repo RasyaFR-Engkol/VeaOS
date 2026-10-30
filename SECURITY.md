@@ -2,6 +2,7 @@
 
 ## Supported Versions
 The VeaOS project is currently receiving security updates and fixes. Our team continues to prioritize this version, though an official release is not yet available.
+*Note: The VeaOS kernel and its userland are currently under active development and may still contain security vulnerabilities. If you discover a security flaw or bug, please report it immediately to the contacts listed below.*
 
 ## Reporting a Vulnerability
 
