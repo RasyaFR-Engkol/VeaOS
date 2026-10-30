@@ -2,6 +2,7 @@
 
 #include <stdarg.h>
 #include "procbind.h"
+#include "veastatus.h"
 
 /* TYPES */
 
@@ -46,6 +47,13 @@ VOID RtlCopyMemory(PVOID Dest, PVOID Src, SIZE_T N);
 LONG RtlRawStringLength(const char *string);
 PCHAR RtlCopyRawString(char *dst, const char *src);
 LONG RtlRawStringCompareN(const char *string, const char *string2, int n);
+BOOLEAN
+VEAPI
+RtlAppendRawString(
+    OUT PCHAR Destination,
+    IN ULONG DestinationSize,
+    IN PCSTR Source
+);
 
 #define RTL_CONSTANT_ANSI_STRING(s) \
 { \
@@ -222,6 +230,20 @@ VEAPI
 RtlCopyString(PANSI_STRING DestinationString, 
               const ANSI_STRING *SourceString);
 
+VEASTATUS
+VEAPI
+RtlAppendRawStringToString(
+    PANSI_STRING DestinationString,
+    PCHAR SourceString
+);
+
+VEASTATUS
+VEAPI
+RtlAppendStringToString(
+    PANSI_STRING DestinationString,
+    const ANSI_STRING *SourceString
+);
+
 
 BOOLEAN 
 VEAPI
@@ -321,3 +343,332 @@ PtCfsCompareRoutine(
     PRTL_BALANCED_NODE NodeA, 
     PRTL_BALANCED_NODE NodeB
 );
+
+SIZE_T RtlCompareMemory(
+    const PVOID Source1,
+    const PVOID Source2,
+    SIZE_T Length
+);
+
+VEASTATUS
+VEAPI
+RtlStringCchCopyA(
+    OUT PCHAR pszDest,
+    IN SIZE_T cchDest,
+    IN PCSTR pszSrc
+);
+
+VEASTATUS
+VEAPI
+RtlStringFromGUID(
+    IN const GUID *Guid,
+    OUT PANSI_STRING GuidString
+);
+
+ULONGLONG
+VEAPI
+RtlDivideUnsigned64(
+    IN ULONGLONG Dividend,
+    IN ULONGLONG Divisor,
+    OUT PULONGLONG Remainder OPTIONAL
+);
+
+CHAR
+VEAPI
+RtlUpperChar(
+    CHAR Character
+);
+
+#define RTL_DUPLICATE_ANSI_STRING_NULL_TERMINATE 0x1
+#define RTL_DUPLICATE_ANSI_STRING_ALLOCATE_NULL_STRING 0x2
+
+VEASTATUS VEAPI RtlDuplicateAnsiString(
+    ULONG Flags,
+    const ANSI_STRING* SourceString,
+    ANSI_STRING* DestinationString
+);
+
+LONGLONG
+VEAPI
+RtlDivideSigned64(
+    IN LONGLONG Dividend,
+    IN LONGLONG Divisor,
+    OUT PLONGLONG Remainder OPTIONAL
+);
+
+//
+// Bitmap Specific
+//
+
+typedef struct _RTL_BITMAP
+{
+    ULONG SizeOfBitMap;
+    PULONG Buffer;
+} RTL_BITMAP, *PRTL_BITMAP;
+
+typedef struct _RTL_BITMAP_RUN
+{
+    ULONG StartingIndex;
+    ULONG NumberOfBits;
+} RTL_BITMAP_RUN, *PRTL_BITMAP_RUN;
+
+VOID
+VEAPI
+RtlFillMemoryUlong(
+    PVOID  Destination,
+    SIZE_T Length,
+    ULONG  Pattern
+);
+
+typedef ULONG BITMAP_INDEX, *PBITMAP_INDEX;
+typedef ULONG BITMAP_BUFFER, *PBITMAP_BUFFER;
+
+VOID
+VEAPI
+RtlInitializeBitmap(
+    OUT PRTL_BITMAP BitmapHeader,
+    IN PBITMAP_BUFFER BitmapBuffer,
+    IN ULONG SizeOfBitmap
+);
+
+VOID
+VEAPI
+RtlClearAllBits(
+    IN PRTL_BITMAP BitMapHeader
+);
+
+VOID
+VEAPI
+RtlSetAllBits(
+    IN PRTL_BITMAP BitMapHeader
+);
+
+VOID
+VEAPI
+RtlClearBit(
+    IN PRTL_BITMAP BitMapHeader,
+    IN BITMAP_INDEX BitNumber
+);
+
+VOID
+VEAPI
+RtlSetBit(
+    IN PRTL_BITMAP BitMapHeader,
+    IN BITMAP_INDEX BitNumber
+);
+
+VOID
+VEAPI
+RtlClearBits(
+    IN PRTL_BITMAP BitMapHeader,
+    IN BITMAP_INDEX StartingIndex,
+    IN BITMAP_INDEX NumberToClear
+);
+
+VOID
+VEAPI
+RtlSetBits(
+    IN PRTL_BITMAP BitMapHeader,
+    IN BITMAP_INDEX StartingIndex,
+    IN BITMAP_INDEX NumberToSet
+);
+
+BOOLEAN
+VEAPI
+RtlTestBit(
+    IN PRTL_BITMAP BitMapHeader,
+    IN BITMAP_INDEX BitNumber
+);
+
+BOOLEAN
+VEAPI
+RtlAreBitsClear(
+    IN PRTL_BITMAP BitMapHeader,
+    IN BITMAP_INDEX StartingIndex,
+    IN BITMAP_INDEX Length
+);
+
+BOOLEAN
+VEAPI
+RtlAreBitsSet(
+    _In_ PRTL_BITMAP BitMapHeader,
+    _In_ BITMAP_INDEX StartingIndex,
+    _In_ BITMAP_INDEX Length
+);
+
+BITMAP_INDEX
+VEAPI
+RtlNumberOfSetBits(
+    _In_ PRTL_BITMAP BitMapHeader
+);
+
+BITMAP_INDEX
+VEAPI
+RtlNumberOfClearBits(
+    _In_ PRTL_BITMAP BitMapHeader
+);
+
+BITMAP_INDEX
+VEAPI
+RtlFindClearBits(
+    _In_ PRTL_BITMAP BitMapHeader,
+    _In_ BITMAP_INDEX NumberToFind,
+    _In_ BITMAP_INDEX HintIndex
+);
+
+BITMAP_INDEX
+VEAPI
+RtlFindSetBits(
+    _In_ PRTL_BITMAP BitMapHeader,
+    _In_ BITMAP_INDEX NumberToFind,
+    _In_ BITMAP_INDEX HintIndex
+);
+
+BITMAP_INDEX
+VEAPI
+RtlFindClearBitsAndSet(
+    _In_ PRTL_BITMAP BitMapHeader,
+    _In_ BITMAP_INDEX NumberToFind,
+    _In_ BITMAP_INDEX HintIndex
+);
+
+BITMAP_INDEX
+VEAPI
+RtlFindSetBitsAndClear(
+    _In_ PRTL_BITMAP BitMapHeader,
+    _In_ BITMAP_INDEX NumberToFind,
+    _In_ BITMAP_INDEX HintIndex
+);
+
+BITMAP_INDEX
+VEAPI
+RtlFindNextForwardRunClear(
+    _In_ PRTL_BITMAP BitMapHeader,
+    _In_ BITMAP_INDEX FromIndex,
+    _Out_ PBITMAP_INDEX StartingRunIndex
+);
+
+BITMAP_INDEX
+VEAPI
+RtlFindNextForwardRunSet(
+    _In_ PRTL_BITMAP BitMapHeader,
+    _In_ BITMAP_INDEX FromIndex,
+    _Out_ PBITMAP_INDEX StartingRunIndex
+);
+
+BITMAP_INDEX
+VEAPI
+RtlFindFirstRunClear(
+    _In_ PRTL_BITMAP BitMapHeader,
+    _Out_ PBITMAP_INDEX StartingIndex
+);
+
+BITMAP_INDEX
+VEAPI
+RtlFindLastBackwardRunClear(
+    _In_ PRTL_BITMAP BitMapHeader,
+    _In_ BITMAP_INDEX FromIndex,
+    _Out_ PBITMAP_INDEX StartingRunIndex
+);
+
+ULONG
+VEAPI
+RtlFindClearRuns(
+    _In_ PRTL_BITMAP BitMapHeader,
+    _In_ PRTL_BITMAP_RUN RunArray,
+    _In_ ULONG SizeOfRunArray,
+    _In_ BOOLEAN LocateLongestRuns
+);
+
+BITMAP_INDEX
+VEAPI
+RtlFindLongestRunClear(
+    IN PRTL_BITMAP BitMapHeader,
+    IN PBITMAP_INDEX StartingIndex
+);
+
+BITMAP_INDEX
+VEAPI
+RtlFindLongestRunSet(
+    IN PRTL_BITMAP BitMapHeader,
+    IN PBITMAP_INDEX StartingIndex
+);
+
+typedef struct _VEA_EXCEPTION_FRAME {
+    struct _VEA_EXCEPTION_FRAME* PreviousFrame;
+    PVOID JumpBuffer[5];
+    VEASTATUS FaultStatus;
+} VEA_EXCEPTION_FRAME, *PVEA_EXCEPTION_FRAME;
+
+//
+// RTL Splay and Balanced Links structures
+//
+typedef struct _RTL_SPLAY_LINKS
+{
+    struct _RTL_SPLAY_LINKS *Parent;
+    struct _RTL_SPLAY_LINKS *LeftChild;
+    struct _RTL_SPLAY_LINKS *RightChild;
+} RTL_SPLAY_LINKS, *PRTL_SPLAY_LINKS;
+
+typedef struct _RTL_BALANCED_LINKS
+{
+    struct _RTL_BALANCED_LINKS *Parent;
+    struct _RTL_BALANCED_LINKS *LeftChild;
+    struct _RTL_BALANCED_LINKS *RightChild;
+    CHAR Balance;
+    UCHAR Reserved[3];
+} RTL_BALANCED_LINKS, *PRTL_BALANCED_LINKS;
+
+typedef enum _RTL_GENERIC_COMPARE_RESULTS
+{
+    GenericLessThan,
+    GenericGreaterThan,
+    GenericEqual
+} RTL_GENERIC_COMPARE_RESULTS;
+
+struct _RTL_GENERIC_TABLE;
+
+typedef RTL_GENERIC_COMPARE_RESULTS
+(VEAPI RTL_GENERIC_COMPARE_ROUTINE) (
+    struct _RTL_GENERIC_TABLE *Table,
+    PVOID FirstStruct,
+    PVOID SecondStruct
+);
+typedef RTL_GENERIC_COMPARE_ROUTINE *PRTL_GENERIC_COMPARE_ROUTINE;
+
+typedef PVOID
+(VEAPI RTL_GENERIC_ALLOCATE_ROUTINE) (
+    struct _RTL_GENERIC_TABLE *Table,
+    LONG ByteSize
+);
+typedef RTL_GENERIC_ALLOCATE_ROUTINE *PRTL_GENERIC_ALLOCATE_ROUTINE;
+
+typedef VOID
+(VEAPI RTL_GENERIC_FREE_ROUTINE) (
+    struct _RTL_GENERIC_TABLE *Table,
+    PVOID Buffer
+);
+typedef RTL_GENERIC_FREE_ROUTINE *PRTL_GENERIC_FREE_ROUTINE;
+
+typedef struct _RTL_GENERIC_TABLE
+{
+    PRTL_SPLAY_LINKS TableRoot;
+    LIST_ENTRY InsertOrderList;
+    PLIST_ENTRY OrderedPointer;
+    ULONG WhichOrderedElement;
+    ULONG NumberGenericTableElements;
+    PRTL_GENERIC_COMPARE_ROUTINE CompareRoutine;
+    PRTL_GENERIC_ALLOCATE_ROUTINE AllocateRoutine;
+    PRTL_GENERIC_FREE_ROUTINE FreeRoutine;
+    PVOID TableContext;
+} RTL_GENERIC_TABLE, *PRTL_GENERIC_TABLE;
+
+VOID
+VEAPI
+RtlInitializeGenericTable(IN PRTL_GENERIC_TABLE Table,
+                          IN PRTL_GENERIC_COMPARE_ROUTINE CompareRoutine,
+                          IN PRTL_GENERIC_ALLOCATE_ROUTINE AllocateRoutine,
+                          IN PRTL_GENERIC_FREE_ROUTINE FreeRoutine,
+                          IN PVOID TableContext);
+
+/* EOF */

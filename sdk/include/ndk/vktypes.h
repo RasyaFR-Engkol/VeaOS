@@ -190,12 +190,15 @@ typedef struct _VK_SECKEY
 // VkHive Signature
 #define VKHIVE_SIG 0x56484B56
 
+#define VK_MAX_KEY_PATH_LENGTH 512
+
 // Special Key Object
 typedef struct _VK_KEY_OBJECT {
     PVK_HIVE            HiveBase;         // Pointer ke Base Address Hive (RAM/In-Memory File)
     PKEY_DIRECTORY_NODE KeyNode;          // Pointer langsung ke KEY_DIRECTORY_NODE di RAM
     ULONG               KeyOffset;        // Offset relative KeyNode dari awal Base Block
     ANSI_STRING         FullKeyPath;      // Path lengkap (opsional, untuk debugging/lookup)
+    CHAR                FullKeyPathBuffer[VK_MAX_KEY_PATH_LENGTH];
 } VK_KEY_OBJECT, *PVK_KEY_OBJECT;
 
 extern PVK_HIVE VkSystemHive;
@@ -227,3 +230,16 @@ extern POBJECT_TYPE VkKeyObjectType;
 #define KEY_READ                KEY_READ_ACCESS
 #define KEY_WRITE               KEY_WRITE_ACCESS
 #define KEY_EXECUTE             KEY_EXECUTE_ACCESS
+
+#define SERVICE_BOOT_START             0x00000000
+#define SERVICE_SYSTEM_START           0x00000001
+#define SERVICE_AUTO_START             0x00000002
+#define SERVICE_DEMAND_START           0x00000003
+#define SERVICE_DISABLED               0x00000004
+
+typedef struct _VK_DRIVER_ORDER_ENTRY {
+    CHAR RegistryPath[256];
+    ULONG GroupIndex; 
+} VK_DRIVER_ORDER_ENTRY, *PVK_DRIVER_ORDER_ENTRY;
+
+/* EOF */

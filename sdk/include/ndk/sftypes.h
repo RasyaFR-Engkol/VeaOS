@@ -96,4 +96,4 @@ extern PVEA_SID SfSystemSid;
 extern PVEA_SID SfAdministratorSid;
 extern PVEA_TOKEN SfSystemToken;
 
-typedef ULONG ACCESS_MASK;
+typedef ULONG ACCESS_MASK, *PACCESS_MASK;

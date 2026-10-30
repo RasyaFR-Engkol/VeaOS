@@ -18,6 +18,19 @@
     #endif
 #endif
 
+#if defined (__clang__)
+    #define GCC_COMPILER 1
+    #define COMPILER_MODE "GCC"
+#elif defined (__GNUC__) || defined(__GNUG__)
+    #define GCC_COMPILER 1
+    #define COMPILER_MODE "GCC"
+#elif defined (_MSC_VER)
+    #define MSCVER_COMPILER 1
+    #define COMPILER_MODE "MSVC"
+#else
+    #error "procbind.h: ERROR: Unknown compiler. Please use verified compiler (GCC, Clang, MSVC)
+#endif
+
 /* ---------------------------------------------------------------------
  * Fallback Macro
  * Jika sal.h tidak ditemukan atau anotasi belum didefinisikan oleh SDK,
@@ -67,6 +80,7 @@
 typedef char CHAR, *PCHAR, *PSTR;
 typedef const CHAR *CSTR, *PCSTR;
 typedef short SHORT, *PSHORT;
+typedef SHORT const CSHORT;
 typedef long LONG, *PLONG;
 typedef int INT, *PINT;
 
@@ -88,6 +102,11 @@ typedef unsigned long SIZE_T, *PSIZE_T;
 
 typedef long long LONGLONG, *PLONGLONG;
 typedef unsigned long long ULONGLONG, *PULONGLONG, QWORD, *PQWORD;
+
+typedef unsigned __int64 ULONG64, *PULONG64;
+typedef unsigned __int32 ULONG32, *PULONG32;
+typedef __int32 LONG32, *PLONG32;
+typedef __int64 LONG64, *PLONG64;
 
 #define IN
 #define OUT
@@ -236,4 +255,127 @@ typedef struct _GUID {
 #else
     #define VEA_EXPORT extern
     #define VEAPI
+#endif
+
+// special
+typedef enum _KPROCESSOR_MODE {
+    KernelMode,
+    UserMode
+} KPROCESSOR_MODE;
+
+/* i386 doesn't have exception frame*/
+typedef struct _KEXCEPTION_FRAME *PKEXCEPTION_FRAME;
+
+#define NORET __attribute((noreturn))
+
+#define FIELD_OFFSET(Type, Field) ((LONG)__builtin_offsetof(Type, Field))
+
+#if defined(__clang__)
+  #define CAPABILITY(x)            __attribute__((capability(x)))
+  #define ACQUIRE(...)             __attribute__((acquire_capability(__VA_ARGS__)))
+  #define RELEASE(...)             __attribute__((release_capability(__VA_ARGS__)))
+  #define REQUIRES(...)            __attribute__((requires_capability(__VA_ARGS__)))
+#else
+  #define CAPABILITY(x)
+  #define ACQUIRE(...)
+  #define RELEASE(...)
+  #define REQUIRES(...)
+#endif
+
+#if defined(__clang__)
+  #define NO_THREAD_SAFETY_ANALYSIS __attribute__((no_thread_safety_analysis))
+#else
+  #define NO_THREAD_SAFETY_ANALYSIS
+#endif
+
+#ifndef FlagOn
+#define FlagOn(_F,_SF)        ((_F) & (_SF))
+#endif
+
+#ifndef BooleanFlagOn
+#define BooleanFlagOn(F,SF)   ((BOOLEAN)(((F) & (SF)) != 0))
+#endif
+
+#ifndef SetFlag
+#define SetFlag(_F,_SF)       ((_F) |= (_SF))
+#endif
+
+#ifndef ClearFlag
+#define ClearFlag(_F,_SF)     ((_F) &= ~(_SF))
+#endif
+
+#ifndef DUMMYUNIONNAME
+ #if defined(NONAMELESSUNION)// || !defined(_MSC_EXTENSIONS)
+  #define _ANONYMOUS_UNION
+  #define _UNION_NAME(x) x
+  #define DUMMYUNIONNAME  u
+  #define DUMMYUNIONNAME1 u1
+  #define DUMMYUNIONNAME2 u2
+  #define DUMMYUNIONNAME3 u3
+  #define DUMMYUNIONNAME4 u4
+  #define DUMMYUNIONNAME5 u5
+  #define DUMMYUNIONNAME6 u6
+  #define DUMMYUNIONNAME7 u7
+  #define DUMMYUNIONNAME8 u8
+  #define DUMMYUNIONNAME9  u9
+ #else
+  #define _ANONYMOUS_UNION
+  #define _UNION_NAME(x)
+  #define DUMMYUNIONNAME
+  #define DUMMYUNIONNAME1
+  #define DUMMYUNIONNAME2
+  #define DUMMYUNIONNAME3
+  #define DUMMYUNIONNAME4
+  #define DUMMYUNIONNAME5
+  #define DUMMYUNIONNAME6
+  #define DUMMYUNIONNAME7
+  #define DUMMYUNIONNAME8
+  #define DUMMYUNIONNAME9
+ #endif /* NONAMELESSUNION */
+#endif /* !DUMMYUNIONNAME */
+
+#ifndef DUMMYSTRUCTNAME
+ #if defined(NONAMELESSUNION)// || !defined(_MSC_EXTENSIONS)
+  #define _ANONYMOUS_STRUCT
+  #define _STRUCT_NAME(x) x
+  #define DUMMYSTRUCTNAME s
+  #define DUMMYSTRUCTNAME1 s1
+  #define DUMMYSTRUCTNAME2 s2
+  #define DUMMYSTRUCTNAME3 s3
+  #define DUMMYSTRUCTNAME4 s4
+  #define DUMMYSTRUCTNAME5 s5
+ #else
+  #define _ANONYMOUS_STRUCT
+  #define _STRUCT_NAME(x)
+  #define DUMMYSTRUCTNAME
+  #define DUMMYSTRUCTNAME1
+  #define DUMMYSTRUCTNAME2
+  #define DUMMYSTRUCTNAME3
+  #define DUMMYSTRUCTNAME4
+  #define DUMMYSTRUCTNAME5
+ #endif /* NONAMELESSUNION */
+#endif /* DUMMYSTRUCTNAME */
+
+#define SLIST_ENTRY SINGLE_LIST_ENTRY
+#define _SLIST_ENTRY _SINGLE_LIST_ENTRY
+#define PSLIST_ENTRY PSINGLE_LIST_ENTRY
+
+typedef union _SLIST_HEADER {
+  ULONGLONG Alignment;
+  _ANONYMOUS_STRUCT struct {
+    SLIST_ENTRY Next;
+    USHORT Depth;
+    USHORT Sequence;
+  } DUMMYSTRUCTNAME;
+} SLIST_HEADER, *PSLIST_HEADER;
+
+#define ANYSIZE_ARRAY 1
+
+#ifndef NOMINMAX
+#ifndef max
+#define max(a, b) (((a) > (b)) ? (a) : (b))
+#endif
+#ifndef min
+#define min(a, b) (((a) < (b)) ? (a) : (b))
+#endif
 #endif

@@ -25,6 +25,7 @@ VEAPI
 VkpParseKeyObject(
     PVOID ParseObject,
     POB_LOOKUP_CONTEXT LookupContext,
+    PVOID Context,
     PVOID *ResolvedObject
 );
 
@@ -64,6 +65,19 @@ VeaQueryValueKey(
     OUT PVOID Data,
     IN ULONG DataSize,
     OUT PULONG ResultLength
+);
+
+VEASTATUS
+VEAPI
+VeaQueryKeyPath(
+    IN HANDLE KeyHandle,
+    OUT PANSI_STRING KeyPath
+);
+
+VEASTATUS
+VEAPI
+VkpInitializeKeyObjectPath(
+    IN PVK_KEY_OBJECT KeyObject
 );
 
 VEASTATUS
@@ -175,6 +189,14 @@ VeaDumpKdPrint(
 
 VEASTATUS
 VEAPI
+VeaOpenVeaKey(
+    OUT PHANDLE KeyHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes
+);
+
+VEASTATUS
+VEAPI
 VeaCreateKey(
     OUT PHANDLE KeyHandle,
     IN ACCESS_MASK DesiredAccess,
@@ -202,3 +224,13 @@ VeaSetValueKey(
 BOOLEAN 
 VEAPI
 VkInitSystemPhase1(VOID);
+
+VOID
+VEAPI
+VkDumpTree(VOID);
+
+PANSI_STRING*
+VEAPI
+VkGetSystemDriverList(VOID);
+
+/* EOF */

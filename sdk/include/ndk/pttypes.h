@@ -25,10 +25,16 @@ typedef struct _EPROCESS {
     CLIENT_ID Cid;        // PID (Process ID)
     LIST_ENTRY ActiveProcessLinks; // Rantai yang nyambungin semua proses di VeaOS
     CHAR ImageFileName[16];        // Nama file, misal: "veakrnl.exe" atau "explorer.exe"
-    PVOID ObjectTable;             // Nanti dipakai buat nyimpen Handle (File, PnP Device, dll)
+    PHANDLE_TABLE ObjectTable;             // Nanti dipakai buat nyimpen Handle (File, PnP Device, dll)
     struct _EPROCESS* ParentProcess; 
     WORKING_SET Vm;
     PVOID Peb;
+    ULONG JobStatus;
+
+    struct
+    {
+        BOOLEAN BreakOnTermination;
+    } Settings;
 } EPROCESS, *PEPROCESS;
 
 typedef struct _KRUNQUEUE {
@@ -50,3 +56,9 @@ extern LIST_ENTRY PtProcessList;
 extern PEPROCESS PtSystemProcess;
 extern KTHREAD PtSystemIdleThread[32];
 extern KRUNQUEUE PtRunQueue[MAX_CPU];
+extern LIST_ENTRY PtDeadThreadListHead;
+
+typedef VOID
+(VEAPI KSTART_ROUTINE)(
+  _In_ PVOID StartContext);
+typedef KSTART_ROUTINE *PKSTART_ROUTINE;

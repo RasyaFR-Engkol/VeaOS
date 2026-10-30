@@ -5,6 +5,7 @@
 #define _VEADDK_H_
 
 #include <procbind.h>
+#include <guid.h>
 #include "veadrvtype.h"
 
 #ifdef __cplusplus
@@ -12,11 +13,9 @@ extern "C" {
 #endif
 
 VEA_EXPORT VOID VEAPI KsInitializeSpinlock(IN PKSPIN_LOCK Lock);
-VEA_EXPORT VOID VEAPI KsAcquireSpinLockInternal(IN PKSPIN_LOCK Lock, OUT PKIRQL OldIrql, const PCHAR Function, const PCHAR File, INT Line);
-#define KsAcquireSpinLock(Lock, Irql) KsAcquireSpinLockInternal(Lock, Irql, __FUNCTION__, __FILE__, __LINE__)
-VEA_EXPORT VOID VEAPI KsReleaseSpinLockInternal(IN PKSPIN_LOCK Lock, IN KIRQL OldIrql, const PCHAR Function, const PCHAR File, INT Line);
-#define KsReleaseSpinLock(Lock, Irql) KsReleaseSpinLockInternal(Lock, Irql, __FUNCTION__, __FILE__, __LINE__)
-VEA_EXPORT VEASTATUS VEAPI ObioGoInterruptObject( PVOID TargetObject, POIP Oip );
+VEA_EXPORT VOID VEAPI KsAcquireSpinLock( IN PKSPIN_LOCK Lock, OUT PKIRQL OldIrql ) ACQUIRE(Lock);
+VEA_EXPORT VOID VEAPI KsReleaseSpinLock( IN PKSPIN_LOCK Lock, IN KIRQL OldIrql ) RELEASE(Lock);
+#define ObioGoInterruptObject ObioCallObject
 VEA_EXPORT VEASTATUS VEAPI ObioCreateDriver( PCHAR DriverName, PDRIVER_INITIALIZE InitializationFunction, OUT PDRIVER_OBJECT *DriverObject );
 VEA_EXPORT VEASTATUS VEAPI ObioCreateNewDevice( PDRIVER_OBJECT DriverObject, ULONG DeviceExtSize, PCHAR DeviceName, ULONG DeviceType, PDEVICE_OBJECT *NewDevice );
 VEA_EXPORT VOID KdPrintf(const char *Format, ...);
@@ -27,6 +26,81 @@ VEA_EXPORT BOOLEAN VEAPI RtlUnicodeStringToAnsiString( PANSI_STRING DestinationS
 VEA_EXPORT VOID VEAPI RtlInitAnsiString( PANSI_STRING DestinationString, const PCHAR SourceString );
 VEA_EXPORT VOID VEAPI RtlInitUnicodeString( PUNICODE_STRING DestinationString, const PWCHAR SourceString );
 VEA_EXPORT BOOLEAN VEAPI RtlAnsiStringToUnicodeString( PUNICODE_STRING DestinationString, const ANSI_STRING *SourceString, BOOLEAN AllocateDestinationString );
+VEA_EXPORT VOID VEAPI RtlFreeAnsiString(PANSI_STRING AnsiString);
+VEA_EXPORT VEASTATUS VEAPI ObioAttachInterruptToThisObject( PVOID Object, POBIO_INTERRUPT_HANDLER CustomHandler );
+VEA_EXPORT VEASTATUS VEAPI ObioConnectInterrupt( OUT PKINTERRUPT *InterruptObject, IN PKSERVICE_ROUTINE ServiceRoutine, IN PVOID ServiceContext, IN PKSPIN_LOCK SpinLock, IN ULONG Vector, IN KIRQL Irql, IN KIRQL SynchronizeIrql, IN KINTERRUPT_MODE InterruptMode, IN CHAR ProcessorNumber );
+VEA_EXPORT VEASTATUS VEAPI ObioConnectMessageInterrupt( OUT PKINTERRUPT *InterruptObject, OUT PKINTERRUPT_MESSAGE InterruptMessage, IN PKSERVICE_ROUTINE ServiceRoutine, IN PVOID ServiceContext, IN PKSPIN_LOCK SpinLock, IN KIRQL Irql, IN KIRQL SynchronizeIrql, IN CHAR ProcessorNumber );
+VEA_EXPORT VEASTATUS VEAPI ObioDisconnectInterrupt(IN PKINTERRUPT InterruptObject);
+VEA_EXPORT KIRQL VEAPI HctConvertVectorToIrql(IN UCHAR Vector);
+#define HctIrqVectorToIsrVector(Irq) ((Irq) + 0x30)
+VEA_EXPORT VOID VEAPI HctStallExecutionProcessor( IN ULONG Microseconds );
+VEA_EXPORT UCHAR VEAPI READ_PORT_UCHAR( IN volatile UCHAR *Port );
+VEA_EXPORT USHORT VEAPI READ_PORT_USHORT( IN volatile USHORT *Port );
+VEA_EXPORT ULONG VEAPI READ_PORT_ULONG( IN volatile ULONG *Port );
+VEA_EXPORT VOID VEAPI WRITE_PORT_UCHAR( IN volatile UCHAR *Port, IN UCHAR Value );
+VEA_EXPORT VOID VEAPI WRITE_PORT_USHORT( IN volatile USHORT *Port, IN USHORT Value );
+VEA_EXPORT VOID VEAPI WRITE_PORT_ULONG( IN volatile ULONG *Port, IN ULONG Value );
+VEA_EXPORT ULONG VEAPI READ_REGISTER_ULONG( IN volatile ULONG *Register );
+VEA_EXPORT USHORT VEAPI READ_REGISTER_USHORT( IN volatile USHORT *Register );
+VEA_EXPORT UCHAR VEAPI READ_REGISTER_UCHAR( IN volatile UCHAR *Register );
+VEA_EXPORT VOID VEAPI WRITE_REGISTER_ULONG( IN volatile ULONG *Register, IN ULONG Value );
+VEA_EXPORT VOID VEAPI WRITE_REGISTER_USHORT( IN volatile USHORT *Register, IN USHORT Value );
+VEA_EXPORT VOID VEAPI WRITE_REGISTER_UCHAR( IN volatile UCHAR *Register, IN UCHAR Value );
+#define ObioGetCurrentOipStackLocation(Oip) ((POIP_STACK)(Oip->CurrentStackLocation))
+VEA_EXPORT PVOID VEAPI ObioAttachObject( IN PVOID SourceObject, IN PVOID TargetObject );
+VEA_EXPORT VOID VEAPI ObioDeleteDevice(IN PDEVICE_OBJECT DeviceObject);
+VEA_EXPORT VOID VEAPI ObioCompleteRequest( POIP Oip );
+#define UNIMPLEMENTED_DBGBREAK do { KdpDebugMailboxPrint("Unimplemented: %s %d %s \n", __FILE__, __LINE__, __FUNCTION__); } while(0);
+VEA_EXPORT VOID KdpDebugMailboxPrint( PCHAR String, ... );
+VEA_EXPORT POIP VEAPI ObioAllocateOip( ULONG StackCount );
+VEA_EXPORT PMDL VEAPI ObioAllocateMdl( IN PVOID VirtualAddress, IN ULONG Length, IN BOOLEAN HaveSecondaryBuffer, IN BOOLEAN ChargeQuote, IN POIP Oip OPTIONAL );
+VEA_EXPORT VEASTATUS VEAPI ObioBuildPartialMdl( IN PMDL SourceMdl, IN PMDL TargetMdl, IN PVOID VirtualAddress, IN ULONG Length );
+VEA_EXPORT VOID VEAPI ObioFreeMdl( IN PMDL Mdl );
+#define OBJECT_TO_OBJECT_HEADER(Object) (((POBJECT_HEADER)(Object)) - 1)
+#define ObioGetNextOipStackLocation(Oip) ((POIP_STACK)(Oip->CurrentStackLocation - 1))
+VEA_EXPORT VOID VEAPI ObioFreeOip( POIP Oip );
+VEA_EXPORT VOID VEAPI KsBugCheck( ULONG BugCheckCode );
+VEA_EXPORT VOID VEAPI KsBugCheckEx( ULONG BugCheckCode, ULONG_PTR BugCheckParameter1, ULONG_PTR BugCheckParameter2, ULONG_PTR BugCheckParameter3, ULONG_PTR BugCheckParameter4 );
+VEA_EXPORT VOID VEAPI KsStallExecutionProcessor( IN ULONG Microseconds );
+VEA_EXPORT VOID ObioCopyCurrentOipStackLocationToNext( IN OUT POIP Oip );
+VEA_EXPORT VOID ObioSkipCurrentOipStackLocation( IN OUT POIP Oip );
+VEA_EXPORT PVOID VEAPI MmMapIoSpace( ULONG PhysicalAddress, ULONG NumberOfBytes, MEMORY_CACHING_TYPE CacheType );
+VEA_EXPORT PVOID VEAPI MmAllocateContiguousMemory( IN SIZE_T NumberOfBytes, IN PHYSICAL_ADDRESS HighestAcceptableAddress );
+VEA_EXPORT VOID VEAPI MmFreeContiguousMemory( IN PVOID BaseAddress );
+VEA_EXPORT PHYSICAL_ADDRESS VEAPI MmGetPhysicalAddress( IN PVOID BaseAddress );
+VEA_EXPORT VEASTATUS VEAPI ObReferenceObjectByHandle( HANDLE Handle, ULONG DesiredAccess, POBJECT_TYPE ExpectedType, KPROCESSOR_MODE AccessMode, PVOID *Object );
+VEA_EXPORT LONG VEAPI ObReferenceObject( PVOID Object );
+VEA_EXPORT LONG VEAPI ObDereferenceObject( PVOID Object );
+VEA_EXPORT LONG VEAPI ObCreateSymbolicLink( PVOID ParentDirectory, PCHAR LinkName, PCHAR TargetPath );
+VEA_EXPORT VEASTATUS VEAPI ObCreateSymbolicLinkToObject( PVOID ParentDirectory, PCHAR LinkName, PVOID TargetObject );
+VEA_EXPORT VEASTATUS VEAPI ObQueryNameString( IN PVOID Object, OUT PANSI_STRING ObjectNameInfo, IN ULONG Length, OUT PULONG ReturnLength );
+VEA_EXPORT VEASTATUS VEAPI ObDeleteSymbolicLink( PVOID ParentDirectory, PCHAR LinkName );
+VEA_EXPORT LONG VEAPI KsSetEvent( IN PKEVENT Event, IN BOOLEAN Wait );
+VEA_EXPORT VEASTATUS VEAPI ObioRegisterDeviceInterface( IN PDEVICE_OBJECT PhysicalDeviceObject, IN const GUID *InterfaceClassGuid, IN PANSI_STRING ReferenceString OPTIONAL, OUT PANSI_STRING SymbolicLinkName );
+VEA_EXPORT VEASTATUS VEAPI ObioGetDeviceInterfaces( IN const GUID *InterfaceClassGuid, IN PDEVICE_OBJECT PhysicalDeviceObject OPTIONAL, IN ULONG Flags, OUT PCHAR *SymbolicLinkList );
+VEA_EXPORT VEASTATUS VEAPI ObioSetDeviceInterfaceState( IN PANSI_STRING SymbolicLinkName, IN BOOLEAN Enable );
+VEA_EXPORT VEASTATUS VEAPI ObioRegisterPlugPlayNotification( IN OBIO_NOTIFICATION_EVENT_CATEGORY EventCategory, IN ULONG EventCategoryFlags, IN PVOID EventCategoryData OPTIONAL, IN PDRIVER_OBJECT DriverObject, IN PDRIVER_NOTIFICATION_CALLBACK_ROUTINE CallbackRoutine, IN OUT PVOID Context OPTIONAL, OUT PVOID *NotificationEntry );
+VEA_EXPORT VEASTATUS VEAPI ObioCallSpecificPnpOip ( IN PDEVICE_OBJECT DeviceObject, IN UCHAR MinorFunction, IN POIP_STACK Stack OPTIONAL, IN OUT POIP_INFORMATION Information );
+VEA_EXPORT VOID VEAPI KsInitializeDpc( IN PKDPC Dpc, IN PKDEFERRED_ROUTINE DeferredRoutine, IN PVOID DeferredContext );
+VEA_EXPORT BOOLEAN VEAPI KsInsertQueueDpc( IN PKDPC Dpc, IN PVOID SystemArgument1, IN PVOID SystemArgument2 );
+VEA_EXPORT VEASTATUS VEAPI ObioReferenceDeviceObjectByName( IN PANSI_STRING SymbolicLinkName, OUT PDEVICE_OBJECT *DeviceObject );
+VEA_EXPORT VOID VEAPI ObioInvalidateDeviceRelations( IN PDEVICE_OBJECT DeviceObject, IN DEVICE_RELATION_TYPE RelationType );
+VEA_EXPORT VEASTATUS VEAPI VeaCreateDirectoryNamespace( OUT PHANDLE Handle, IN ACCESS_MASK Mask, IN POBJECT_ATTRIBUTES ObjectAttributes);
+VEA_EXPORT VEASTATUS VEAPI ObReferenceObjectByName( POBJECT_ATTRIBUTES ObjectAttributes, POBJECT_TYPE ObjectType, PVOID *Object );
+VEA_EXPORT PIO_WORKITEM VEAPI ObioAllocateWorkItem( IN PDEVICE_OBJECT DeviceObject );
+VEA_EXPORT VOID VEAPI ObioFreeWorkItem(IN PIO_WORKITEM WorkItem);
+VEA_EXPORT VOID VEAPI ObioQueueWorkItem( IN PIO_WORKITEM WorkItem, IN PIO_WORKITEM_ROUTINE WorkerRoutine, IN WORK_QUEUE_TYPE QueueType, IN PVOID Context );
+VEA_EXPORT POIP VEAPI ObioBuildAsynchronousFsdRequest( ULONG MajorFunction, PVOID Object, PVOID Buffer, ULONG Length, PLARGE_INTEGER StartingOffset, POIP_INFORMATION StatusInformation );
+VEA_EXPORT POIP VEAPI ObioBuildSynchronusFsdRequest( ULONG MajorFunction, PVOID Object, PVOID Buffer, ULONG Length, PLARGE_INTEGER StartingOffset, PKEVENT Event, POIP_INFORMATION StatusInformation );
+VEA_EXPORT POIP VEAPI ObioBuildDeviceIoControlRequest( ULONG IoControlCode, PDEVICE_OBJECT DeviceObject, PVOID InputBuffer, ULONG InputBufferLength, PVOID OutputBuffer, ULONG OutputBufferLength, BOOLEAN InternalDeviceIoControl, PKEVENT Event, POIP_INFORMATION StatusInformation );
+VEA_EXPORT VOID VEAPI ObioRegisterFileSystem(IN PDEVICE_OBJECT FsDevice);
+VEA_EXPORT VEASTATUS VEAFAST ObioCallObject( PVOID TargetObject, POIP Oip );
+VEA_EXPORT CHAR VEAPI RtlUpperChar( CHAR Character );
+VEA_EXPORT VEASTATUS VEAPI RtlDuplicateAnsiString( ULONG Flags, const ANSI_STRING* SourceString, ANSI_STRING* DestinationString );
+VEA_EXPORT VOID VEAPI MmUnmapIoSpace( PVOID BaseAddress, ULONG NumberOfBytes );
+VEA_EXPORT VOID VEAPI ObioStopTimer(IN PDEVICE_OBJECT DeviceObject);
+VEA_EXPORT VOID VEAPI ObioStartTimer(IN PDEVICE_OBJECT DeviceObject);
+VEA_EXPORT VEASTATUS VEAPI ObioInitializeIoTimer( IN PDEVICE_OBJECT DeviceObject, IN PIO_TIMER_ROUTINE TimerRoutine, IN PVOID Context );
 
 #ifdef __cplusplus
 }
