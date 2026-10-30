@@ -312,6 +312,7 @@ PtInitializeHandBuildThread(
     InitialThread->State = Running; 
     InitialThread->TrapFrame = NULL;
     InitialThread->Queue = NULL;
+    InitialThread->ServiceTable = KsServiceTableDescriptor;
     InitializeListHead(&InitialThread->MutantListHead);
     InitialThread->Irql = PASSIVE_LEVEL;
     KsInitializeTimer(&InitialThread->Timer);

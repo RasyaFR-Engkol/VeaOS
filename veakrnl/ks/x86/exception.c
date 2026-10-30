@@ -33,6 +33,20 @@ KsiDispatchException(
     IN ULONG Vector
 )
 {
+    if (Vector == KS_EXCEPTION_PAGE_FAULT)
+    {
+        ULONG Cr2;
+        __asm__ __volatile__("mov %%cr2, %0" : "=r" (Cr2));
+
+        BOOLEAN WriteFault = (TrapFrame->ErrCode & 2) != 0;
+        BOOLEAN WasPresent = (TrapFrame->ErrCode & 1) != 0;
+
+        if (MmAccessFault(Cr2, WriteFault, WasPresent))
+        {
+            return;
+        }
+    }
+
     if (KsiDispatchSehException(TrapFrame, STATUS_ACCESS_VIOLATION))
     {
         return;
@@ -40,39 +54,13 @@ KsiDispatchException(
 
     if (Vector == KS_EXCEPTION_PAGE_FAULT)
     {
-        BOOLEAN Success = FALSE;
         ULONG Cr2;
-
-        __asm__ __volatile__(
-            "mov %%cr2, %0"
-            : "=r" (Cr2)
-        );
-
-        // Pakai ErrCode dari KTRAP_FRAME
-        BOOLEAN WriteFault = (TrapFrame->ErrCode & 2) != 0;
-        BOOLEAN WasPresent = (TrapFrame->ErrCode & 1) != 0;
-        
-        if (MmAccessFault(Cr2, WriteFault, WasPresent))
-        {
-            return; // Page fault ter-resolve, IRET ke instruksi sebelumnya
-        }
-
+        __asm__ __volatile__("mov %%cr2, %0" : "=r" (Cr2));
         KsBugCheckEx(PAGE_FAULT_IN_NONPAGED_AREA, (ULONG_PTR)Cr2, Vector, TrapFrame->ErrCode, 0);
         return;
-    }
-    else if (Vector == KS_EXCEPTION_GENERAL_PROTECTION && (TrapFrame->SegCs & RPL_MASK) == MODE_USER)
-    {
-        // Handle #GP yang disebabkan userland (SegCs padanan dari Cs)
-    }
-    else if (Vector == KS_EXCEPTION_BREAKPOINT)
-    {
-        // Pass TrapFrame ke Kdp
-        BOOLEAN Handled = 0; //KdpHandleDebug(TrapFrame);
-        if (Handled)
-        {
-            return;
-        }
     }
 
     KsBugCheckEx(KMODE_EXCEPTION_NOT_HANDLED, Vector, TrapFrame->ErrCode, 0, 0);
 }
+
+/* EOF */
