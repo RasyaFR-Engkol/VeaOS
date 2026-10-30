@@ -6,6 +6,10 @@ PACPI_HEADER
 VEAPI
 HctFindAcpiTable(const char* Signature);
 
+VOID
+VEAPI
+HctpDumpCachedAcpiTable(VOID);
+
 FORCEINLINE
 UCHAR
 IoReadPortByte( USHORT Port)
@@ -25,3 +29,40 @@ IoWritePortByte( USHORT Port,  UCHAR Value)
 VOID
 VEAPI
 HctInitializePnp(VOID);
+
+KIRQL
+VEAPI
+HctConvertVectorToIrql(IN UCHAR Vector);
+
+VEASTATUS
+VEAPI
+HctInitializeIoApic(IN PACPI_HEADER MadtTable);
+
+VEASTATUS
+VEAPI
+HctTranslateIrqToGsi(
+    IN ULONG Irq,
+    OUT PULONG Gsi,
+    OUT PUSHORT Flags
+);
+
+VEASTATUS
+VEAPI
+HctSetGsiRedirection(
+    IN ULONG Gsi,
+    IN ULONG Vector,
+    IN USHORT Flags,
+    IN BOOLEAN Masked
+);
+
+PVOID
+VEAPI
+HctGetFadt(IN PVOID Context);
+
+PVOID
+VEAPI
+HctGetDsdt(IN PVOID Context);
+
+PVOID
+VEAPI
+HctGetSsdt(IN PVOID Context, IN ULONG Index);
