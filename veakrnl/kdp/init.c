@@ -15,6 +15,12 @@
  * REVISION   : Creating file init.c
  * --------------------------------------------------------------------- */
 
+/* Pending message only for assertation now */
+CHAR KdpPendingMessage[MAXIMUM_PENDING_MESSAGE_DEBUGGER];
+BOOLEAN KdpTheresPendingMesssage = FALSE;
+ULONG KdpPendingMessageIndex = 0;
+BOOLEAN KdpPresent = FALSE;
+
 VOID
 VEAPI
 kdp_activate_serial(void)
@@ -26,6 +32,8 @@ kdp_activate_serial(void)
     outb(COM1_PORT + 3, 0x03);
     outb(COM1_PORT + 2, 0xC7);
     outb(COM1_PORT + 4, 0x0B);
+
+    KdpPresent = TRUE;
 }
 
 VOID 
@@ -78,7 +86,7 @@ kdp_print(char *string)
 VOID
 KdPrintf(const char *Format, ...)
 {
-    char Buffer[512];
+    static char Buffer[512];
     va_list args;
 
     if (Format == NULL) {
@@ -104,6 +112,17 @@ KdpHandleDebug(PKREGISTER_FRAME RegisterFrame)
                      " thrown here accidentaly, just type ok then\n"
                      " press ENTER.\n\n");
 
+    /* If there is a delay message box */
+    if (KdpTheresPendingMesssage)
+    {
+        /* Print it first */
+        KdPrintf(KdpPendingMessage);
+
+        /* Reset all buffer message */
+        RtlZeroMemory(KdpPendingMessage, MAXIMUM_PENDING_MESSAGE_DEBUGGER);
+        KdpPendingMessageIndex = 0;
+    }
+
     /* KdpHandleDebug only accepting input from serial */
     while (TRUE)
     {
@@ -127,7 +146,7 @@ KdpHandleDebug(PKREGISTER_FRAME RegisterFrame)
             {
                 /* End it */
                 DebuggerInput[DebuggerInputIndex] = '\0';
-                KdPrintf("\n");
+                KdPrintf("\n\n");
                 break;
             }
 
@@ -153,14 +172,13 @@ KdpHandleDebug(PKREGISTER_FRAME RegisterFrame)
         /* Make sure there is command */
         if (DebuggerInputIndex > 0)
         {
-            /* If command is OK */
-            if (RtlRawStringCompareN(DebuggerInput, "ok", 2) == 0)
+            BOOLEAN ShouldResume = FALSE;
+            ShouldResume = KdpProcessInput(DebuggerInput, RegisterFrame);
+            KdPrintf("\n");
+
+            if (ShouldResume)
             {
                 return TRUE;
-            }
-            else
-            {
-                KdPrintf("VeaKDProtocol: Unknown command. Type ''helpme'' to show list of available command\n");
             }
         }
     }
