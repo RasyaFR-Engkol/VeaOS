@@ -64,9 +64,12 @@ VkpFindSubkey(
 )
 {
     if (!Hive || !ParentNode || !SubkeyName || NameLen == 0)
+    {
         return NULL;
+    }
 
     ULONG CurrentOff = ParentNode->FirstSubKeyOffset;
+    ULONG Index = 0;
 
     while (CurrentOff != 0)
     {
@@ -75,24 +78,29 @@ VkpFindSubkey(
 
         if (!Node || Node->Signature != KEY_DIR_SIG)
         {
-            // Corrupted sibling list
+            DPRINT("[VkFindSubkey] ERROR | Corrupted node at Off 0x%X (Node=%p, Sig=0x%X)\n",
+                   CurrentOff, Node, Node ? Node->Signature : 0);
             break;
         }
 
         // 2. String Matching
-        if (Node->NameLength == NameLen &&
-            RtlRawStringCompareN(Node->Name, SubkeyName, NameLen) == 0)
+        if (Node->NameLength == NameLen)
         {
-            if (OutSubkeyOffset)
-                *OutSubkeyOffset = CurrentOff; // Return offset asli (Stable/Volatile)
+            INT CmpRes = RtlRawStringCompareN(Node->Name, SubkeyName, NameLen);
 
-            return Node; // Return Pointer Node-nya
+            if (CmpRes == 0)
+            {
+
+                if (OutSubkeyOffset)
+                    *OutSubkeyOffset = CurrentOff; // Return offset asli (Stable/Volatile)
+
+                return Node; // Return Pointer Node-nya
+            }
         }
-
         // 3. Next Sibling
         CurrentOff = Node->NextSiblingOffset;
+        Index++;
     }
-
     return NULL; // Not found
 }
 

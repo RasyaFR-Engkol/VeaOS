@@ -26,6 +26,99 @@ VkpGetCellPointer(
     ULONG CellOffset
 );
 
+VEASTATUS
+VEAPI
+VkpInitializeKeyObjectPath(
+    IN PVK_KEY_OBJECT KeyObject
+)
+{
+    static const CHAR RegistryPrefix[] =
+        "/REGISTRY/MACHINE/SYSTEM";
+    PKEY_DIRECTORY_NODE RootNode;
+    PKEY_DIRECTORY_NODE CurrentNode;
+    PKEY_DIRECTORY_NODE Components[64];
+    ULONG PrefixLength;
+    ULONG ComponentCount = 0;
+    ULONG PathLength = 0;
+    ULONG Position;
+
+    if (!KeyObject || !KeyObject->HiveBase || !KeyObject->KeyNode)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RootNode = (PKEY_DIRECTORY_NODE)(
+        (PUCHAR)KeyObject->HiveBase->BaseBlock + sizeof(KEY_BASE_BLOCK)
+    );
+    CurrentNode = KeyObject->KeyNode;
+
+    while (CurrentNode != RootNode)
+    {
+        if (ComponentCount >= sizeof(Components) / sizeof(Components[0]) ||
+            CurrentNode->NameLength == 0)
+        {
+            return STATUS_NAME_TOO_LONG;
+        }
+
+        Components[ComponentCount++] = CurrentNode;
+
+        if (CurrentNode->ParentOffset == 0)
+        {
+            return STATUS_OBJECT_PATH_INVALID;
+        }
+
+        CurrentNode = (PKEY_DIRECTORY_NODE)VkpGetCellPointer(
+            KeyObject->HiveBase,
+            CurrentNode->ParentOffset
+        );
+
+        if (!CurrentNode || CurrentNode->Signature != KEY_DIR_SIG)
+        {
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+    }
+
+    PrefixLength = (ULONG)RtlRawStringLength(RegistryPrefix);
+    PathLength = PrefixLength;
+    for (ULONG i = 0; i < ComponentCount; i++)
+    {
+        PathLength += 1 + Components[i]->NameLength;
+    }
+
+    if (PathLength + 1 > sizeof(KeyObject->FullKeyPathBuffer))
+    {
+        return STATUS_NAME_TOO_LONG;
+    }
+
+    RtlZeroMemory(KeyObject->FullKeyPathBuffer, sizeof(KeyObject->FullKeyPathBuffer));
+    RtlCopyMemory(
+        KeyObject->FullKeyPathBuffer,
+        (PVOID)RegistryPrefix,
+        PrefixLength
+    );
+    Position = PrefixLength;
+
+    while (ComponentCount != 0)
+    {
+        PKEY_DIRECTORY_NODE Component = Components[--ComponentCount];
+
+        KeyObject->FullKeyPathBuffer[Position++] = '/';
+        RtlCopyMemory(
+            KeyObject->FullKeyPathBuffer + Position,
+            Component->Name,
+            Component->NameLength
+        );
+        Position += Component->NameLength;
+    }
+
+    KeyObject->FullKeyPathBuffer[Position] = '\0';
+    KeyObject->FullKeyPath.Buffer = KeyObject->FullKeyPathBuffer;
+    KeyObject->FullKeyPath.Length = (USHORT)Position;
+    KeyObject->FullKeyPath.MaximumLength = VK_MAX_KEY_PATH_LENGTH;
+
+    return STATUS_SUCCESS;
+}
+
 static PCHAR VkpGetNextToken(PCHAR Path, PCHAR* SavePtr) {
     PCHAR Str = Path ? Path : *SavePtr;
     if (!Str || *Str == '\0') return NULL;
@@ -58,6 +151,7 @@ VEAPI
 VkpParseKeyObject(
     PVOID ParseObject,
     POB_LOOKUP_CONTEXT LookupContext,
+    PVOID Context,
     PVOID *ResolvedObject
 )
 {
@@ -100,6 +194,7 @@ VkpParseKeyObject(
         return STATUS_SUCCESS;
     }
 
+
     // The remainingname condition is ofc the key path to KEY_FILE, or 
     // KEY_DIRECTORY. we need to parse it 1 by 1
     //
@@ -123,23 +218,25 @@ VkpParseKeyObject(
     {
         ULONG TokenLen = (ULONG)RtlRawStringLength(Token);
         
-        // Panggil helper universal kita!
+        // Dapatkan token berikutnya untuk pengecekan InsertMode & iterasi selanjutnya
+        PCHAR NextToken = VkpGetNextToken(NULL, &SavePtr);
+
+            
+        if (LookupContext->InsertMode && NextToken == NULL)
+        {
+            RtlCopyMemory(LookupContext->ReparseBuffer, Token, TokenLen + 1);
+            RtlInitAnsiString(&LookupContext->RemainingName, LookupContext->ReparseBuffer);
+
+            LookupContext->CurrentDirectory = ParentKeyObject; 
+            *ResolvedObject = NULL; 
+            return STATUS_SUCCESS; 
+        }
+        
+        // Panggil helper universal
         FoundChild = VkpFindSubkey(Hive, CurrentNode, Token, TokenLen, &FoundChildOffset);
 
         if (!FoundChild)
         {
-            // Handling Insert Mode (buat VkCreateKey)
-            if (LookupContext->InsertMode) {
-                PCHAR NextToken = VkpGetNextToken(NULL, &SavePtr);
-                if (NextToken == NULL) {
-                    RtlCopyMemory(LookupContext->ReparseBuffer, Token, TokenLen + 1);
-                    RtlInitAnsiString(&LookupContext->RemainingName, LookupContext->ReparseBuffer);
-
-                    *ResolvedObject = ParentKeyObject; 
-                    return STATUS_SUCCESS; 
-                }
-            }
-
             return STATUS_OBJECT_NAME_NOT_FOUND;
         }
 
@@ -166,15 +263,31 @@ VkpParseKeyObject(
                 {
                     return STATUS_OBJECT_NAME_INVALID;
                 }
-                TargetPath = (PCHAR)(CellPtr + sizeof(LONG)); // Lewati 4-byte CellSize!
+                TargetPath = (PCHAR)(CellPtr + sizeof(LONG));
             }
 
             ULONG TargetLen = (ULONG)RtlRawStringLength(TargetPath);
 
-            // SavePtr sekarang nunjuk ke sisa path SETELAH token ini (belum diproses)
-            // karena VkpGetNextToken sebelumnya udah mutilate PathBuffer & maju-in SavePtr
-            PCHAR Remainder = SavePtr;
-            ULONG RemainderLen = (Remainder && *Remainder) ? (ULONG)RtlRawStringLength(Remainder) : 0;
+            // Karena NextToken memegang token persis setelah token ini, 
+            // kita gabungkan TargetPath dengan NextToken dan sisa SavePtr bila ada.
+            ULONG RemainderLen = 0;
+            CHAR RemainderBuf[256];
+            RtlZeroMemory(RemainderBuf, sizeof(RemainderBuf));
+
+            if (NextToken != NULL)
+            {
+                ULONG NextLen = (ULONG)RtlRawStringLength(NextToken);
+                RtlCopyMemory(RemainderBuf, NextToken, NextLen);
+                RemainderLen = NextLen;
+
+                if (SavePtr && *SavePtr)
+                {
+                    RemainderBuf[RemainderLen++] = '/';
+                    ULONG SaveLen = (ULONG)RtlRawStringLength(SavePtr);
+                    RtlCopyMemory(RemainderBuf + RemainderLen, SavePtr, SaveLen);
+                    RemainderLen += SaveLen;
+                }
+            }
 
             ULONG TotalLen = TargetLen + (RemainderLen > 0 ? 1 + RemainderLen : 0);
             if (TotalLen >= sizeof(LookupContext->ReparseBuffer))
@@ -182,7 +295,6 @@ VkpParseKeyObject(
                 return STATUS_NAME_TOO_LONG;
             }
 
-            // Gabung: "<TargetPath>" + "/" + "<sisa token yang belum diproses>"
             ULONG Pos = 0;
             RtlCopyMemory(LookupContext->ReparseBuffer, TargetPath, TargetLen);
             Pos = TargetLen;
@@ -190,19 +302,18 @@ VkpParseKeyObject(
             if (RemainderLen > 0)
             {
                 LookupContext->ReparseBuffer[Pos++] = '/';
-                RtlCopyMemory(LookupContext->ReparseBuffer + Pos, Remainder, RemainderLen);
+                RtlCopyMemory(LookupContext->ReparseBuffer + Pos, RemainderBuf, RemainderLen);
                 Pos += RemainderLen;
             }
             LookupContext->ReparseBuffer[Pos] = '\0';
 
             RtlInitAnsiString(&LookupContext->RemainingName, LookupContext->ReparseBuffer);
 
-            // Balikin STATUS_REPARSE 
             return STATUS_REPARSE;
         }
 
         CurrentNode = FoundChild;
-        Token = VkpGetNextToken(NULL, &SavePtr);
+        Token = NextToken; // <--- FIX: Cukup assign NextToken, JANGAN panggil VkpGetNextToken lagi!
     }
 
     // Make new node
@@ -231,6 +342,13 @@ VkpParseKeyObject(
     NewKeyObject->HiveBase    = Hive;
     NewKeyObject->KeyNode     = FoundChild;
     NewKeyObject->KeyOffset   = FoundChildOffset;
+
+    Status = VkpInitializeKeyObjectPath(NewKeyObject);
+    if (!VEA_SUCCESS(Status))
+    {
+        ObDereferenceObject(NewKeyObject);
+        return Status;
+    }
 
     RtlZeroMemory(&LookupContext->RemainingName, sizeof(ANSI_STRING));
 
@@ -374,7 +492,7 @@ VkpGetCellPointer(
     }
 
     KdPrintf("[Vk] ERROR | Stable Offset 0x%X not found in any BIN\n", RawOffset);
-    return (PVOID)((PUCHAR)Hive->BaseAddress + RawOffset);
+    return NULL;
 }
 
 //
@@ -489,7 +607,7 @@ VkpAttachVolatileSubkey(
     RtlZeroMemory(NewVolatileNode, NodeSize);
     NewVolatileNode->CellSize           = -(LONG)NodeSize; // Negative = Used
     NewVolatileNode->Signature          = KEY_DIR_SIG;     // 'DN'
-    NewVolatileNode->Flags              = KEY_FILE_VOLATILE;
+    NewVolatileNode->Flags              = KEY_DIR_VOLATILE;
     NewVolatileNode->ParentOffset       = ParentOffset;  
     NewVolatileNode->FirstSubKeyOffset  = 0;
     NewVolatileNode->NextSiblingOffset  = 0;
@@ -641,7 +759,7 @@ VkpAttachVolatileKey(
     NewFileNode->DataPOffset     = DataPOffset;     // Nunjuk ke Inline Data atau Cell Volatile Payload
     NewFileNode->DataLength      = DataSize;
     NewFileNode->Type            = Type;            // REG_SZ, REG_DWORD, REG_BINARY, dll.
-    NewFileNode->Flags           = KEY_FILE_VOLATILE;
+    NewFileNode->Flags = KEY_FILE_VOLATILE | ((DataSize <= sizeof(ULONG)) ? KEY_FILE_INLINE : 0);
     RtlCopyMemory(NewFileNode->Name, ValueName->Buffer, NameLen);
 
     // Link the key
