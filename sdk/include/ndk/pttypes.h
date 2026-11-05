@@ -57,6 +57,7 @@ extern PEPROCESS PtSystemProcess;
 extern KTHREAD PtSystemIdleThread[32];
 extern KRUNQUEUE PtRunQueue[MAX_CPU];
 extern LIST_ENTRY PtDeadThreadListHead;
+extern LIST_ENTRY PtLoadedModuleList;
 
 typedef VOID
 (VEAPI KSTART_ROUTINE)(

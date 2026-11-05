@@ -5,6 +5,7 @@ PETHREAD PtPhase1SystemThread;
 KTHREAD PtSystemIdleThread[MAX_CPU];
 LIST_ENTRY PtProcessList;
 LIST_ENTRY PtDeadThreadListHead;
+LIST_ENTRY PtLoadedModuleList;
 
 POBJECT_TYPE PtEthreadType;
 POBJECT_TYPE PtEprocessType;
@@ -17,9 +18,9 @@ PtpReaperThreadRoutine(
 
 BOOLEAN
 VEAPI
-PtInitSystem(VOID)
+PtpInitSystem0(VOID)
 {
-    HANDLE ObjHandle;
+        HANDLE ObjHandle;
     OBJECT_ATTRIBUTES ObjAttr;
     VEASTATUS Status;
 
@@ -112,6 +113,29 @@ PtInitSystem(VOID)
     }
 
     return TRUE;
+}
 
+BOOLEAN
+VEAPI
+PtpInitSystem1(VOID)
+{
+    /* Todo: Check ReactOS for the implementation later */
     return TRUE;
+}
+
+BOOLEAN
+VEAPI
+PtInitSystem(VOID)
+{
+    switch (UlpInitializationPhase)
+    {
+        case 0:
+            return PtpInitSystem0();
+
+        case 1:
+            return PtpInitSystem1();
+
+        default:
+            KsBugCheck(UNKNOWN_INITIALIZATION_CALL);
+    }
 }
