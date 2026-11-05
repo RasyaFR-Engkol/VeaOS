@@ -1,0 +1,13 @@
+# VeaOS System Call List (SSN Mapping)
+# Format: <Syscall_ID> <Name> <ArgCount> <StubSymbol>
+
+0   CreateFile              11   VeaCreateFile
+1   OpenFile                6   VeaOpenFile
+2   LoadDriver              1   VeaLoadDriver
+3   CreateDirectoryNamespace 3   VeaCreateDirectoryNamespace
+4   Close                   1   VeaClose
+5   DumpKdPrint             1   VeaDumpKdPrint
+6   OpenVeaKey              3   VeaOpenVeaKey
+7   QueryKeyPath            2   VeaQueryKeyPath
+8   QueryValueKey           6   VeaQueryValueKey
+9   SetValueKey             6   VeaSetValueKey
