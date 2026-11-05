@@ -26,17 +26,14 @@ PmObIntHandler(
     PDEVICE_OBJECT DeviceObject = (PDEVICE_OBJECT)Object;
     PPM_DEVICE_EXTENSION DevExt = (PPM_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
 
-    DPRINT("PmObIntHandler\n");
     if (DevExt->DeviceType == PmDeviceTypeDiskFilter)
     {
-        DPRINT("Request for FDO. Skipping\n");
         ObioSkipCurrentOipStackLocation(Oip);
         return ObioGoInterruptObject(DevExt->LowerDeviceObject, Oip);
     }
 
     if (DevExt->DeviceType == PmDeviceTypePartition)
     {
-        DPRINT("Request for PDO.\n");
         return PmPartitionInt(DeviceObject, Oip, OipStack, DevExt);
     }
 
