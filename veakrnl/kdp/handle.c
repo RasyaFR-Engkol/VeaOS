@@ -17,7 +17,7 @@
 
 VOID
 VEAPI
-KdpDumpRegisters(PKREGISTER_FRAME Frame)
+KdpDumpRegisters(PKTRAP_FRAME Frame)
 {
     if (!Frame)
     {
@@ -30,10 +30,10 @@ KdpDumpRegisters(PKREGISTER_FRAME Frame)
     KdPrintf(" EAX: 0x%X  EBX: 0x%X\n", Frame->Eax, Frame->Ebx);
     KdPrintf(" ECX: 0x%X  EDX: 0x%X\n", Frame->Ecx, Frame->Edx);
     KdPrintf(" ESI: 0x%X  EDI: 0x%X\n", Frame->Esi, Frame->Edi);
-    KdPrintf(" EBP: 0x%X  ESP: 0x%X\n", Frame->Ebp, Frame->Esp);
-    KdPrintf(" EIP: 0x%X  EFLAGS: 0x%08X\n", Frame->Eip, Frame->Eflags);
+    KdPrintf(" EBP: 0x%X  ESP: 0x%X\n", Frame->Ebp, Frame->HardwareEsp);
+    KdPrintf(" EIP: 0x%X  EFLAGS: 0x%08X\n", Frame->Eip, Frame->EFlags);
     KdPrintf(" CS : 0x%04X  SS: 0x%04X  DS: 0x%04X  ES: 0x%04X\n", 
-             Frame->Cs, Frame->HardwareSs, Frame->Ds, Frame->Es);
+             Frame->SegCs, Frame->HardwareSegSs, Frame->SegDs, Frame->SegEs);
     KdPrintf("==========================\n\n");
 }
 
@@ -41,7 +41,7 @@ BOOLEAN
 VEAPI
 KdpProcessInput(
     PCHAR String,
-    PKREGISTER_FRAME Frame
+    PKTRAP_FRAME Frame
 )
 {
     /* Continue */

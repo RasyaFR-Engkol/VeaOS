@@ -101,7 +101,7 @@ KdPrintf(const char *Format, ...)
 
 BOOLEAN
 VEAPI
-KdpHandleDebug(PKREGISTER_FRAME RegisterFrame)
+KdpHandleDebug(IN PKTRAP_FRAME Frame, IN ULONG Vector)
 {
     KdPrintf("\n\n");
     KdPrintf("===============================================\n"
@@ -173,7 +173,7 @@ KdpHandleDebug(PKREGISTER_FRAME RegisterFrame)
         if (DebuggerInputIndex > 0)
         {
             BOOLEAN ShouldResume = FALSE;
-            ShouldResume = KdpProcessInput(DebuggerInput, RegisterFrame);
+            ShouldResume = KdpProcessInput(DebuggerInput, Frame);
             KdPrintf("\n");
 
             if (ShouldResume)
