@@ -83,7 +83,7 @@ ObioCheckVpbMounted(
         Vpb = ObioAllocateVpb(OriginalDevice);
         if (!Vpb)
         {
-            *Status = STATUS_INSUFFICIENT_MEMORY;
+            *Status = STATUS_INSUFFICIENT_RESOURCES;
             return NULL;
         }
 
@@ -199,7 +199,7 @@ ObioParseDevice(
         if (!FileObject->FileName.Buffer)
         {
             ObDereferenceObject(FileObject);
-            return STATUS_INSUFFICIENT_MEMORY;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         RtlCopyString(&FileObject->FileName, RemainingName);
@@ -212,13 +212,21 @@ ObioParseDevice(
     {
         if (FileObject->FileName.Buffer) UlFreePoolWithTag(FileObject->FileName.Buffer, 'maNI');
         ObDereferenceObject(FileObject);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     StackLoc = ObioGetNextOipStackLocation(Oip);
     StackLoc->MajorFunction = OIP_MJ_CREATE;
     StackLoc->FileObject = FileObject;
-    StackLoc->Parameters.Create.Options = OpenPacket->CreateOptions;
+
+    //
+    // Pack Disposition into High Byte (Bits 24-31) and CreateOptions into Low 24 Bits (Bits 0-23)
+    // Also pass FileAttributes down to driver!
+    //
+
+    StackLoc->Parameters.Create.Options = ((ULONG)OpenPacket->Disposition << 24) |
+                                          (OpenPacket->CreateOptions & 0x00FFFFFF);
+    StackLoc->Parameters.Create.FileAttributes = OpenPacket->FileAttributes;
     StackLoc->Parameters.Create.ShareAccess = OpenPacket->ShareAccess;
     StackLoc->Parameters.Create.EaBuffer = OpenPacket->EaBuffer;
     StackLoc->Parameters.Create.EaLength = OpenPacket->EaLength;
@@ -248,4 +256,25 @@ ObioParseDevice(
     }
 
     return Status;
+}
+
+VOID
+VEAPI
+ObioReadyDeviceObject(IN PDRIVER_OBJECT DriverObject)
+{
+    PDEVICE_OBJECT DeviceObject;
+
+    DeviceObject = DriverObject->DeviceObject;
+    while (DeviceObject)
+    {
+        DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
+        DeviceObject = DeviceObject->NextDevice;
+    }
+}
+
+VOID
+VEAPI
+ObioDeleteDeviceInternal(IN PVOID ObjectBody)
+{
+    UNIMPLEMENTED_DBGBREAK;
 }

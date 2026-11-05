@@ -234,7 +234,7 @@ ObCreateObject(
     VEASTATUS AllocStatus = ObAllocateObject(ObjectType, ObjectAttributes, ObjectSize, &ObjectBody);
     if(!VEA_SUCCESS(AllocStatus))
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     POBJECT_HEADER Header = OBJECT_TO_OBJECT_HEADER(ObjectBody);
@@ -246,7 +246,7 @@ ObCreateObject(
     if (!Info)
     {
         ObDereferenceObject(ObjectBody);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     if (ObjectAttributes)
@@ -446,7 +446,7 @@ ObInsertObject(
             if (!NameInfo->Name.Buffer)
             {
                 DPRINT("[OB] ObInsertObject FAIL: Failed to allocate NameInfo buffer for '%s'!\n", FinalName);
-                Status = STATUS_INSUFFICIENT_MEMORY;
+                Status = STATUS_INSUFFICIENT_RESOURCES;
                 goto fail;
             }
             if (TargetHeader->Type == ObpDirectoryObjectType)
@@ -669,7 +669,7 @@ VOID
 VEAPI
 VeaClose(IN HANDLE Handle)
 {    
-    /* Call internal API */
-    /* TODO: Get Previous Mode for safety */
-    ObCloseHandle(Handle, KernelMode);
+    KPROCESSOR_MODE ProcessorMode = KeGetPreviousMode();
+
+    ObCloseHandle(Handle, ProcessorMode);
 }

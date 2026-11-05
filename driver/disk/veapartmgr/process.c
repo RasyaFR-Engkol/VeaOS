@@ -39,7 +39,7 @@ PmpScanAndCreatePartitions(IN PPM_DEVICE_EXTENSION DevExt)
 
     Buffer = UlAllocatePoolZero(NonPagedPool, DevExt->BytesPerSector, TAG_OBIO);
     if (!Buffer) {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     /* Read sectors */
@@ -163,7 +163,7 @@ PmHandleArrivalNotification(
         PM_ERROR("WorkItem allocation failed\n");  
         /* FIX 2: Cleanup FilterDevice kalau alokasi WorkItem gagal */
         ObioDeleteDevice(FilterDevice);
-        return STATUS_INSUFFICIENT_MEMORY;  
+        return STATUS_INSUFFICIENT_RESOURCES;  
     }
 
     /* FIX 3: Kirim WorkItem sebagai Context & Pake DelayedWorkQueue */

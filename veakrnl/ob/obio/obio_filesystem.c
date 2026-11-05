@@ -145,7 +145,7 @@ ObioMountVolume(
 
             if (!Oip)
             {
-                Status = STATUS_INSUFFICIENT_MEMORY;
+                Status = STATUS_INSUFFICIENT_RESOURCES;
                 break;
             }
 

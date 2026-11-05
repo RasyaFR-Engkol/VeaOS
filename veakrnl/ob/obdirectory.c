@@ -128,7 +128,7 @@ ObpInsertDirectory(
     }
 
     POBJECT_DIRECTORY_ENTRY Entry = UlAllocatePoolWithTag(NonPagedPool, sizeof(OBJECT_DIRECTORY_ENTRY), 'ObEn');
-    if (!Entry) return STATUS_INSUFFICIENT_MEMORY;
+    if (!Entry) return STATUS_INSUFFICIENT_RESOURCES;
 
     Entry->Object = Object;
     ObReferenceObject(Object);
@@ -421,7 +421,7 @@ ObCreateSymbolicLink(
     );
     if (!SymlinkBody->LinkTarget.Buffer) {
         ObDereferenceObject(SymlinkObject);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     RtlCopyMemory(SymlinkBody->LinkTarget.Buffer, TargetPath, SymlinkBody->LinkTarget.MaximumLength);
@@ -436,7 +436,7 @@ ObCreateSymbolicLink(
         if (!NameInfo->Name.Buffer)
         {
             ObDereferenceObject(SymlinkObject);
-            return STATUS_INSUFFICIENT_MEMORY;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
         RtlCopyMemory(NameInfo->Name.Buffer, LinkName, NameAnsi.Length);
         NameInfo->Name.Buffer[NameAnsi.Length] = '\0';
@@ -444,7 +444,7 @@ ObCreateSymbolicLink(
     else
     {
         ObDereferenceObject(SymlinkObject);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     Status = ObpInsertDirectory(ParentDirectory, SymlinkObject);
@@ -502,7 +502,7 @@ ObCreateSymbolicLinkToObject(
     if (!(Header->Flags & OB_FLAG_HAS_NAME_INFO))
     {
         ObDereferenceObject(LinkObject);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     NameInfo = OBJECT_HEADER_TO_NAME_INFO(Header);
@@ -517,7 +517,7 @@ ObCreateSymbolicLinkToObject(
     if (!NameInfo->Name.Buffer)
     {
         ObDereferenceObject(LinkObject);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     RtlCopyMemory(NameInfo->Name.Buffer, LinkName, Name.Length);
@@ -682,10 +682,21 @@ ObpParseSymbolicLink(
     USHORT RemLen = LookupContext->RemainingName.Length;
     PCHAR RemBuf = LookupContext->RemainingName.Buffer;
 
-    if (RemBuf != NULL) {
-        for (USHORT i = 0; i < RemLen && TempLen < MaxLen; i++) {
-            LookupContext->ReparseBuffer[TempLen++] = RemBuf[i];
+    while (RemLen > 0 && (*RemBuf == '/' || *RemBuf == '\\')) { RemBuf++; RemLen--; }
+    
+
+    if (RemLen > 0)
+    {
+        if (TempLen > 0 &&
+            LookupContext->ReparseBuffer[TempLen - 1] != '/' &&
+            LookupContext->ReparseBuffer[TempLen - 1] != '\\' &&
+            TempLen < MaxLen)
+        {
+            LookupContext->ReparseBuffer[TempLen++] = '/';
         }
+
+        for (USHORT i = 0; i < RemLen && TempLen < MaxLen; i++)
+            LookupContext->ReparseBuffer[TempLen++] = RemBuf[i];
     }
 
     LookupContext->ReparseBuffer[TempLen] = '\0';
@@ -957,6 +968,8 @@ ObpLookupObjectName(
 
                 if (CurrentHeader->Type == ObpSymbolicLinkObjectType)
                 {
+                    POBJECT_HEADER TargetHeader = OBJECT_TO_OBJECT_HEADER(ResolvedObject);
+
                     while (LookupContext->RemainingName.Buffer != NULL &&
                            LookupContext->RemainingName.Length > 0 &&
                            (*LookupContext->RemainingName.Buffer == '/' ||
@@ -1180,3 +1193,5 @@ VeaCreateDirectoryNamespace(
 
     return STATUS_SUCCESS;
 }
+
+/* EOF */

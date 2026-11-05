@@ -39,7 +39,7 @@ PmpAskDiskGeometry(
 
     Oip = ObioAllocateOip(1);
     if (Oip == NULL) {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     KsInitializeEvent(&Event, NotificationEvent, FALSE);
@@ -118,7 +118,7 @@ PmpAskHarddiskNumber(
     );
     if (Oip == NULL)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     Status = ObioGoInterruptObject(Target, Oip);
