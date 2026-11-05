@@ -373,3 +373,52 @@ KsWaitForMultipleObjects(
 
     return (VEASTATUS)CurrentThread->WaitStatus;
 }
+
+VOID
+VEAFAST
+KsiAcquireGuardedMutex(
+    IN OUT PKGUARDED_MUTEX GuardedMutex
+)
+{
+    ULONG BitsToRemove, BitsToAdd;
+    LONG OldValue, NewValue;
+
+    GuardedMutex->Contention++;
+
+    BitsToRemove = GM_LOCK_BIT;
+    BitsToAdd = GM_LOCK_WAITER_INC;
+
+    for (;;)
+    {
+        OldValue = GuardedMutex->Count;
+
+        for (;;)
+        {
+            if (OldValue & GM_LOCK_BIT)
+            {
+                NewValue = OldValue ^ BitsToRemove;
+                NewValue = __InterlockedCompareExchange(&GuardedMutex->Count,
+                                                      NewValue,
+                                                      OldValue);
+                if (NewValue == OldValue) return;
+            }
+            else
+            {
+                NewValue = OldValue + BitsToAdd;
+                NewValue = __InterlockedCompareExchange(&GuardedMutex->Count,
+                                                      NewValue,
+                                                      OldValue);
+                if (NewValue == OldValue) break;
+            }
+
+            OldValue = NewValue;
+        }
+
+        KsWaitForGate(&GuardedMutex->Gate, WrGuardedMutex, KernelMode);
+
+        BitsToRemove = GM_LOCK_BIT | GM_LOCK_WAITER_WOKEN;
+        BitsToAdd = GM_LOCK_WAITER_WOKEN;
+    }
+}
+
+/* EOF */

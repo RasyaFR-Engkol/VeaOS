@@ -32,7 +32,7 @@ KsInitializeEvent(
 {
     ASSERTATION((Type == NotificationEvent) || (Type == SynchronizationEvent));
     Event->Header.Type = EventNotificationObject + Type;
-    Event->Header.Signaling = FALSE;
+    Event->Header.Signalling = FALSE;
     Event->Header.Size = sizeof(KEVENT) / sizeof(ULONG);
     Event->Header.SignalState = State;
     InitializeListHead(&(Event->Header.WaitListHead));

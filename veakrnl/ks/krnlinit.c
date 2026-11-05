@@ -12,6 +12,55 @@ ULONG KsiServiceLimit = NUMBER_OF_SYSCALLS;
 
 VOID
 VEAPI
+KiInitializeLoadedModuleList(VOID)
+{
+    PLIST_ENTRY CurrentEntry;
+    PLIST_ENTRY NextEntry;
+    PLOADED_MODULE_LIST_ENTRY ModuleEntry;
+
+    CurrentEntry = KsLoaderBlock->LoadedModuleListHead.Flink;
+    
+    while (CurrentEntry != &KsLoaderBlock->LoadedModuleListHead && CurrentEntry != NULL)
+    {
+        /* Simpan pointer ke node berikutnya sebelum node sekarang dilepas */
+        NextEntry = CurrentEntry->Flink;
+
+        /* Dapatkan struct LOADED_MODULE_LIST_ENTRY dari pointer Link */
+        ModuleEntry = CONTAINING_RECORD(CurrentEntry, LOADED_MODULE_LIST_ENTRY, Link);
+
+        /* Lepas dari list milik LoaderBlock */
+        RemoveEntryList(CurrentEntry);
+
+        /* Pindahkan & gantungkan ke list resmi kernel (PtLoadedModuleList) */
+        InsertTailList(&PtLoadedModuleList, CurrentEntry);
+
+        /* 3. DPRINT informasi modul */
+        if (ModuleEntry->FilePath.Buffer)
+        {
+            DPRINT("[MM/LDR] Loaded Module : %Z\n", &ModuleEntry->FilePath);
+        }
+        else
+        {
+            DPRINT("[MM/LDR] Loaded Module : [Unknown Path]\n");
+        }
+
+        DPRINT("         Base Address  : 0x%p\n", ModuleEntry->ImageBase);
+        DPRINT("         Image Size    : 0x%X (%u KB)\n", 
+                ModuleEntry->ImageSize, 
+                ModuleEntry->ImageSize / 1024);
+        DPRINT("         Entry Point   : 0x%p\n", ModuleEntry->EntryPoint);
+        DPRINT("         Flags         : 0x%08X\n", ModuleEntry->Flags);
+        DPRINT("--------------------------------------------------\n");
+
+        /* Lanjut ke node selanjutnya */
+        CurrentEntry = NextEntry;
+    }
+
+    DPRINT("[MM/LDR] PtLoadedModuleList successfully initialized!\n\n");
+}
+
+VOID
+VEAPI
 KiInitSystem(VOID)
 {
     PKPRCB CurrentPrcb = KeGetCurrentPrcb();
@@ -24,6 +73,10 @@ KiInitSystem(VOID)
     /* DPC Stack is done allocated by our loader. Init LOCK and linked lsit */
     KsInitializeSpinlock(&CurrentPrcb->DpcLock);
     InitializeListHead(&CurrentPrcb->DpcListHead);
+    InitializeListHead(&PtLoadedModuleList);
+
+    /* Insert every loaded module list */
+    KiInitializeLoadedModuleList();
 
     KsServiceTableDescriptor[0].Base = MainSSDT;
     KsServiceTableDescriptor[0].Count = NULL;
