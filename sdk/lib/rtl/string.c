@@ -987,7 +987,7 @@ RtlStringFromGUID(
     GuidString->MaximumLength = GuidString->Length + sizeof(CHAR);
     GuidString->Buffer = RtlpAllocateStringMemory(GuidString->MaximumLength,
                                                   TAG_USTR);
-    if (!GuidString->Buffer) return STATUS_INSUFFICIENT_MEMORY;
+    if (!GuidString->Buffer) return STATUS_INSUFFICIENT_RESOURCES;
 
     Written = RtlStringCbPrintfA(
         GuidString->Buffer,
@@ -1038,7 +1038,7 @@ RtlUpperChar(
  * @param Flags             Opsi duplikasi (misal: penambahan null-terminated).
  * @param SourceString      Pointer ke ANSI_STRING sumber yang ingin diduplikasi.
  * @param DestinationString Pointer ke ANSI_STRING tujuan yang akan diinisialisasi.
- * @return NTSTATUS         STATUS_SUCCESS jika berhasil, atau kode error jika gagal.
+ * @return VEASTATUS         STATUS_SUCCESS jika berhasil, atau kode error jika gagal.
  */
 VEASTATUS VEAPI RtlDuplicateAnsiString(
     ULONG Flags,
@@ -1071,7 +1071,7 @@ VEASTATUS VEAPI RtlDuplicateAnsiString(
     // Alokasikan memori baru (Ganti fungsi alokasi ini dengan alokator kernel OS kamu, misal ExAllocatePool)
     PSTR newBuffer = (PSTR)RtlpAllocateStringMemory(destMaxLen, TAG_RTL_STRING);
     if (!newBuffer) {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     // Salin isi karakter dari buffer lama ke buffer baru
