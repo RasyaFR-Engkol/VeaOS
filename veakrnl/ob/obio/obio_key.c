@@ -123,7 +123,7 @@ ObioGetValueKey(
     AvailSize = ResultSize;
 
     LocalBuffer = UlAllocatePoolZero(NonPagedPool, ResultSize, TAG_VEAKEY_BUFFER);
-    if (!LocalBuffer) return STATUS_INSUFFICIENT_MEMORY;
+    if (!LocalBuffer) return STATUS_INSUFFICIENT_RESOURCES;
 
     /* Easy to get the buffer now */
     Status = VeaQueryValueKey(

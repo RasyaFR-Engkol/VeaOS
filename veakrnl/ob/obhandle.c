@@ -82,7 +82,7 @@ ObpCreateHandle(
     if (!NewHandle)
     {
         ObDereferenceObject(Object);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     if (IsKernel)

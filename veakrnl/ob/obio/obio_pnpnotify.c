@@ -145,7 +145,7 @@ ObioRegisterPlugPlayNotification(
     {
         DPRINT("ERR: UlAllocatePool failed\n");
         ObDereferenceObject(DriverObject);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     Entry->Callback = CallbackRoutine;

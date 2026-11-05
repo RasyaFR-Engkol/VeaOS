@@ -232,7 +232,7 @@ PS2KeyStartDevice(
     ObjectHeader = OBJECT_TO_OBJECT_HEADER(Fdo);
     RequiredOip = ObioAllocateOip(ObjectHeader->StackDepth);
     if (!RequiredOip) {
-        Status = STATUS_INSUFFICIENT_MEMORY;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto cleanup;
     }
 

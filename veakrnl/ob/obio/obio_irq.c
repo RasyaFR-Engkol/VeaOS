@@ -61,7 +61,7 @@ ObioConnectInterrupt(
         'IrOb');
     if (!Interrupt)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     KsInitializeInterrupt(
@@ -123,7 +123,7 @@ ObioConnectMessageInterrupt(
         'IrOb');
     if (!Interrupt)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     KsInitializeInterrupt(

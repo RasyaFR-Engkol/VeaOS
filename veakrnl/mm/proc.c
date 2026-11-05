@@ -29,7 +29,7 @@ MmInitializeProcessDirectoryBase(
     Process->Pcb.DirectoryTableBase = MmAllocatePhysicalPage();
     if (!Process->Pcb.DirectoryTableBase)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     PULONG_PTR VirtualAddress = (PULONG_PTR)MmMapIoSpace(
@@ -40,7 +40,7 @@ MmInitializeProcessDirectoryBase(
 
     if (!VirtualAddress)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     RtlZeroMemory(VirtualAddress, PAGE_SIZE);

@@ -49,12 +49,54 @@ FatReadDiskSectors(
         &Information
     );
 
-    if (!Oip) return STATUS_INSUFFICIENT_MEMORY;
+    if (!Oip) return STATUS_INSUFFICIENT_RESOURCES;
 
     // 4. Lempar OIP ke target storage driver
     Status = ObioCallObject(TargetDevice, Oip);
 
     // 5. Jika driver disk bekerja secara asynchronous, tunggu sampai event di-signal
+    if (Status == STATUS_PENDING)
+    {
+        KsWaitForSingleObject(&Event);
+        Status = Information.Status;
+    }
+
+    return Status;
+}
+
+VEASTATUS
+FatWriteDiskSectors(
+    IN PDEVICE_OBJECT TargetDevice,
+    IN ULONGLONG Lba,
+    IN ULONG SectorCount,
+    IN ULONG BytesPerSector,
+    IN PVOID Buffer
+)
+{
+    LARGE_INTEGER ByteOffset;
+    POIP Oip;
+    OIP_INFORMATION Information;
+    KEVENT Event;
+    VEASTATUS Status;
+    ULONG WriteLength = SectorCount * BytesPerSector;
+
+    ByteOffset.QuadPart = Lba * BytesPerSector;
+    KsInitializeEvent(&Event, NotificationEvent, FALSE);
+
+    Oip = ObioBuildSynchronusFsdRequest(
+        OIP_MJ_WRITE,
+        TargetDevice,
+        Buffer,
+        WriteLength,
+        &ByteOffset,
+        &Event,
+        &Information
+    );
+
+    if (!Oip) return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ObioCallObject(TargetDevice, Oip);
+
     if (Status == STATUS_PENDING)
     {
         KsWaitForSingleObject(&Event);
@@ -166,7 +208,7 @@ FatMjFsCtl(
         if (!IoctlOip)
         {
             DPRINT("FAT32: Failed to create IOCTL OIP\n");
-            return STATUS_INSUFFICIENT_MEMORY;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         Status = ObioCallObject(TargetDevice, IoctlOip);
@@ -209,6 +251,11 @@ FatMjFsCtl(
                 Oip->StatusInformation.Status = Status;
                 return Status;
             }
+
+            /* Vdo got Stack Depth default 1. This set them to TargetDevice + Stack
+               (outside of ObioAttachObject increasing stack depth method)*/
+            OBJECT_TO_OBJECT_HEADER(Vdo)->StackDepth = 
+                OBJECT_TO_OBJECT_HEADER(TargetDevice)->StackDepth + 1;
 
             PFAT32_DEVICE_EXTENSION Vcb = EXTENSION_FROM_DEVOBJ(Vdo);
             RtlZeroMemory(Vcb, sizeof(FAT32_DEVICE_EXTENSION));

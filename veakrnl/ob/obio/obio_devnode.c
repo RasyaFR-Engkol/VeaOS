@@ -378,7 +378,7 @@ ObioRegisterRootDeviceNode(
 
     DevNode = ObioCreateDeviceNode(Pdo);
     if (!DevNode) {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     /* 1. Sambungkan ke Root Tree */
@@ -401,7 +401,7 @@ ObioRegisterRootDeviceNode(
     if (!FinalPathBuffer) {
         DevNode->State |= DNF_PROBLEM;
         ObioPnpChangeState(DevNode, DeviceNodeUnspecified);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     RtlCopyRawString(FinalPathBuffer, "ROOT/");
@@ -472,7 +472,7 @@ ObioDevNodeStateMachine(IN PDEVICE_NODE DeviceNode)
 
             case DeviceNodeInitialized:
                 DPRINT("%Z State: DeviceNodeInitialized\n", &CurrentNode->InstancePath);
-                Status = ObioCallDriverAddDevice(CurrentNode);
+                Status = ObioCallDriverAddDevice(CurrentNode, ObioPnpSystemInit);
                 if (VEA_SUCCESS(Status))
                 {
                     ObioSetDevNodeState(CurrentNode, DeviceNodeDriversAdded);
@@ -566,7 +566,7 @@ ObioDevNodeStateMachine(IN PDEVICE_NODE DeviceNode)
             case DeviceNodeAwaitingQueuedDeletion:
                 break;
             case DeviceNodeAwaitingQueuedRemoval:
-                DPRINT("DeviceNodeAwaitingQueuedRemoval %wZ\n", &CurrentNode->InstancePath);
+                DPRINT("DeviceNodeAwaitingQueuedRemoval %Z\n", &CurrentNode->InstancePath);
                 break;
             case DeviceNodeQueryRemoved:
                 break;
@@ -681,7 +681,7 @@ ObioCreateDeviceNodeInstancePath
         if (!InstancePath->Buffer)
         {
             DPRINT("ERR: InstancePath->Buffer memory allocate failed\n");
-            return STATUS_INSUFFICIENT_MEMORY;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         RtlCopyString(InstancePath, &DeviceId);
@@ -742,7 +742,6 @@ ObioEnumerateDeviceNode(
             UlFreePoolWithTag(DeviceRelations, TAG_OBIO);
         }
 
-        DPRINT("ERR: Query Device Relations failed: 0x%x\n", DeviceNode->LastStateCompletionStatus);
         ObioSetDevNodeState(DeviceNode, DeviceNodeStarted);
         return DeviceNode->LastStateCompletionStatus;
     }

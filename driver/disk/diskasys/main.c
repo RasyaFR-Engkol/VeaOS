@@ -395,8 +395,6 @@ DskObIntHandler(
     PDEVICE_OBJECT Fdo = (PDEVICE_OBJECT)Object;
     POIP_STACK OipStack = ObioGetCurrentOipStackLocation(Oip);
 
-    DPRINT("DskObIntHandler()\n");
-
     return DskFdoHandler(
         Fdo,
         Oip,
@@ -492,7 +490,7 @@ DskAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Pdo)
     else
     {
         D_ERROR("Failed to allocate memory for DeviceLink\n");
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     D_INFO("Successfully add device diska.ko for %p\n", Pdo);

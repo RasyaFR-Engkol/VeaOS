@@ -781,7 +781,7 @@ VeaSetValueKey(
             if (!NewDataCell)
             {
                 ObDereferenceObject(KeyObject);
-                return STATUS_INSUFFICIENT_MEMORY;
+                return STATUS_INSUFFICIENT_RESOURCES;
             }
 
             if (IsVolatile)
@@ -826,7 +826,7 @@ VeaSetValueKey(
     if (!FileNode || FileNodeOffset == 0 || FileNodeOffset == 0xFFFFFFFF)
     {
         ObDereferenceObject(KeyObject);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     RtlZeroMemory(FileNode, NodeAllocationSize);      // <-- pindah ke sini
@@ -870,7 +870,7 @@ VeaSetValueKey(
         if (!DataCellPtr)
         {
             ObDereferenceObject(KeyObject);
-            return STATUS_INSUFFICIENT_MEMORY;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         *(PLONG)DataCellPtr = -(LONG)CellAllocSize;

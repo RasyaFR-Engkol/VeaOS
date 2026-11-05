@@ -103,7 +103,7 @@ HDAInitCorbRirb(
     DevExt->CorbBuffer = MmAllocateContiguousMemory(1024, (PHYSICAL_ADDRESS){.QuadPart = 0xFFFFFFFF});
     if (!DevExt->CorbBuffer) {
         DPRINT("HDA: Failed to allocate DMA buffer for CORB\n");
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     DPRINT("Setup CORB for HDA done\n");
     RtlZeroMemory(DevExt->CorbBuffer, 1024);
@@ -146,7 +146,7 @@ HDAInitCorbRirb(
     DevExt->RirbBuffer = MmAllocateContiguousMemory(2048, (PHYSICAL_ADDRESS){.QuadPart = 0xFFFFFFFF});
     if (!DevExt->RirbBuffer) {
         DPRINT("HDA: Failed to allocate DMA buffer for RIRB\n");
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     DPRINT("Setup RIRB for HDA done\n");
     RtlZeroMemory(DevExt->RirbBuffer, 2048);
@@ -643,7 +643,7 @@ HDASetupOutputStream(IN PHDA_DEVICE_EXTENSION DevExt)
                                (PHYSICAL_ADDRESS){.QuadPart = 0xFFFFFFFF});
     if (!DevExt->StreamBuffer) {
         DPRINT("HDA: Failed to allocate stream buffer\n");
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlZeroMemory(DevExt->StreamBuffer, HDA_STREAM_BUF_SIZE);
     DevExt->StreamBufferPhysical = MmGetPhysicalAddress(DevExt->StreamBuffer);
@@ -653,7 +653,7 @@ HDASetupOutputStream(IN PHDA_DEVICE_EXTENSION DevExt)
                             (PHYSICAL_ADDRESS){.QuadPart = 0xFFFFFFFF});
     if (!DevExt->BdlBuffer) {
         DPRINT("HDA: Failed to allocate BDL\n");
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlZeroMemory(DevExt->BdlBuffer, HDA_BDL_ENTRIES * sizeof(HDA_BDL_ENTRY));
     DevExt->BdlPhysical = MmGetPhysicalAddress(DevExt->BdlBuffer);

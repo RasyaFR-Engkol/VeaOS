@@ -198,7 +198,7 @@ ObioInitializePnPService(VOID)
     ObioRootDeviceNode = ObioCreateDeviceNode(PnpPdo);
     if(!ObioRootDeviceNode)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     /* Set the state */
@@ -214,7 +214,7 @@ ObioInitializePnPService(VOID)
 
     if(ObioRootDeviceNode->InstancePath.Buffer == NULL)
     {
-        Status = STATUS_INSUFFICIENT_MEMORY;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         return Status;
     }
 

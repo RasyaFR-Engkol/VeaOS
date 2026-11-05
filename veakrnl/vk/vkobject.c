@@ -597,7 +597,7 @@ VkpAttachVolatileSubkey(
     
     if (!NewVolatileNode)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     // Make Volatile Key Offset (Bit 0x80000000 SET)
@@ -723,7 +723,7 @@ VkpAttachVolatileKey(
         PVOID DataCell = VkpAllocateVolatileCell(Hive, CellAllocSize, &RawDataOff);
         if (!DataCell)
         {
-            return STATUS_INSUFFICIENT_MEMORY;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         // Copy out Payload instantly
@@ -745,7 +745,7 @@ VkpAttachVolatileKey(
 
     if (!NewFileNode)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     // Fill out KEY_FN metadata
@@ -891,7 +891,7 @@ VkpAttachStableSubkey(
 
     if (!NewStableNode)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     ParentNode = (PKEY_DIRECTORY_NODE)VkpGetCellPointer(Hive, ParentOffset);
@@ -1008,7 +1008,7 @@ VkpAttachStableValueKey(
         PVOID DataCell = VkpAllocateStableCell(Hive, CellAllocSize, &DataPOffset);
         if (!DataCell)
         {
-            return STATUS_INSUFFICIENT_MEMORY;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         *(PLONG)DataCell = -(LONG)CellAllocSize;
@@ -1028,7 +1028,7 @@ VkpAttachStableValueKey(
 
     if (!NewFileNode)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     // Refresh pointer

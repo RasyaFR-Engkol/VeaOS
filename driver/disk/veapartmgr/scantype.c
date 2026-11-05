@@ -66,6 +66,11 @@ PmpCreatePartitionDevice(
     PartDevExt->PartitionStyle = PartitionEntry->PartitionStyle;
     PartDevExt->DiskGeometry = DiskDevExt->DiskGeometry;
 
+    /* Default Stack Size = 1. GenAHCI PDO got 2 (GenAHCI + DiskaSys), and 
+       this partition got 2 + 1 ((GenAHCI + DiskaSys) + Self)*/
+    OBJECT_TO_OBJECT_HEADER(PartDevice)->StackDepth = 
+        OBJECT_TO_OBJECT_HEADER(DiskDevExt->LowerDeviceObject)->StackDepth + 1;
+
     if (PartitionEntry->PartitionStyle == PmGuidPartitionTable)
     {
         PGUID_PARTITION_TABLE_ENTRY GptEntry = (PGUID_PARTITION_TABLE_ENTRY)PartitionInfo;
@@ -114,7 +119,7 @@ PmpCreateGptPartitionPdo(IN PPM_DEVICE_EXTENSION DevExt)
     ULONG PartitionNum = 1;
 
     Buffer = UlAllocatePoolZero(NonPagedPool, SectorSize, TAG_OBIO);
-    if (!Buffer) return STATUS_INSUFFICIENT_MEMORY;
+    if (!Buffer) return STATUS_INSUFFICIENT_RESOURCES;
 
     Status = PmpReadSectors(DevExt, GPT_HEADER_LBA, 1, Buffer);
     if (!VEA_SUCCESS(Status))
@@ -143,7 +148,7 @@ PmpCreateGptPartitionPdo(IN PPM_DEVICE_EXTENSION DevExt)
     if (!EntriesBuffer)
     {
         PM_ERROR("Failed to allocate memory for GPT partition entries\n");
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     Status = PmpReadSectors(DevExt, Header->PartitionEntryLBA, EntriesSectorCount, EntriesBuffer);

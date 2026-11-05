@@ -51,9 +51,9 @@ HDAStartDevice(
     ResourceOip = ObioAllocateOip(1);
     if (!ResourceOip) {
         DPRINT("HDA: Failed to allocate Resource OIP\n");
-        Oip->StatusInformation.Status = STATUS_INSUFFICIENT_MEMORY;
+        Oip->StatusInformation.Status = STATUS_INSUFFICIENT_RESOURCES;
         Oip->StatusInformation.Information = 0;
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     NextStack = ResourceOip->CurrentStackLocation - 1;
@@ -139,8 +139,8 @@ HDAStartDevice(
     RequiredOip = ObioAllocateOip(ObjectHeader->StackDepth);
     if (!RequiredOip) {
         DPRINT("HDA: Failed to allocate resource requirements OIP\n");
-        Oip->StatusInformation.Status = STATUS_INSUFFICIENT_MEMORY;
-        return STATUS_INSUFFICIENT_MEMORY;
+        Oip->StatusInformation.Status = STATUS_INSUFFICIENT_RESOURCES;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     NextStack = ObioGetNextOipStackLocation(RequiredOip);
