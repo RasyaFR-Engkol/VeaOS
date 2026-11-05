@@ -24,16 +24,33 @@ PmPartitionInt(
     IN PPM_DEVICE_EXTENSION DeviceExtension
 )
 {
-    DPRINT("PmPartitionInt\n");
     switch (OipStack->MajorFunction)
     {
         case OIP_MJ_READ:
         case OIP_MJ_WRITE:
         {
+            LARGE_INTEGER ByteToRead;
+            VEASTATUS Status;
+
+            ByteToRead = OipStack->Parameters.ReadWrite.Offset;
+            // DPRINT("[PM] Incoming Offset: 0x%x HIGH 0x%x\n", ByteToRead.LowPart, ByteToRead.HighPart);
+
+            // 2. TAMBAHKAN STARTING OFFSET PARTISI
             OipStack->Parameters.ReadWrite.Offset.QuadPart += DeviceExtension->StartingOffset;
 
-            ObioSkipCurrentOipStackLocation(Oip);
-            return ObioCallObject(DeviceExtension->LowerDeviceObject, Oip);
+            ByteToRead = OipStack->Parameters.ReadWrite.Offset;
+            // DPRINT("[PM] Translated Offset: 0x%x HIGH 0x%x\n", ByteToRead.LowPart, ByteToRead.HighPart);
+
+            // 4. TERUSKAN KE LOWER DRIVER (AHCI) DENGAN MENGKOPI STACK
+            POIP_STACK NextStack = ObioGetNextOipStackLocation(Oip);
+            if (NextStack)
+            {
+                RtlCopyMemory(NextStack, OipStack, sizeof(OIP_STACK));
+                return ObioGoInterruptObject(DeviceExtension->LowerDeviceObject, Oip);
+            }
+
+            Oip->StatusInformation.Status = STATUS_INVALID_DEVICE_REQUEST;
+            return STATUS_INVALID_DEVICE_REQUEST;
         }
 
         case OIP_MJ_DEVICE_CONTROL:
