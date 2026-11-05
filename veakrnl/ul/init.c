@@ -20,6 +20,12 @@ UlpInitSystemPhase1(VOID)
     /* Initialize Worker */
     UlpInitializeWorkerThreads();
 
+    if (!UlInitializeEventImplementation())
+    {
+        return FALSE;
+    }
+
+    
     return TRUE;
 }
 
@@ -103,148 +109,75 @@ UlParseBootArgument(PSTR BootArgument)
     
 }
 
-VOID
+VEASTATUS
 VEAPI
-TestSectionMaking(VOID)
+UlpCreateSystemRootLink(
+    IN PBLOCK_BOOT_2 LoaderBlock
+)
 {
-    PVOID SectionObject = NULL;
-    HANDLE SectionHandle = NULL;
-    VEASTATUS Status;
-    LARGE_INTEGER SectionSize;
-    OBJECT_ATTRIBUTES ObjAttr;
-    ANSI_STRING SectionName;
+    /* STILL TODO */
 
-    // Variable pendukung untuk MmMapViewOfSection
-    PVOID BaseAddress = NULL;
-    SIZE_T ViewSize = 0; // Diset 0 untuk uji coba Auto-Size Bounds calculation!
+    return STATUS_SUCCESS;
+}
 
-    DPRINT("=== [VeaOS MM Test] Starting Section Full Lifecycle Test ===\n\r");
+static ULONG MockSpinLock = 0;
 
-    _VEA_TRY
-    {
-        SectionSize.QuadPart = 64 * 1024; // 64 KB
+static VOID AcquireMockLock(VOID) {
+    MockSpinLock = 1;
+    DPRINT((" -> [LOCK] Spinlock didapatkan.\n"));
+}
 
-        RtlInitAnsiString(&SectionName, "/Device/MyTestSection");
+static VOID ReleaseMockLock(VOID) {
+    MockSpinLock = 0;
+    DPRINT((" -> [LOCK] Spinlock berhasil dilepas oleh __finally!\n"));
+}
 
-        InitializeObjectAttributes(
-            &ObjAttr,
-            &SectionName,
-            OBJ_CASE_INSENSITIVE,
-            NULL,
-            NULL
-        );
+VOID VeaSehTestExecute(VOID)
+{
+    DPRINT(("[VeaSEH Test] Memulai pengujian SEH Unwind & Exception Handling...\n"));
 
-        // 1. Create Section (PAGE_READWRITE)
-        Status = MmCreateSection(
-            &SectionObject,
-            SECTION_ALL_ACCESS,
-            &ObjAttr,
-            &SectionSize,
-            PAGE_READWRITE,
-            SEC_COMMIT,
-            NULL,
-            NULL
-        );
+    _VEA_TRY {
+        DPRINT(("[Outer TRY] Masuk ke Outer Block.\n"));
 
-        if (VEA_SUCCESS(Status) && SectionObject != NULL)
-        {
-            DPRINT("[PASS] Named Section created at 0x%08X\n\r", (ULONG)SectionObject);
+        _VEA_TRY {
+            DPRINT(("[Inner TRY] Mengambil Spinlock...\n"));
+            AcquireMockLock();
 
-            // 2. Insert Object ke Object Tree
-            Status = ObInsertObject(
-                SectionObject,
-                NULL,
-                SECTION_ALL_ACCESS,
-                0,
-                NULL,
-                &SectionHandle
-            );
+            DPRINT(("[Inner TRY] Memicu Fault: Divide by Zero...\n"));
+            
+            // Trik Inline ASM untuk memicu Hardware Division Error (Vector 0 / STATUS_INTEGER_DIVIDE_BY_ZERO)
+            volatile int Zero = 0;
+            volatile int Result = 42 / Zero;
+            (VOID)Result;
 
-            if (VEA_SUCCESS(Status))
-            {
-                DPRINT("[PASS] Section inserted into Object Tree! Handle: 0x%08X\n\r", (ULONG)SectionHandle);
-            }
-
-            // -----------------------------------------------------------------
-            // 3. MAP SECTION
-            // -----------------------------------------------------------------
-            Status = MmMapViewOfSection(
-                SectionObject,
-                (PEPROCESS)PtGetCurrentProcess(),
-                &BaseAddress,
-                0,
-                0,
-                NULL,          // Offset NULL -> Mulai dari byte 0
-                &ViewSize,     // ViewSize 0 -> Harus otomatis terisi 65536 bytes
-                ViewShare,
-                0,
-                PAGE_READWRITE
-            );
-
-            if (VEA_SUCCESS(Status) && BaseAddress != NULL)
-            {
-                DPRINT("[PASS] MmMapViewOfSection Succeeded!\n\r");
-                DPRINT("       Mapped Base VA : 0x%08X\n\r", (ULONG)BaseAddress);
-                DPRINT("       Auto View Size : %u bytes\n\r", (ULONG)ViewSize);
-
-                // -------------------------------------------------------------
-                // 4. TEST R/W SEBELUM UNMAP (HARUS SUKSES VIA DEMAND PAGING)
-                // -------------------------------------------------------------
-                PULONG TestPtr = (PULONG)BaseAddress;
-                *TestPtr = 0xCAFEBAB3;
-
-                if (*TestPtr == 0xCAFEBAB3)
-                {
-                    DPRINT("[PASS] Memory R/W Verified! Value 0xCAFEBAB3 read at VA 0x%08X\n\r", (ULONG)BaseAddress);
-                }
-
-                // -------------------------------------------------------------
-                // 5. UNMAP SECTION
-                // -------------------------------------------------------------
-                Status = MmUnmapViewOfSection((PEPROCESS)PtGetCurrentProcess(), BaseAddress);
-
-                if (VEA_SUCCESS(Status))
-                {
-                    DPRINT("[PASS] MmUnmapViewOfSection Succeeded!\n\r");
-
-                    // ---------------------------------------------------------
-                    // 6. TEST R/W SETELAH UNMAP (HARUS FAULT & DITANGKAP PSEH)
-                    // ---------------------------------------------------------
-                    DPRINT("[TEST] Accessing unmapped VA 0x%08X (Expecting Fault)...\n\r", (ULONG)BaseAddress);
-
-                    _VEA_TRY
-                    {
-                        // Akses ini harus memicu #PF.
-                        // Karena VAD sudah dihapus dan PTE di-invalidasi, MmAccessFault bakal return FALSE
-                        // dan exception ditangkap oleh _VEA_EXCEPT di bawah!
-                        *TestPtr = 0xDEADBEEF;
-
-                        DPRINT("[FAIL] Access to unmapped memory succeeded unexpectedly! Value: 0x%08X\n\r", *TestPtr);
-                    }
-                    _VEA_EXCEPT(1)
-                    {
-                        DPRINT("[PASS] Page Fault caught by PSEH as expected on unmapped memory 0x%08X!\n\r", (ULONG)BaseAddress);
-                    }
-                    _VEA_END
-                }
-                else
-                {
-                    DPRINT("[FAIL] MmUnmapViewOfSection failed! Status: 0x%08X\n\r", Status);
-                }
-            }
-            else
-            {
-                DPRINT("[FAIL] MmMapViewOfSection failed! Status: 0x%08X\n\r", Status);
-            }
+            DPRINT(("[Inner TRY] KODE INI TIDAK BOLEH DIEKSEKUSI!\n"));
         }
-    }
-    _VEA_EXCEPT(1)
-    {
-        DPRINT("[EXCEPT] Outer Fault caught during test!\n\r");
-    }
-    _VEA_END
+        _VEA_FINALLY {
+            DPRINT("[Inner FINALLY] Unwind Pass 2 berjalan! AbnormalTermination = %d\n", 
+                     AbnormalTermination());
+            
+            // Melepas Lock agar tidak terjadi Deadlock di Kernel
+            ReleaseMockLock();
+        }
+        _VEA_END;
 
-    DPRINT("=== [VeaOS MM Test] Test Completed ===\n\r");
+    }
+    _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER) {
+        DPRINT("[Outer EXCEPT] Exception tertangkap dengan sukses!\n");
+        DPRINT(" -> Exception Code : 0x%08X\n", GetExceptionCode());
+        DPRINT(" -> TrapFrame Ptr  : %p\n", GetExceptionInformation()->TrapFrame);
+    }
+    _VEA_END;
+
+    // Evaluasi integritas kernel pasca-unwind
+    DPRINT("[VeaSEH Test] Status Spinlock Akhir: %s\n", 
+             MockSpinLock == 0 ? "OK (Bebas)" : "TERKUNCI (Memory Leak!)");
+    
+    if (MockSpinLock == 0) {
+        DPRINT(("[VeaSEH Test] SUCCESS: Dual-pass unwinding & register restore bekerja sempurna.\n"));
+    } else {
+        DPRINT(("[VeaSEH Test] FAILED: Unwind melompati __finally!\n"));
+    }
 }
 
 VOID
@@ -259,41 +192,62 @@ UlPhase1(VOID)
 
     KdPrintf("PHASE1\n\r");
 
-    /* Set to Phase 1 */
+    //
+    // Notify Ulp
+    //
     UlpInitializationPhase = 1;
 
-    /* Allocate Pool for processing in Phase1*/
+    //
+    // TODO: Buffer on NT is not actually PUCHAR Buffer. But instead, it is struct BUFFER_INIT
+    //       and we need to change it later.
+    //
     Buffer = (PCHAR)UlAllocatePoolWithTag(NonPagedPool, 0x2000, 'Ex1o');
     if(!Buffer)
     {
-        /* Bugcheck */
         KsBugCheckEx(PHASE1_INITIALIZATION_FAILED, 0x1, (ULONG_PTR)Buffer, 0, 0);
     }
 
-    /* Make sure LoaderBlock is fine */
     if(!KsLoaderBlock)
     {
-        /* Bugcheck again */
         KsBugCheck(PHASE1_INITIALIZATION_FAILED);
     }
     
-    /* Initialize our BvDriver, acquire it then */
     BvInitializeDriver(KsLoaderBlock);
     BvAcquireDisplayState(TRUE);
 
-    /* Parse our argument*/
+    //
+    // CLI Mode is the VeaOS argument to set Text Boot Mode. Actually,
+    // CLI mode will changing the chain of booting on VeaOS. Normally,
+    // Phase 0 => UlPhase1 => SSMS => WinLogon
+    //
+    // It's actually changed to
+    // Phase 0 => UlPhase1 => SSMS => WinTerminal
+    //
+    // Passing argument /WinTerminal for SSMS will actually spawning
+    // WinTerminal instead of WinLogon
+    //
+
     if((RtlCheckBootFlag(BootArg, "/CLIMODE")))
     {
         TextBootMode = TRUE;
     }
 
-    /* MiniVeaMode = VeaInstaller or VEAPE mode */
+    //
+    // This is what they call MiniNT (aka MiniVea here).
+    //
+    // NB: Purpose of MiniVea is only for Graphics Installer now.  
+    //
+
     if((RtlCheckBootFlag(BootArg, "/MINIVEA")))
     {
         MiniVeaMode = TRUE;
     }
 
-    /* Debugging purpose */
+    //
+    // If /DEBUG specified, Kdp will not filter DPRINT and will send DPRINT
+    // always. Not only DPRINT1 printed out but DPRINT too.
+    //
+
     if(RtlCheckBootFlag(BootArg, "/DEBUG"))
     {
         DebugMode = TRUE;
@@ -305,66 +259,203 @@ UlPhase1(VOID)
         }
     }
 
-    /* For another argument boot option (eg. /MAXMEM=VALUE, /BURNMEMORY=VALUE,
-     /REPAIRING, /BAUDRATE=VALUE, /SERIAL=COM1, etc), throw to this function */
+    //
+    // For another argument boot option (eg. /MAXMEM=VALUE, /BURNMEMORY=VALUE,
+    // /REPAIRING, /BAUDRATE=VALUE, /SERIAL=COM1, etc), throw to this function.
+    // The result will be passed to struct called ARGUMENT_CAPABILITY
+    //
+
     UlParseBootArgument(BootArg);
 
     if(!TextBootMode)
     {
-        /* Initialize Logo Bitmap booting */
+        //
+        // This will spawn new Thread for Bv to work on PASSIVE_LEVEL and
+        // rendering Logo + Loading Screen. To terminate it, use BvFinalizeLogo()
+        //
+
         BvDisplayBootLogoFadeIn();
         // BvEnableStringDisplay(FALSE);
     }
     else
     {
-        /* Clean our logo hehe */
+        //
+        // CLI Mode Boot in VeaOS typically not showing Header and Footer of the text.
+        // It will just print out Raw String instead of what Kernel doing
+        //
+        // N.B: Putting /VERBOSELOG together with /CLIMODE may increasing boot time
+        //      as it is printing out to Graphic more often rather than rendering logo
+        //
+        
         // BvEnableStringDisplay(TRUE);
-        // BvShowHeaderFooterTextMode();
     }
 
-    if (!ObInitSystem())
+    //
+    // PoInitSystem will actually initializing Shutdown List (Vea Power System Standard
+    // said that S5 must be available for Po to work perfectly). S5 must be available
+    // on ACPI table.
+    //
+    
+    if (!PoInitSystem(0)) KsBugCheck(INTERNAL_POWER_ERROR);
+
+    /*
+    
+        Block of Y2k Hack Legacy Code
+
+    */
+
+    /*
+    
+        Block for checking processor and start all processor
+    
+    */
+
+    /* 
+    
+        Block for Create the string of MP Message and show it to
+        screen
+    
+    */
+
+    //
+    // Initializing Ob System, Vk System, Ul System, Ks System
+    // Note for VK: Vk only needed at Phase 1 so it is okay to call it
+    // on phase 1
+    //
+
+    if (!ObInitSystem()) KsBugCheckEx(OBJECT0_INITIALIZATION_FAILED, 1, 0, 0, 0);
+
+    if(!VkInitSystem1(KsLoaderBlock)) KsBugCheck(VKEY0_INITIALIZATION_FAILED);
+
+    if (!UlInitSystem()) KsBugCheckEx(PHASE1_INITIALIZATION_FAILED, 1, 0, 0, 0);
+
+    // TODO: Initialize Syscall and Machine Depedent Feature
+    // if (!KsInitSystem()) KsBugCheckEx(PHASE1_INITIALIZATION_FAILED, 1, 0, 0, 0);
+
+    if(!VkInitSystemPhase1()) KsBugCheckEx(VKEY1_INITIALIZATION_FAILED, 1, 0, 0, 0);
+
+    //
+    // In actual ReactOS, UlpCreateSystemRootLink will point to Arc Name (in VeaOS
+    // its BDI). And then SystemRoot relocated to Windows NT boot path 
+    // (such as C:/Windows/) at IO Initialization.
+    //
+
+    Status = UlpCreateSystemRootLink(KsLoaderBlock);
+    if (!VEA_SUCCESS(Status))
     {
-        KsBugCheckEx(OBJECT0_INITIALIZATION_FAILED, 1, 0, 0, 0);
+        KsBugCheck(SYMBOLIC_INITIALIZATION_FAILED);
     }
 
-    if(!VkInitSystem1(KsLoaderBlock))
-    {
-        KsBugCheck(VKEY0_INITIALIZATION_FAILED);
-    }
+    if (!MmInitialize(KsLoaderBlock))  KsBugCheckEx(MEMORY_MANAGEMENT_ERROR, 0x2, 0, 0, 0);
 
-    /* Call UlInitSystem1 */
-    if (!UlInitSystem())
-    {
-        /* Failed */
-        KsBugCheckEx(PHASE1_INITIALIZATION_FAILED, 1, 0, 0, 0);
-    }
+    /* Todo: Initialize Cache (we should create Cache Manager) */
 
-    /* Call MmInitialize */
-    if (!MmInitialize(KsLoaderBlock))
-    {
-        KsBugCheckEx(MEMORY_MANAGEMENT_ERROR, 0x2, 0, 0, 0);
-    }
+    /*
+    
+        Block of code to initialize time if timezone resetted
+    
+    */
 
-    /* Call Vk phase 1*/
-    if(!VkInitSystemPhase1())
-    {
-        /* Bugcheck */
-        KsBugCheckEx(VKEY1_INITIALIZATION_FAILED, 1, 0, 0, 0);
-    }
+    //
+    // TODO:
+    // We haven't create FsRtl because we still work on kernel and kernel
+    // unfrequently work using File Object (it's mainly on UserMode
+    // who always use that). FsRtl should be implemented if you want more 
+    // faster IO (Which is not needed for now)
+    //
 
-    /* Initialize our Io Subsystem*/
-    if(!ObioInitSystem1())
-    {
-        /* Bugcheck */
-        KsBugCheckEx(IO1_INITIALIZATION_FAILED, 1, 0, 0, 0);
-    }
+    //if (!FsRtlInitSystem()) KsBugCheckEx(FILE_INITIALIZATION_FAILED, 1, 0, 0, 0);
 
-    TestSectionMaking();
+    /*
+    
+        Block of code to:
+        1. initialize RtlRangeListPackage()
+        2. HalReportResourceUsage()
+        3. KdDebuggerInitializeDll()
+        4. PpInitSystem phase 1
+        5. Update progress bar to 20
+    
+    */
 
+    // TODO:
+    // if (!KpcInitSystem()) KsBugCheck(KPC_INITIALIZATION_FAILED);
+
+    /*
+    
+        Block of code to:
+        Check command line (No need, we already do it upthere)
+
+    */
+
+    /*
+    
+        Block of code to:
+        init XIP, Update progress bar to 25, set KdpTimeSlipPending,
+        set progress bar subset floor 25 ceiling 75
+    
+    */
+
+    if(!ObioInitSystem1()) KsBugCheckEx(IO1_INITIALIZATION_FAILED, 1, 0, 0, 0);
+
+    /*
+    
+        Block of code to:
+        1. set progress bar ceiling 100 floor 0
+        2. open key to CCS/Control/Safeboot, check for AlternateShell
+           create 'Option' key, and check for AlternateShell. if yes,
+           set value key of UseAlternateShell to TRUE
+        3. if in WinPE mode, open Control key and create MiniNT key
+        4. MmArmInitSystem that won't do anything
+        5. Update progress bar to 80
+        6. 386 VDM Initialize (no needed tho)
+    
+    */
+
+    //
+    // Actual Po implementation in ReactOS is quitely not ready for production use.
+    // So, Im gonna reverse engineering ntoskrnl Windows 11 version to learn
+    // how Po module actually work in newer version of Windows
+    //
+    // Note: PoInitSystem Phase1 actually registering Lid, Battery, and Power Button
+    //       but in Windows XP source code, it's doing more than that
+    //
+
+    if (!PoInitSystem(1)) KsBugCheck(INTERNAL_POWER_ERROR);
+
+    /*
+    
+        Block of code to:
+        Update progress bar to 90
+    
+    */
+
+    if (!PtInitSystem()) KsBugCheck(PROCESSTHREAD_INITIALIZATION_FAILED);
+
+    /* 
+    
+        Block of code to:
+        1. Unmap LoaderBlock and set that to NULL
+        2. SfInitSystem1
+        3. Update progress bar to 100
+        4. and then call FinalizeBootLogo
+        5. Allow Inbv to display string
+        6. call ExpLoadInitialProcess to load initial process and then wait for 5 seconds
+        7. if Session terminated, bugcheck SESSION5_FAILED
+        8. Close that Process Handle
+        9. Free virtual memory of Environment PVOID and Initial process parameter
+        10. Increase UlpInitializtaionPhase to Phase2
+        11. Free InitBuffer
+    
+    */
+
+    //
+    // Dump this so we know something fine in VeaOS Ob Tree and Device Tree
+    //
+    
     ObDumpObjectTree();
     ObioDumpDeviceTree();
 
-    DPRINT("ObioInitSystem1 finished\n");
+    VeaSehTestExecute();
 
     Loop:
     PtIdleLoop();
