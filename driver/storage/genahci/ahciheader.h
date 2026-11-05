@@ -518,4 +518,18 @@ AhciIsBufferAligned(
 #define PCI_COMMAND_REGISTER             0x04
 #define PCI_COMMAND_INTERRUPT_DISABLE    (1 << 10)
 
+ULONG
+VEAPI
+AhciDumpWriteSectorPolling(
+    IN PVOID Data,
+    IN ULONG LBA,
+    IN ULONG Length
+);
+
+VOID
+VEAPI
+AhciDumpFlushCachePolling(VOID);
+
+extern PAHCI_PORT_CONTEXT AhciDumpPortContext;
+
 /* EOF */

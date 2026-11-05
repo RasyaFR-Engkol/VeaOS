@@ -121,8 +121,8 @@ AhciStartDevice(
     if (!DevExt->HbaRegisters)
     {
         DPRINT("AHCI: Failed to map ABAR MMIO space\n");
-        Oip->StatusInformation.Status = STATUS_INSUFFICIENT_MEMORY;
-        return STATUS_INSUFFICIENT_MEMORY;
+        Oip->StatusInformation.Status = STATUS_INSUFFICIENT_RESOURCES;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     /* We need to get Bus Interface Standard here */
@@ -267,7 +267,7 @@ AhciQueryDeviceRelations(
     if (!DeviceRelations)
     {
         KsReleaseSpinLock(&DevExt->ChildPdoListLock, OldIrql);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     DeviceRelations->Count = ChildCount;
@@ -353,9 +353,9 @@ AhciQueryPortId(
     ResultBuffer = (PCHAR)UlAllocatePoolZero(PagedPool, BufferLength, TAG_OBIO);
     if (!ResultBuffer)
     {
-        Oip->StatusInformation.Status = STATUS_INSUFFICIENT_MEMORY;
+        Oip->StatusInformation.Status = STATUS_INSUFFICIENT_RESOURCES;
         Oip->StatusInformation.Information = 0;
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     RtlCopyMemory(ResultBuffer, IdBuffer, BufferLength);
@@ -919,6 +919,33 @@ AhciPdoDeviceControl(
             break;
         }
 
+        /* 
+         * 9. DISK QUERY DUMP ROUTINE IOCTL
+         */
+        case IOCTL_DISK_QUERY_DUMP_ROUTINE:
+        {
+            PIO_DUMP_ROUTINE DumpRoutine;
+
+            if (OutputLength < sizeof(IO_DUMP_ROUTINE) || !Oip->AssociatedOip.SystemBuffer)
+            {
+                Status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+
+            // Simpan Port Context diska ini ke global pointer khusus Dump
+            AhciDumpPortContext = PortCtx;
+
+            DumpRoutine = (PIO_DUMP_ROUTINE)Oip->AssociatedOip.SystemBuffer;
+            DumpRoutine->Write = AhciDumpWriteSectorPolling;
+            DumpRoutine->Flush = AhciDumpFlushCachePolling;
+
+            Information = sizeof(IO_DUMP_ROUTINE);
+            Status = STATUS_SUCCESS;
+            
+            DPRINT("AHCI: Port %u registered as active Crash Dump Target!\n", PortCtx->PortNumber);
+            break;
+        }
+
         default:    
             Status = STATUS_NOT_SUPPORTED;
             break;
@@ -926,6 +953,7 @@ AhciPdoDeviceControl(
 
     Oip->StatusInformation.Status = Status;
     Oip->StatusInformation.Information = Information;
+    ObioCompleteRequest(Oip);
     return Status;
 }
 
@@ -967,8 +995,6 @@ AhciObIntHandler(
 {
     PDEVICE_OBJECT DeviceObject = (PDEVICE_OBJECT)Object;
     POIP_STACK OipStack = ObioGetCurrentOipStackLocation(Oip);
-
-    DPRINT("AhciObIntHandler()\n");
 
     if (!DeviceObject || !DeviceObject->DeviceExtension || !Oip || !OipStack)
     {
