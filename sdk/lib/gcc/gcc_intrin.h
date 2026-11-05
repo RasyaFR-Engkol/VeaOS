@@ -619,4 +619,26 @@ U8 __INTRIN__ __InterlockedBitTestAndReset(volatile I32* Base, I32 Bit)
 
 #endif
 
+I32 __INTRIN__ __InterlockedExchangeAdd(volatile I32* Addend, I32 Value)
+{
+    __asm__ __volatile__(
+        "lock xaddl %0, %1"
+        : "+r"(Value), "+m"(*Addend)
+        :
+        : "memory"
+    );
+    return Value; // Value sekarang berisi nilai LAMA *Addend sebelum ditambah
+}
+
+I16 __INTRIN__ __InterlockedExchangeAdd16(volatile I16* Addend, I16 Value)
+{
+    __asm__ __volatile__(
+        "lock xaddw %0, %1"
+        : "+r"(Value), "+m"(*Addend)
+        :
+        : "memory"
+    );
+    return Value;
+}
+
 /* EOF */
