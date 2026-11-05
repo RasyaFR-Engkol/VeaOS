@@ -110,7 +110,7 @@ NVMeBuildPrp(
     PrpList = (PULONGLONG)MmAllocateContiguousMemory(PAGE_SIZE, HighestPhys);
     if (!PrpList)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlZeroMemory(PrpList, PAGE_SIZE);
 

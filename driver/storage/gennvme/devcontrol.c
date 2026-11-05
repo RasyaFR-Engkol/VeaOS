@@ -46,7 +46,7 @@ NVMeReadBlockSynchronously(
     ReadOip = ObioAllocateOip(1);
     if (ReadOip == NULL)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     ReadOip->UserBuffer = Buffer;
@@ -109,7 +109,7 @@ NVMeQueryDiskStyle(
     );
     if (SectorBuffer == NULL)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     Status = NVMeReadBlockSynchronously(
@@ -400,7 +400,7 @@ NVMeQueryDeviceRelations(
         if (Count > (0xFFFFFFFFUL - sizeof(DEVICE_RELATIONS)) /
                     sizeof(PDEVICE_OBJECT))
         {
-            return STATUS_INSUFFICIENT_MEMORY;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         AllocationSize = sizeof(DEVICE_RELATIONS) +
@@ -412,7 +412,7 @@ NVMeQueryDeviceRelations(
         );
         if (!Relations)
         {
-            return STATUS_INSUFFICIENT_MEMORY;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         KsAcquireSpinLock(&DevExt->ChildLock, &OldIrql);
@@ -501,9 +501,9 @@ NVMeQueryNamespaceId(
     ResultBuffer = (PCHAR)UlAllocatePoolZero(PagedPool, BufferLength, TAG_OBIO);
     if (!ResultBuffer)
     {
-        Oip->StatusInformation.Status = STATUS_INSUFFICIENT_MEMORY;
+        Oip->StatusInformation.Status = STATUS_INSUFFICIENT_RESOURCES;
         Oip->StatusInformation.Information = 0;
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     RtlCopyMemory(ResultBuffer, IdBuffer, BufferLength);
