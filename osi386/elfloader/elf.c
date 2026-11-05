@@ -25,38 +25,38 @@ int validate_elf(void *elf_buffer)
 uint32_t get_elf_entry_point(void *elf_buffer)
 {
     Elf32_Ehdr *ehdr = (Elf32_Ehdr *)elf_buffer;
-    return ehdr->e_entry; // Mengembalikan nilai e_entry (misal: 0xC0100000)
+    return ehdr->e_entry; 
 }
 
 int map_elf_to_cr3(void *elf_buffer, PAGE_ENTRY *pd)
 {
-    (void)pd; // Sementara PD gak perlu di-katak-katik karena udah dicover 4MB Page Table kemarin
+    (void)pd;
     
     Elf32_Ehdr *ehdr = (Elf32_Ehdr *)elf_buffer;
-    
-    // Cari lokasi tabel Program Header di dalam file
     Elf32_Phdr *phdr = (Elf32_Phdr *)((uint8_t *)elf_buffer + ehdr->e_phoff);
 
-    // Looping semua Program Header
+    uint32_t phys_file_base = 0;
     for (int i = 0; i < ehdr->e_phnum; i++) 
     {
-        // Kita HANYA peduli sama segment yang tipenya PT_LOAD (1)
         if (phdr[i].p_type == PT_LOAD) 
         {
-            // Ambil alamat fisik tujuan (LMA). Biasanya di 0x100000 (1MB)
+            phys_file_base = (phdr[i].p_vaddr - 0xC0000000) - phdr[i].p_offset;
+            break;
+        }
+    }
+
+    for (int i = 0; i < ehdr->e_phnum; i++) 
+    {
+        if (phdr[i].p_type == PT_LOAD) 
+        {
             uint8_t *dest_phys = (uint8_t *)(phdr[i].p_vaddr - 0xC0000000);
-            
-            // Ambil alamat data mentah di dalam buffer FAT32
             uint8_t *src_file = (uint8_t *)elf_buffer + phdr[i].p_offset;
 
-            // 1. Salin data segment (.text atau .data) ke RAM fisik
             if (phdr[i].p_filesz > 0) 
             {
                 cmemcpy(dest_phys, src_file, phdr[i].p_filesz);
             }
 
-            // 2. JEBAKAN `.bss`: Kalau ukuran di memori (memsz) lebih gede dari di file (filesz),
-            // sisa memorinya WAJIB di-set ke NOL! Kalau nggak, kernel lu bakal dapet variabel gaib berisi sampah.
             if (phdr[i].p_memsz > phdr[i].p_filesz) 
             {
                 uint32_t bss_size = phdr[i].p_memsz - phdr[i].p_filesz;
@@ -64,5 +64,31 @@ int map_elf_to_cr3(void *elf_buffer, PAGE_ENTRY *pd)
             }
         }
     }
+
+    cmemcpy((void *)phys_file_base, elf_buffer, sizeof(Elf32_Ehdr));
+
+    // 3. Copy Section Header Table ke Offset e_shoff
+    if (ehdr->e_shoff != 0 && ehdr->e_shnum > 0)
+    {
+        cmemcpy((void *)(phys_file_base + ehdr->e_shoff),
+                (uint8_t *)elf_buffer + ehdr->e_shoff,
+                ehdr->e_shentsize * ehdr->e_shnum);
+    }
+
+    Elf32_Shdr *shdr = (Elf32_Shdr *)((uint8_t *)elf_buffer + ehdr->e_shoff);
+    for (int i = 0; i < ehdr->e_shnum; i++)
+    {
+        if (shdr[i].sh_type == SHT_SYMTAB || 
+            shdr[i].sh_type == SHT_STRTAB)
+        {
+            if (shdr[i].sh_offset != 0 && shdr[i].sh_size > 0)
+            {
+                cmemcpy((void *)(phys_file_base + shdr[i].sh_offset),
+                        (uint8_t *)elf_buffer + shdr[i].sh_offset,
+                        shdr[i].sh_size);
+            }
+        }
+    }
+
     return 0;
 }
