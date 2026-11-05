@@ -188,7 +188,7 @@ AcpiPciQueryResources(
     );
     if (!ResourceList)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     for (ULONG BarIndex = 0; BarIndex < BarCount; BarIndex++)
@@ -559,7 +559,7 @@ AcpiPciQueryBusRelations(
         TAG_OBIO
     );
     if (!DeviceRelations) {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     /* Pass 2: Create PDOs */
