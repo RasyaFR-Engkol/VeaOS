@@ -30,8 +30,9 @@ FatpGetNextCluster(
     PUCHAR FatBuffer;
     PULONG FatTable;
 
-    if (!Vcb || !NextCluster || Vcb->BytesPerSector > sizeof(FatBuffer))
+    if (!Vcb || !NextCluster || Vcb->BytesPerSector == 0)
     {
+        DPRINT("VEAFAT: ERROR: No VCB or No Next Cluster or Vcb BytesPerCluster\n");
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -42,7 +43,7 @@ FatpGetNextCluster(
     );
     if (!FatBuffer)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     /* Hitung LBA sektor FAT dan offset byte di dalam sektor tersebut */
@@ -60,6 +61,8 @@ FatpGetNextCluster(
     
     if (!VEA_SUCCESS(Status))
     {
+        /* Fix 2: Pastikan pool di-free jika read sektor gagal */
+        UlFreePoolWithTag(FatBuffer, 'FAT ');
         return Status;
     }
 
@@ -72,6 +75,79 @@ FatpGetNextCluster(
     UlFreePoolWithTag(FatBuffer, 'FAT ');
 
     return STATUS_SUCCESS;
+}
+
+VEASTATUS
+VEAPI
+FatpSetNextCluster(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    IN ULONG CurrentCluster,
+    IN ULONG NextCluster
+)
+{
+    VEASTATUS Status;
+    ULONGLONG FatSectorLba;
+    ULONG FatOffsetInSector;
+    PUCHAR FatBuffer;
+    PULONG FatTable;
+
+    FatBuffer = (PUCHAR)UlAllocatePoolZero(NonPagedPool, Vcb->BytesPerSector, 'FAT ');
+    if (!FatBuffer) return STATUS_INSUFFICIENT_RESOURCES;
+
+    FatSectorLba = Vcb->FatStartLba + ((ULONGLONG)CurrentCluster * 4 / Vcb->BytesPerSector);
+    FatOffsetInSector = (CurrentCluster * 4) % Vcb->BytesPerSector;
+
+    Status = FatReadDiskSectors(Vcb->TargetDeviceObject, FatSectorLba, 1, Vcb->BytesPerSector, FatBuffer);
+    if (!VEA_SUCCESS(Status))
+    {
+        UlFreePoolWithTag(FatBuffer, 'FAT ');
+        return Status;
+    }
+
+    FatTable = (PULONG)FatBuffer;
+    ULONG OldVal = FatTable[FatOffsetInSector / 4];
+    FatTable[FatOffsetInSector / 4] = (OldVal & 0xF0000000) | (NextCluster & 0x0FFFFFFF);
+
+    for (ULONG f = 0; f < Vcb->NumberOfFats; f++)
+    {
+        ULONGLONG TargetFatLba = FatSectorLba + (f * Vcb->FatSizeSectors);
+        Status = FatWriteDiskSectors(Vcb->TargetDeviceObject, TargetFatLba, 1, Vcb->BytesPerSector, FatBuffer);
+        if (!VEA_SUCCESS(Status)) break;
+    }
+
+    UlFreePoolWithTag(FatBuffer, 'FAT ');
+    return Status;
+}
+
+VEASTATUS
+VEAPI
+FatpAllocateCluster(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    OUT PULONG OutCluster
+)
+{
+    VEASTATUS Status;
+    ULONG StartSearch = (Vcb->NextFreeCluster >= 2 && Vcb->NextFreeCluster < Vcb->TotalClusters) ? 
+                         Vcb->NextFreeCluster : 2;
+
+    for (ULONG Cluster = StartSearch; Cluster < Vcb->TotalClusters; Cluster++)
+    {
+        ULONG Value = 0;
+        Status = FatpGetNextCluster(Vcb, Cluster, &Value);
+        if (VEA_SUCCESS(Status) && Value == 0x00000000)
+        {
+            // Set sebagai End of Cluster (0x0FFFFFFF)
+            Status = FatpSetNextCluster(Vcb, Cluster, 0x0FFFFFFF);
+            if (VEA_SUCCESS(Status))
+            {
+                *OutCluster = Cluster;
+                Vcb->NextFreeCluster = Cluster + 1;
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+
+    return STATUS_DISK_FULL;
 }
 
 VEASTATUS
@@ -91,11 +167,23 @@ FatpReadFile(
     ULONG BytesRead = 0;
     ULONG BytesToRead = Length;
     PUCHAR UserBuffer = (PUCHAR)Oip->UserBuffer;
+    if (!UserBuffer)
+    {
+        UserBuffer = (PUCHAR)Oip->AssociatedOip.SystemBuffer;
+    }
+    if (!Fcb || Fcb->FirstCluster < 2 || FAT32_IS_EOF(Fcb->FirstCluster))
+    {
+        Oip->StatusInformation.Status = STATUS_END_OF_FILE;
+        Oip->StatusInformation.Information = 0;
+        ObioCompleteRequest(Oip);
+        return STATUS_END_OF_FILE;
+    }
 
     if (ByteOffset.QuadPart >= Fcb->FileSize)
     {
         Oip->StatusInformation.Status = STATUS_END_OF_FILE;
         Oip->StatusInformation.Information = 0;
+        ObioCompleteRequest(Oip);
         return STATUS_END_OF_FILE;
     }
 
@@ -108,27 +196,28 @@ FatpReadFile(
     ULONG OffsetInFirstCluster = (ULONG)(ByteOffset.QuadPart % Vcb->BytesPerCluster);
 
     CurrentCluster = Fcb->FirstCluster;
-
-    while (ClustersToSkip > 0 && !FAT32_IS_EOF(CurrentCluster) && CurrentCluster != 0)
+    while (ClustersToSkip > 0 && !FAT32_IS_EOF(CurrentCluster) && CurrentCluster >= 2)
     {
         Status = FatpGetNextCluster(Vcb, CurrentCluster, &CurrentCluster);
         if (!VEA_SUCCESS(Status))
         {
             Oip->StatusInformation.Status = Status;
             Oip->StatusInformation.Information = 0;
+            ObioCompleteRequest(Oip);
             return Status;
         }
         ClustersToSkip--;
     }
 
-    if (FAT32_IS_EOF(CurrentCluster) || CurrentCluster == 0)
+    if (FAT32_IS_EOF(CurrentCluster) || CurrentCluster < 2)
     {
         Oip->StatusInformation.Status = STATUS_END_OF_FILE;
         Oip->StatusInformation.Information = 0;
+        ObioCompleteRequest(Oip);
         return STATUS_END_OF_FILE;
     }
 
-    while (BytesRead < BytesToRead && !FAT32_IS_EOF(CurrentCluster) && CurrentCluster != 0)
+    while (BytesRead < BytesToRead && !FAT32_IS_EOF(CurrentCluster) && CurrentCluster >= 2)
     {
         ULONGLONG ClusterLba = FAT32_CLUSTER_TO_LBA(Vcb, CurrentCluster);
         LARGE_INTEGER VolumeByteOffset;
@@ -143,9 +232,31 @@ FatpReadFile(
             ChunkSize = BytesAvailableInCluster;
         }
 
-        /* Make Sub-OIP
-           TODO: Would be cool if we use AssociatedOip 
-        */
+        ULONG SectorSize = Vcb->BytesPerSector ? Vcb->BytesPerSector : 512;
+        ULONG DiskReadLength = ChunkSize;
+        BOOLEAN UseBounceBuffer = FALSE;
+        PUCHAR DiskBuffer = UserBuffer + BytesRead;
+        PUCHAR BounceBuffer = NULL;
+
+        /* Jika pembacaan tidak pas kelipatan sektor (misal 52 byte), gunakan Bounce Buffer */
+        if ((DiskReadLength % SectorSize != 0) || (VolumeByteOffset.QuadPart % SectorSize != 0))
+        {
+            UseBounceBuffer = TRUE;
+            DiskReadLength = ALIGN_UP_BY(ChunkSize + (VolumeByteOffset.QuadPart % SectorSize), SectorSize);
+            
+            /* Align-down offset ke batas sektor terdekat */
+            VolumeByteOffset.QuadPart = ALIGN_DOWN_BY(VolumeByteOffset.QuadPart, SectorSize);
+
+            BounceBuffer = (PUCHAR)UlAllocatePoolWithTag(NonPagedPool, DiskReadLength, 'bVaF');
+            if (!BounceBuffer)
+            {
+                Oip->StatusInformation.Status = STATUS_INSUFFICIENT_RESOURCES;
+                ObioCompleteRequest(Oip);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+            DiskBuffer = BounceBuffer;
+        }
+
         POIP OipLocal;
         KEVENT Event;
         OIP_INFORMATION InformationBlock;
@@ -155,8 +266,8 @@ FatpReadFile(
         OipLocal = ObioBuildSynchronusFsdRequest(
             OIP_MJ_READ,
             Vcb->TargetDeviceObject,
-            UserBuffer + BytesRead,
-            ChunkSize,
+            DiskBuffer,
+            DiskReadLength,
             &VolumeByteOffset,
             &Event,
             &InformationBlock
@@ -164,14 +275,13 @@ FatpReadFile(
 
         if (!OipLocal)
         {
-            Oip->StatusInformation.Status = STATUS_INSUFFICIENT_MEMORY;
-            return STATUS_INSUFFICIENT_MEMORY;
+            if (BounceBuffer) UlFreePool(BounceBuffer);
+            Oip->StatusInformation.Status = STATUS_INSUFFICIENT_RESOURCES;
+            ObioCompleteRequest(Oip);
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
-        Status = ObioCallObject(
-            Vcb->TargetDeviceObject,
-            OipLocal
-        );
+        Status = ObioCallObject(Vcb->TargetDeviceObject, OipLocal);
 
         if (Status == STATUS_PENDING)
         {
@@ -181,7 +291,16 @@ FatpReadFile(
 
         if (!VEA_SUCCESS(Status))
         {
+            if (BounceBuffer) UlFreePool(BounceBuffer);
             break;
+        }
+
+        /* Jika pakai Bounce Buffer, salin hanya ChunkSize byte ke buffer caller asli */
+        if (UseBounceBuffer)
+        {
+            ULONG StartOffsetInBounce = (ULONG)(ByteOffset.QuadPart % SectorSize);
+            RtlCopyMemory(UserBuffer + BytesRead, BounceBuffer + StartOffsetInBounce, ChunkSize);
+            UlFreePool(BounceBuffer);
         }
 
         BytesRead += ChunkSize;
@@ -190,7 +309,7 @@ FatpReadFile(
         if (BytesRead < BytesToRead)
         {
             Status = FatpGetNextCluster(Vcb, CurrentCluster, &CurrentCluster);
-            if (!VEA_SUCCESS(Status))
+            if (!VEA_SUCCESS(Status) || FAT32_IS_EOF(CurrentCluster) || CurrentCluster < 2)
             {
                 break;
             }
@@ -206,7 +325,8 @@ FatpReadFile(
         Ccb->CurrentByteOffset = (ULONG)(ByteOffset.QuadPart + BytesRead);
     }
 
-    return Oip->StatusInformation.Status;
+    ObioCompleteRequest(Oip);
+    return (BytesRead > 0) ? STATUS_SUCCESS : Status;
 }
 
 
@@ -229,6 +349,7 @@ FatMjRead(
     /* If No FileObject, or FsContext */
     if (!FileObject || !FileObject->FsContext)
     {
+        DPRINT("VEAFAT: ERROR: No File Object or FsContext\n");
         Oip->StatusInformation.Status = STATUS_INVALID_PARAMETER;
         return STATUS_INVALID_PARAMETER;
     }
@@ -252,7 +373,7 @@ FatMjRead(
         Oip->StatusInformation.Information = 0;
         return STATUS_END_OF_FILE;
     }
-
+    
     /* Pass this to internal function */
     return FatpReadFile(
         DevExt,

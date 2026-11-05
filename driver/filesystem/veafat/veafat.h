@@ -57,7 +57,7 @@ typedef struct _FAT32_DEVICE_EXTENSION
     ((Cluster) >= 0x0FFFFFF8)
 
 #define MERGE_CLUSTER_HI_N_LO(high, low) \
-    (((unsigned long)(high) << 16) | (unsigned long)(low))
+    (((ULONG)(high) << 16) | ((ULONG)(low) & 0xFFFF))
 
 // Attribute berkas FAT
 #define FAT_ATTR_READ_ONLY      0x01
@@ -151,16 +151,13 @@ typedef struct _VEAFAT_FCB {
     ULONG               FileSize;               // Ukuran file
     UCHAR               Attributes;             // Attribute file (Directory/Archive/dll)
     ANSI_STRING         FileName;               // Nama file yang udah di-resolve
-
-    // Info lokasi Directory Entry file ini di parent folder (buat update FileSize/Time)
     ULONG               ParentDirCluster;       // Cluster folder induknya
     ULONG               DirEntryByteOffset;     // Offset byte lokasi FAT_DIR_ENTRY-nya
-
     LONG                RefCount;               // Berapa handle/referensi yang lagi buka file ini
     LIST_ENTRY          FcbListEntry;           // Linked list node buat Vcb->FcbListHead
     KSPIN_LOCK          FcbLock;                // Lock lokal FCB
-
     BOOLEAN             IsVolumeFcb;
+    SECTION_OBJECT_POINTERS SectionObjectPointers;
 } VEAFAT_FCB, *PVEAFAT_FCB;
 
 typedef struct _VEAFAT_CCB {
@@ -249,6 +246,85 @@ VOID
 FatpExtractLfnChars(
     IN PFAT_LFN_ENTRY LfnEntry,
     OUT PWCHAR TargetSlot
+);
+
+VEASTATUS
+VEAPI
+FatMjRead(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN POIP Oip,
+    IN POIP_STACK Stack
+);
+
+VEASTATUS
+FatWriteDiskSectors(
+    IN PDEVICE_OBJECT TargetDevice,
+    IN ULONGLONG Lba,
+    IN ULONG SectorCount,
+    IN ULONG BytesPerSector,
+    IN PVOID Buffer
+);
+
+ULONG
+FatpGenerateLfnEntries(
+    IN PANSI_STRING InputName,
+    IN UCHAR SfnChecksum,
+    OUT PFAT_LFN_ENTRY LfnEntriesBuffer
+);
+
+BOOLEAN
+FatpNeedsLfn(
+    IN PANSI_STRING InputName
+);
+
+VOID
+FatpGenerateSfn(
+    IN PANSI_STRING InputName,
+    OUT UCHAR Sfn[11]
+);
+
+VEASTATUS
+VEAPI
+FatpAddDirectoryEntry(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    IN ULONG ParentDirCluster,
+    IN PANSI_STRING FileName,
+    IN UCHAR Attributes,
+    IN ULONG FirstCluster,
+    IN ULONG FileSize
+);
+
+VEASTATUS
+VEAPI
+FatpAllocateCluster(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    OUT PULONG OutCluster
+);
+
+VEASTATUS
+VEAPI
+FatpSetNextCluster(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    IN ULONG CurrentCluster,
+    IN ULONG NextCluster
+);
+
+VEASTATUS
+VEAPI
+FatpSetNextCluster(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    IN ULONG CurrentCluster,
+    IN ULONG NextCluster
+);
+
+VEASTATUS
+VEAPI
+FatLocateFcbEx(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    IN PANSI_STRING FileName,
+    OUT PVEAFAT_FCB *OutFcb,
+    OUT PULONG OutParentCluster,
+    OUT PANSI_STRING OutLeafName
 );
 
 /* EOF */
