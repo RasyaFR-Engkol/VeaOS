@@ -33,3 +33,4 @@
 #include "internal/x86.h" // IWYU pragma: export
 #include "internal/hcttype.h" // IWYU pragma: export
 #include "internal/hctfunc.h" // IWYU pragma: export
+#include "internal/x.h" // IWYU pragma: export
