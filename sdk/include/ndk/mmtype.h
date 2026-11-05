@@ -21,6 +21,7 @@ typedef struct _PIP {
     ULONG WsIndex;
 } __attribute__((packed)) PIP, *PPIP;
 
+
 /* PAGE_ENTRY */
 #pragma pack(push, 1)
 typedef union _PAGE_ENTRY {
@@ -42,6 +43,8 @@ typedef union _PAGE_ENTRY {
 } PAGE_ENTRY;
 #pragma pack(pop)
 
+typedef PAGE_ENTRY MMPTE, *PMMPTE;
+
 struct _CONTROL_AREA;
 
 typedef struct _MM_VAD {
@@ -50,6 +53,7 @@ typedef struct _MM_VAD {
     ULONG EndingVpn;
     struct _CONTROL_AREA *ControlArea;
     ULONG Protection;
+    ULONG ViewOffset;
 } MM_VAD, *PMM_VAD;
 
 /* FOR ULPOOL */
@@ -346,16 +350,45 @@ typedef struct _CONTROL_AREA {
     USHORT FlushInProgressCount;
 } CONTROL_AREA, *PCONTROL_AREA;
 
+struct _SECTION_IMAGE_INFORMATION;
+
+typedef struct _SEGMENT_FLAGS
+{
+    ULONG TotalNumberOfPtes4132:10;
+    ULONG ExtraSharedWowSubsections:1;
+    ULONG LargePages:1;
+    ULONG Spare:20;
+} SEGMENT_FLAGS, *PSEGMENT_FLAGS;
+
+typedef struct _MMEXTEND_INFO
+{
+    ULONGLONG CommittedSize;
+    ULONG ReferenceCount;
+} MMEXTEND_INFO, *PMMEXTEND_INFO;
+
 typedef struct _SEGMENT {
     PCONTROL_AREA ControlArea;
     ULONG TotalNumberOfPtes;
     ULONG NonExtendedPtes;
-    ULONG_PTR SizeOfSegment;
-    ULONG_PTR BasedAddress;
-    MMWSLE Wsle;
-    ULONG u1;
-    ULONG u2;
-    PVOID PrototypePte;
+    ULONG Spare0;
+    ULONGLONG SizeOfSegment;
+    MMPTE SegmentPteTemplate;
+    ULONG NumberOfCommitedPages;
+    PMMEXTEND_INFO ExtendInfo;
+    SEGMENT_FLAGS SegmentFlags;
+    PVOID BasedAddress;
+    union
+    {
+        SIZE_T ImageCommitment;
+        struct _EPROCESS *CreatingProcess;
+    } u1;
+    union
+    {
+        struct _SECTION_IMAGE_INFORMATION *ImageInformation;
+        PVOID FirstMappedVa;
+    } u2;
+    PMMPTE PrototypePte;
+    MMPTE ThePtes[1];
 } SEGMENT, *PSEGMENT;
 
 typedef struct _SUBSECTION {
@@ -597,6 +630,11 @@ typedef struct _SECTION_OBJECT_POINTERS {
 extern RTL_AVL_TREE MmSectionBasedTree;
 extern RTL_AVL_TREE MmKernelVadTree;
 
+typedef ULONG PFN_COUNT;
+
+
 #define SEC_BASED 0x00200000
+
+#define MI_USER_PROBE_ADDRESS   (PVOID)0xBFFFFFFF /* Before Kernel Higher Half */
 
 /* EOF */

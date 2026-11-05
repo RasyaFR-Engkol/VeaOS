@@ -76,6 +76,74 @@ MmFaultCopyOnWrite(
     return FALSE; // Access Violation sejati (Write ke Read-Only tanpa flag CoW)
 }
 
+static
+VEASTATUS
+VEAPI
+MmpReadPageFromFile(
+    IN PFILE_OBJECT FileObject,
+    IN ULONGLONG FileOffset,
+    IN PVOID TargetVa,
+    IN ULONG ByteCount
+)
+{
+    PDEVICE_OBJECT  DeviceObject;
+    POIP            Oip;
+    POIP_STACK      Stack;
+    KEVENT          Event;
+    OIP_INFORMATION IoStatus;
+    LARGE_INTEGER   Offset;
+    VEASTATUS       Status;
+
+    if (!FileObject || !FileObject->Vpb || !FileObject->Vpb->DeviceObject)
+        return STATUS_INVALID_DEVICE_REQUEST;
+
+    DeviceObject = FileObject->Vpb->DeviceObject;      /* pakai satu device saja, untuk build dan call */
+
+    KsInitializeEvent(&Event, NotificationEvent, FALSE);
+    RtlZeroMemory(&IoStatus, sizeof(IoStatus));
+    Offset.QuadPart = (LONGLONG)FileOffset;
+
+    Oip = ObioBuildSynchronusFsdRequest(
+              OIP_MJ_READ,
+              DeviceObject,
+              TargetVa,            /* <- buffer tujuan */
+              ByteCount,
+              &Offset,
+              &Event,              /* disinyalkan saat completion */
+              &IoStatus);          /* Status + Information diisi saat completion */
+    if (!Oip)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    /* FileObject dan flag paging dipasang di stack location berikutnya */
+    Stack = ObioGetNextOipStackLocation(Oip);          /* nama sesuai desainmu */
+    Stack->FileObject = FileObject;
+    Oip->Flags |= (OIP_PAGING_IO | OIP_NOCACHE);
+
+    Status = ObioCallObject(DeviceObject, Oip);
+
+    if (Status == STATUS_PENDING)
+    {
+        KsWaitForSingleObject(&Event);
+        Status = IoStatus.Status;
+    }
+
+    /* Jangan sentuh Oip lagi: sudah di-free saat completion */
+
+    if (Status == STATUS_END_OF_FILE)
+    {
+        RtlZeroMemory(TargetVa, ByteCount);            /* page di luar ukuran file */
+        return STATUS_SUCCESS;
+    }
+
+    if (VEA_SUCCESS(Status) && IoStatus.Information < ByteCount)
+    {
+        RtlZeroMemory((PUCHAR)TargetVa + IoStatus.Information,
+                      ByteCount - IoStatus.Information);
+    }
+
+    return Status;
+}
+
 BOOLEAN
 VEAPI
 MmFaultDemandPaging(
@@ -85,6 +153,7 @@ MmFaultDemandPaging(
 {
     KIRQL OldIrql;
     ULONG VpnTarget = FaultingAddress >> 12;
+    ULONG_PTR AlignedFaultVa = PAGE_ALIGN_DOWN(FaultingAddress);
 
     KsAcquireSpinLock(&MmVmmLock, &OldIrql);
     PMM_VAD Vad = MmpFindVadByVpn(MmKernelVadTree.Root, VpnTarget);
@@ -114,15 +183,51 @@ MmFaultDemandPaging(
         return FALSE; // Out of Physical Memory
     }
 
-    // Tulis ke PTE & tandai RW
+    // Tulis ke PTE & tandai RW/Present
     MMI_WRITE_PTE_VALID(pte, PhysPage >> 12);
-    pte->bits.rw = 1;
+    
+    // Set proteksi awal (RW atau Read-Only)
+    if (WriteFault || (Vad->Protection & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+    {
+        pte->bits.rw = 1;
+    }
 
-    // Flush TLB CPU
+    // Flush TLB CPU agar RAM fisik baru bisa langsung diakses lewat Virtual Address
     MMI_INVALIDATE_TLB(FaultingAddress);
 
-    // Zero-out memori fisik baru lewat Virtual Address yang sudah di-commit
-    RtlZeroMemory((PVOID)FaultingAddress, PAGE_SIZE);
+    // CHECK SECTION: ILE-BACKED DEMAND PAGING
+    PCONTROL_AREA ControlArea = Vad->ControlArea;
+    PFILE_OBJECT FileObject = ControlArea ? ControlArea->FilePointer : NULL;
+
+    if (FileObject != NULL)
+    {
+        /* 1. FILE-BACKED DEMAND PAGING */
+        ULONGLONG FileOffset = Vad->ViewOffset + 
+            ((ULONGLONG)(VpnTarget - Vad->StartingVpn) * PAGE_SIZE);
+
+        VEASTATUS ReadStatus = MmpReadPageFromFile(
+            FileObject,
+            FileOffset,
+            (PVOID)AlignedFaultVa,
+            PAGE_SIZE
+        );
+
+        if (!VEA_SUCCESS(ReadStatus))
+        {
+            DPRINT("[#PF ERROR] Failed to read page from disk at offset 0x%x (Status: 0x%X)\n",
+                    (ULONG)FileOffset, ReadStatus);
+
+            /* Rollback PTE jika disk read gagal */
+            MI_WRITE_INVALID_PTE(pte);
+            MMI_INVALIDATE_TLB(FaultingAddress);
+            MmFreePhysicalPage(PhysPage);
+            return FALSE;
+        }
+    }
+    else
+    {
+        RtlZeroMemory((PVOID)AlignedFaultVa, PAGE_SIZE);
+    }
 
     return TRUE;
 }
@@ -135,8 +240,6 @@ MmAccessFault(
     BOOLEAN WasPresent
 )
 {
-    DPRINT("[#PF TRACE] MmAccessFault Called! FaultingAddress: 0x%08X (VPN: 0x%X), Write: %d, Present: %d\n\r", 
-           FaultingAddress, FaultingAddress >> 12, WriteFault, WasPresent);
 
     // Skenario 1: Halaman Present tapi Fault -> Tangani Copy-On-Write
     if (WasPresent)
