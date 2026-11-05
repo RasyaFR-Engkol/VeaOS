@@ -251,6 +251,7 @@ KsDrawBlueScreen(
 
 // simple bugcheck
 
+NORET
 VOID
 VEAPI
 KsBugCheckEx(
@@ -308,6 +309,7 @@ KsBugCheckEx(
     }
 }
 
+NORET
 VOID
 VEAPI
 KsBugCheck(

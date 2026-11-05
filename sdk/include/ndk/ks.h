@@ -16,7 +16,7 @@ typedef struct _DISPATCHER_HEADER
 {
     UCHAR Type;
     UCHAR Abandoned;
-    BOOLEAN Signaling;
+    BOOLEAN Signalling;
     BOOLEAN Inserted;
     UCHAR Size;
     UCHAR Hand;
@@ -26,6 +26,7 @@ typedef struct _DISPATCHER_HEADER
     LIST_ENTRY WaitListHead;
 } DISPATCHER_HEADER, *PDISPATCHER_HEADER;
 
+NORET
 VOID
 VEAPI
 KsBugCheckEx(
@@ -36,6 +37,7 @@ KsBugCheckEx(
     ULONG_PTR BugCheckParameter4
 );
 
+NORET
 VOID
 VEAPI
 KsBugCheck(
@@ -85,6 +87,53 @@ typedef struct _KWAIT_BLOCK
     UCHAR WaitType;
 } KWAIT_BLOCK, *PKWAIT_BLOCK;
 #define THREAD_WAIT_OBJECTS 3
+
+typedef enum _KWAIT_REASON {
+  Executive,
+  FreePage,
+  PageIn,
+  PoolAllocation,
+  DelayExecution,
+  Suspended,
+  UserRequest,
+  WrExecutive,
+  WrFreePage,
+  WrPageIn,
+  WrPoolAllocation,
+  WrDelayExecution,
+  WrSuspended,
+  WrUserRequest,
+  WrEventPair,
+  WrQueue,
+  WrLpcReceive,
+  WrLpcReply,
+  WrVirtualMemory,
+  WrPageOut,
+  WrRendezvous,
+  WrKeyedEvent,
+  WrTerminated,
+  WrProcessInSwap,
+  WrCpuRateControl,
+  WrCalloutStack,
+  WrKernel,
+  WrResource,
+  WrPushLock,
+  WrMutex,
+  WrQuantumEnd,
+  WrDispatchInt,
+  WrPreempted,
+  WrYieldExecution,
+  WrFastMutex,
+  WrGuardedMutex,
+  WrRundown,
+  WrAlertByThreadId,
+  WrDeferredPreempt,
+  WrPhysicalFault,
+  WrIoRing,
+  WrMdlCache,
+  WrRcu,
+  MaximumWaitReason
+} KWAIT_REASON;
 
 typedef struct _KQUEUE KQUEUE, *PKQUEUE;
 
@@ -213,6 +262,7 @@ typedef struct _KTHREAD {
     KPROCESSOR_MODE WaitMode;
     PVOID ServiceTable;
     KPROCESSOR_MODE PreviousMode;
+    UCHAR WaitReason;
 } KTHREAD, *PKTHREAD;
 
 typedef enum _KDPC_IMPORTANCE {
@@ -867,5 +917,105 @@ VEAPI
 RmInitSyscall(VOID);
 
 extern ULONG KsiServiceLimit;
+
+#define KeGetPreviousMode() (((PKTHREAD)PtGetCurrentThread())->PreviousMode)
+
+typedef struct _KGATE
+{
+    DISPATCHER_HEADER Header;
+} KGATE, *PKGATE;
+
+typedef struct _KGUARDED_MUTEX
+{
+    volatile LONG Count;
+    PKTHREAD Owner;
+    ULONG Contention;
+    KGATE Gate;
+    union {
+        struct {
+            SHORT KernelApcDisable;
+            SHORT SpecialApcDisable;
+        };
+        ULONG CombinedApcDisable;
+    };
+} KGUARDED_MUTEX, *PKGUARDED_MUTEX;
+
+typedef struct _FAST_MUTEX {
+  volatile LONG Count;
+  PKTHREAD Owner;
+  ULONG Contention;
+  KEVENT Event;
+  ULONG OldIrql;
+} FAST_MUTEX, *PFAST_MUTEX;
+
+#define GM_LOCK_BIT          0x1
+#define GM_LOCK_BIT_V        0x0
+#define GM_LOCK_WAITER_WOKEN 0x2
+#define GM_LOCK_WAITER_INC   0x4
+
+VOID
+VEAFAST
+KsInitializeGate(IN PKGATE Gate);
+
+VOID
+VEAFAST
+KsSignalGate(IN PKGATE Gate);
+
+VEASTATUS
+VEAFAST
+KsWaitForGate(
+    IN PKGATE Gate,
+    IN KWAIT_REASON WaitReason,
+    IN KPROCESSOR_MODE WaitMode
+);
+
+VOID
+VEAFAST
+KsiAcquireGuardedMutex(
+    IN OUT PKGUARDED_MUTEX GuardedMutex
+);
+
+VOID
+VEAPI
+KsCheckForKernelApcDelivery(VOID);
+
+BOOLEAN
+VEAFAST
+KsTryToAcquireGuardedMutex(IN OUT PKGUARDED_MUTEX GuardedMutex);
+
+VOID
+VEAFAST
+KsReleaseGuardedMutexUnsafe(IN OUT PKGUARDED_MUTEX GuardedMutex);
+
+VOID
+VEAFAST
+KsAcquireGuardedMutexUnsafe(IN OUT PKGUARDED_MUTEX GuardedMutex);
+
+VOID
+VEAFAST
+KsReleaseGuardedMutex(IN OUT PKGUARDED_MUTEX GuardedMutex);
+
+VOID
+VEAFAST
+KsAcquireGuardedMutex(IN PKGUARDED_MUTEX GuardedMutex);
+
+VOID
+VEAFAST
+KsInitializeGuardedMutex(OUT PKGUARDED_MUTEX GuardedMutex);
+
+#pragma pack(push, 1)
+
+typedef struct _DATA_TABLE_ENTRY
+{
+    LIST_ENTRY Link;              // Doubly-linked list pointer (Flink/Blink)
+    ANSI_STRING FilePath;      // Path file, misal: L"\System32\Drivers\ahci.ko"
+    ANSI_STRING RegistryPath;  // Path registry, misal: L"\Services\ahci"
+    PVOID ImageBase;             // Alamat virtual .ko di RAM
+    ULONG ImageSize;             // Ukuran file/memory .ko
+    PVOID EntryPoint;            // Pointer ke EntryMain / DriverEntry
+    ULONG Flags;                 // Status (LDRP_DRIVER_LOADED, dll)
+} DATA_TABLE_ENTRY, *PDATA_TABLE_ENTRY;
+
+#pragma pack(pop)
 
 /* EOF */
