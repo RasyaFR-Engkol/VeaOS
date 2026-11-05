@@ -18,4 +18,8 @@ PopAddRemoveSysCapsCallback(
     IN PVOID Context
 );
 
+BOOLEAN
+VEAPI
+PoInitSystem(IN ULONG BootPhase);
+
 /* EOF */

@@ -164,6 +164,17 @@ typedef struct _BOOT_DRIVER_LIST_ENTRY
     ULONG Flags;                 // Status (LDRP_DRIVER_LOADED, dll)
 } BOOT_DRIVER_LIST_ENTRY, *PBOOT_DRIVER_LIST_ENTRY;
 
+typedef struct _LOADED_MODULE_LIST_ENTRY
+{
+    LIST_ENTRY Link;              // Doubly-linked list pointer (Flink/Blink)
+    ANSI_STRING FilePath;      // Path file, misal: L"\System32\Drivers\ahci.ko"
+    ANSI_STRING RegistryPath;  // Path registry, misal: L"\Services\ahci"
+    PVOID ImageBase;             // Alamat virtual .ko di RAM
+    ULONG ImageSize;             // Ukuran file/memory .ko
+    PVOID EntryPoint;            // Pointer ke EntryMain / DriverEntry
+    ULONG Flags;                 // Status (LDRP_DRIVER_LOADED, dll)
+} LOADED_MODULE_LIST_ENTRY, *PLOADED_MODULE_LIST_ENTRY;
+
 typedef struct _BLOCK_BOOT_2
 {
     ULONG Size;
@@ -188,6 +199,7 @@ typedef struct _BLOCK_BOOT_2
     PVOID KernelBase;
     ULONG KernelSize;
     BOOT_DEVICE_IDENTIFIER BootPartitionSignature;
+    LIST_ENTRY LoadedModuleListHead;
 } BLOCK_BOOT_2, __huge *HPBLOCK_BOOT_2;
 
 // Struktur data RSDP versi ACPI 1.0 (Ukuran pasti 20 byte)
@@ -801,7 +813,20 @@ static inline void pic_disable_all(void) {
     );
 }
 
-
 VOID
 VEAPI
 LdrInitializeGdtTss(IN OUT BLOCK_BOOT_2 *BlockBoot2);
+
+PLOADED_MODULE_LIST_ENTRY
+VEAPI
+LdrInsertToModuleListEntry(
+    IN OUT PBLOCK_BOOT_2 BlockBoot,
+    IN PCSTR FilePath,
+    IN PCSTR RegistryPath OPTIONAL,
+    IN PVOID ImageBase,
+    IN ULONG ImageSize,
+    IN PVOID EntryPoint,
+    IN ULONG Flags
+);
+
+/* EOF */

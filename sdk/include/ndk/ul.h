@@ -211,5 +211,22 @@ UlRaiseStatus(
     IN VEASTATUS Status
 );
 
+BOOLEAN
+VEAPI
+UlInitializeEventImplementation(VOID);
+
+VOID
+VEAPI
+ProbeForRead(
+    IN const PVOID Address,
+    IN SIZE_T Length,
+    IN ULONG Alignment
+);
+
+VOID
+VEAPI
+ProbeForWrite(IN PVOID Address,
+              IN SIZE_T Length,
+              IN ULONG Alignment);
 
 /* EOF */
