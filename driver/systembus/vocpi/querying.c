@@ -203,7 +203,7 @@ VOCPIQueryNodeResourcesRequirement(
     );
 
     if (!ResList) 
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
 
     
     ResList->ListSize = AllocationSize;

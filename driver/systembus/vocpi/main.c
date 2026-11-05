@@ -98,7 +98,7 @@ VOCPIRequestInterface(
     OIP = ObioAllocateOip(StackCount);
     if (!OIP)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     /* Allocate AcpiInterface */
@@ -107,7 +107,7 @@ VOCPIRequestInterface(
         sizeof(VEA_ACPI_INTERFACE),
         'VCPI'
     );
-    if (!AcpiInterface) return STATUS_INSUFFICIENT_MEMORY;
+    if (!AcpiInterface) return STATUS_INSUFFICIENT_RESOURCES;
 
     AcpiInterface->Size = sizeof(VEA_ACPI_INTERFACE);
     AcpiInterface->Version = 10;
@@ -461,7 +461,7 @@ VOCPIHandleMnQueryId(
         if (!ReturnedBuffer)
         {
             Oip->StatusInformation.Information = 0;
-            return STATUS_INSUFFICIENT_MEMORY;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         /* Salin string dari buffer lokal ke buffer heap */
