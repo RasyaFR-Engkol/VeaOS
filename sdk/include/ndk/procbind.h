@@ -383,3 +383,40 @@ typedef union _SLIST_HEADER {
 #define MSR_IA32_SYSENTER_CS  0x174
 #define MSR_IA32_SYSENTER_ESP 0x175
 #define MSR_IA32_SYSENTER_EIP 0x176
+
+typedef struct _VEA_EXPORT_ENTRY {
+    const char *Name;
+    const void *Address;
+} VEA_EXPORT_ENTRY, *PVEA_EXPORT_ENTRY;
+
+extern VEA_EXPORT_ENTRY __veasymboltable_start[];
+extern VEA_EXPORT_ENTRY __veasymboltable_end[];
+
+//
+// Alignment Macros
+//
+#define ALIGN_DOWN_BY(size, align) \
+    ((ULONG_PTR)(size) & ~((ULONG_PTR)(align) - 1))
+
+#define ALIGN_UP_BY(size, align) \
+    (ALIGN_DOWN_BY(((ULONG_PTR)(size) + align - 1), align))
+
+#define ALIGN_DOWN_POINTER_BY(ptr, align) \
+    ((PVOID)ALIGN_DOWN_BY(ptr, align))
+
+#define ALIGN_UP_POINTER_BY(ptr, align) \
+    ((PVOID)ALIGN_UP_BY(ptr, align))
+
+#define ALIGN_DOWN(size, type) \
+    ALIGN_DOWN_BY(size, sizeof(type))
+
+#define ALIGN_UP(size, type) \
+    ALIGN_UP_BY(size, sizeof(type))
+
+#define ALIGN_DOWN_POINTER(ptr, type) \
+    ALIGN_DOWN_POINTER_BY(ptr, sizeof(type))
+
+#define ALIGN_UP_POINTER(ptr, type) \
+    ALIGN_UP_POINTER_BY(ptr, sizeof(type))
+
+#define ALIGN(X) __attribute__((aligned(X)))

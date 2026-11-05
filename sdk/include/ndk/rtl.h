@@ -674,4 +674,26 @@ RtlInitializeGenericTable(IN PRTL_GENERIC_TABLE Table,
 
 BOOLEAN RtlEqualMemory(PVOID Source1, PVOID Source2, SIZE_T Length);
 
+typedef struct _VEA_SECTION_BOUNDS {
+    PVOID  BaseAddress;
+    SIZE_T Size;
+    ULONG  Flags;
+} VEA_SECTION_BOUNDS, *PVEA_SECTION_BOUNDS;
+
+VEASTATUS
+VEAPI
+RtlGetElfSectionBoundsByName(
+    IN PELF32_EHDR Header,
+    IN PCSTR SectionName,
+    OUT PVEA_SECTION_BOUNDS Bounds
+);
+
+BOOLEAN
+VEAPI
+RtlIsAddressWithinSection(
+    IN PVOID Address,
+    IN PVOID SectionStart,
+    IN PVOID SectionEnd
+);
+
 /* EOF */

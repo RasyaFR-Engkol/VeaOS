@@ -74,4 +74,8 @@ typedef struct _UL_WORK_QUEUE_ITEM {
 #define EVENT_MODIFY_STATE (0x0002)
 #define EVENT_ALL_ACCESS (VEA_STANDARD_RIGHTS_REQUIRED | VEA_SYNCHRONIZE | 0x3)
 
+typedef struct _OBJECT_TYPE *POBJECT_TYPE;
+
 extern UCHAR UlpInitializationPhase;
+extern POBJECT_TYPE UlEventObjectType;
+

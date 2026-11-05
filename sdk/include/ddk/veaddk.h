@@ -101,6 +101,8 @@ VEA_EXPORT VOID VEAPI MmUnmapIoSpace( PVOID BaseAddress, ULONG NumberOfBytes );
 VEA_EXPORT VOID VEAPI ObioStopTimer(IN PDEVICE_OBJECT DeviceObject);
 VEA_EXPORT VOID VEAPI ObioStartTimer(IN PDEVICE_OBJECT DeviceObject);
 VEA_EXPORT VEASTATUS VEAPI ObioInitializeIoTimer( IN PDEVICE_OBJECT DeviceObject, IN PIO_TIMER_ROUTINE TimerRoutine, IN PVOID Context );
+VEA_EXPORT VOID RtlZeroMemory( PVOID Destination, SIZE_T Length );
+VEA_EXPORT VOID VEAPI UlFreePool(PVOID P);
 
 #ifdef __cplusplus
 }
