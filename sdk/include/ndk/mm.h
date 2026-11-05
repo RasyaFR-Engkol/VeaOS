@@ -317,4 +317,56 @@ MmUnmapViewOfSection(
     IN PVOID BaseAddress
 );
 
+VEASTATUS
+VEAPI
+VeaCreateSection(OUT PHANDLE SectionHandle,
+                IN ACCESS_MASK DesiredAccess,
+                IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+                IN PLARGE_INTEGER MaximumSize OPTIONAL,
+                IN ULONG SectionPageProtection OPTIONAL,
+                IN ULONG AllocationAttributes,
+                IN HANDLE FileHandle OPTIONAL);
+
+VEASTATUS
+VEAPI
+MmLoadSystemImage(
+    IN PANSI_STRING FileName,
+    IN PANSI_STRING NamePrefix OPTIONAL,
+    IN PANSI_STRING LoadedName OPTIONAL,
+    IN ULONG Flags,
+    OUT PVOID *ModuleObject,
+    OUT PVOID *ImageBaseAddress
+);
+
+#define MI_SECTION_CAN_READ \
+    (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | \
+     PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)
+
+VOID
+MiDumpMemory(
+    IN PVOID BaseAddress,
+    IN ULONG Length
+);
+
+VOID
+VEAPI
+MiCheckControlArea(
+    IN PCONTROL_AREA ControlArea,
+    IN KIRQL OldIrql
+);
+
+VEASTATUS
+VEAPI
+MmCheckSystemImage(IN HANDLE FileHandle);
+
+extern POBJECT_TYPE MmSectionObjectType;
+
+VOID
+VEAPI
+MmProbeAndLockPages(
+    PMDL Mdl,
+    KPROCESSOR_MODE AccessMode,
+    LOCK_OPERATION Operation
+);
+
 /* EOF */
