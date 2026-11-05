@@ -87,6 +87,11 @@
 #define SHT_DYNAMIC     6
 #define SHT_NOBITS      8 // BSS section (uninitialized data)
 #define SHT_REL         9
+#define SHT_DYNSYM      11
+
+#define SHF_WRITE     (1 << 0) // 0x00000001 (Section bisa di-write)
+#define SHF_ALLOC     (1 << 1) // 0x00000002 (Section butuh alokasi RAM)
+#define SHF_EXECINSTR (1 << 2) // 0x00000004 (Section berisi instruksi CPU)
 
 #pragma pack(push, 1)
 
@@ -153,6 +158,13 @@ typedef struct _ELF32_SYM {
 #define R_386_32   1
 #define R_386_PC32 2
 
+#ifndef SHN_UNDEF
+#define SHN_UNDEF 0
+#endif
+#ifndef SHN_ABS
+#define SHN_ABS 0xFFF1
+#endif
+
 typedef ULONG_PTR (VEAPI *PKERNEL_SYMBOL_RESOLVER)(IN PCSTR SymbolName);
 
 BOOLEAN
@@ -217,5 +229,9 @@ RtlApplyElfRelocations(
     IN ULONG_PTR ImageBase,
     IN PKERNEL_SYMBOL_RESOLVER KernelResolver
 );
+
+ULONG
+VEAPI
+RtlElfShFlagsToVeaProtection(ULONG sh_flags);
 
 /* EOF */
