@@ -60,6 +60,12 @@ KsiDispatchException(
         return;
     }
 
+    if (Vector == KS_EXCEPTION_BREAKPOINT)
+    {
+        BOOLEAN Handled = KdpHandleDebug(TrapFrame, Vector);
+        if (Handled) return;
+    }
+
     KsBugCheckEx(KMODE_EXCEPTION_NOT_HANDLED, Vector, TrapFrame->ErrCode, 0, 0);
 }
 
