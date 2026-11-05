@@ -158,5 +158,6 @@
 
 /* Extension IOCTL */
 #include "scsiioctl.h"
+#include "diskioctl.h"
 
 /* EOF */
