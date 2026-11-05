@@ -38,7 +38,7 @@ NVMeCallLowerPnp(
     Oip = ObioAllocateOip(1);
     if (!Oip)
     {
-        Information->Status = STATUS_INSUFFICIENT_MEMORY;
+        Information->Status = STATUS_INSUFFICIENT_RESOURCES;
         return Information->Status;
     }
 
@@ -153,7 +153,7 @@ NVMeIdentifyDevice(IN PNVME_DEVICE_EXTENSION DevExt)
     IdentifyBufferVa = MmAllocateContiguousMemory(4096, HighestPhysAddr);
     if (!IdentifyBufferVa)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlZeroMemory(IdentifyBufferVa, 4096);
     IdentifyBufferPhys = MmGetPhysicalAddress(IdentifyBufferVa);
@@ -232,7 +232,7 @@ NVMeCreateIoQueue(IN PNVME_DEVICE_EXTENSION DevExt)
 
     if (!DevExt->IoQueue.SubmissionVa || !DevExt->IoQueue.CompletionVa)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     RtlZeroMemory(DevExt->IoQueue.SubmissionVa, NVME_IO_QUEUE_DEPTH * NVME_SQ_ENTRY_SIZE);
@@ -367,7 +367,7 @@ NVMeSetupAdminQueue(IN PNVME_DEVICE_EXTENSION DevExt)
     if (!DevExt->AdminQueue.SubmissionVa)
     {
         DPRINT("NVMe: Failed to allocate Admin SQ memory\n");
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlZeroMemory(
         DevExt->AdminQueue.SubmissionVa,
@@ -385,7 +385,7 @@ NVMeSetupAdminQueue(IN PNVME_DEVICE_EXTENSION DevExt)
         DPRINT("NVMe: Failed to allocate Admin CQ memory\n");
         MmFreeContiguousMemory(DevExt->AdminQueue.SubmissionVa);
         DevExt->AdminQueue.SubmissionVa = NULL;
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlZeroMemory(
         DevExt->AdminQueue.CompletionVa,
@@ -496,7 +496,7 @@ NVMeStartDevice(
     if (!DeviceExtension->Registers)
     {
         DPRINT("NVMe: Failed to map regsiters\n");
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     Status = NVMeSetupInterrupt(DeviceExtension);
