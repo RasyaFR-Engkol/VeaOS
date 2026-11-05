@@ -31,6 +31,8 @@
     /* Di Loader (osi386): Gunakan alokator loader jika ada, atau kembalikan NULL */
     #define RtlpAllocateStringMemory(Bytes, Tag) NULL
     #define RtlpFreeStringMemory(Ptr, Tag)       ((void)0)
+    #undef DPRINT
+    #define DPRINT(fmt, ...)
 
 #else
     /* Di Userland (ntdll/veadll): Gunakan Process Heap */
