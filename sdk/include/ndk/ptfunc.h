@@ -122,4 +122,8 @@ VOID
 VEAFAST
 PtpRestoreInterrupts(ULONG_PTR Flags);
 
+VEASTATUS
+VEAPI
+PtLocateSystemSo(VOID);
+
 /* EOF */
