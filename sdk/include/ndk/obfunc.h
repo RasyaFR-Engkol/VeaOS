@@ -548,7 +548,8 @@ ObioAddDeviceByDeviceObject(
 VEASTATUS
 VEAPI
 ObioCallDriverAddDevice(
-    IN PDEVICE_NODE DeviceNode
+    IN PDEVICE_NODE DeviceNode,
+    IN BOOLEAN MustLoadDriver
 );
 
 DEVNODE_STATE
@@ -566,12 +567,6 @@ PDEVICE_OBJECT
 VEAPI
 ObioGetTopDeviceObject(
     IN PDEVICE_OBJECT DeviceObject
-);
-
-PDEVICE_OBJECT
-VEAPI
-IoGetRelatedDeviceObject(
-    IN PFILE_OBJECT FileObject
 );
 
 VEASTATUS
@@ -890,5 +885,56 @@ VeaCreateFile(
 VEASTATUS
 VEAPI
 VeaLoadDriver(IN PANSI_STRING DriverServiceName);
+
+VEASTATUS
+VEAPI
+VeaReadFile(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+    IN PVOID ApcContext OPTIONAL,
+    OUT POIP_INFORMATION IoStatusBlock,
+    OUT PVOID Buffer,
+    IN ULONG Length,
+    IN PLARGE_INTEGER ByteOffset OPTIONAL,
+    IN PULONG Key OPTIONAL);
+
+VOID
+VEAPI
+ObioReadyDeviceObject(IN PDRIVER_OBJECT DriverObject);
+
+VEASTATUS
+VEAPI
+ObioLoadDriver(
+    IN HANDLE ServiceHandle,
+    OUT PDRIVER_OBJECT *DriverObject
+);
+
+VOID
+VEAPI
+ObioDeleteDriver(IN PVOID ObjectBody);
+
+VOID
+VEAPI
+ObioDeleteDeviceInternal(IN PVOID ObjectBody);
+
+VEASTATUS
+VEAPI
+VeaFsControlFile(
+    IN HANDLE DeviceHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE UserApcRoutine OPTIONAL,
+    IN PVOID UserApcContext OPTIONAL,
+    OUT POIP_INFORMATION IoStatusBlock,
+    IN ULONG IoControlCode,
+    IN PVOID InputBuffer,
+    IN ULONG InputBufferLength OPTIONAL,
+    OUT PVOID OutputBuffer,
+    IN ULONG OutputBufferLength OPTIONAL,
+    IN BOOLEAN IsDevIoCtl);
+
+VOID
+VEAPI
+ObioInitializeDumpSystem(VOID);
 
 /* EOF */

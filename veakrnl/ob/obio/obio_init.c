@@ -37,6 +37,7 @@ ObioInitSubsystem(
     TypeInit.PoolTag = 'Driv';
     TypeInit.ObjectSize = sizeof(DRIVER_OBJECT);
     TypeInit.InterruptHandler = ObioDummyInterruptHandler;
+    TypeInit.DeleteRoutine = ObioDeleteDriver;
     TypeInit.AllowAttachByDefault = TRUE;
 
     ObCreateObjectType("Driver", &TypeInit, &ObpDriverObjectType);
@@ -49,6 +50,7 @@ ObioInitSubsystem(
     TypeInit.InterruptHandler = ObioDummyInterruptHandler;
     TypeInit.AllowAttachByDefault = TRUE;
     TypeInit.ParseRoutine = ObioParseDevice;
+    TypeInit.DeleteRoutine = ObioDeleteDeviceInternal;
 
     ObCreateObjectType("Device", &TypeInit, &ObpDeviceObjectType);
 
@@ -60,7 +62,6 @@ ObioInitSubsystem(
     TypeInit.InterruptHandler = ObioDummyInterruptHandler;
     TypeInit.AllowAttachByDefault = FALSE;
     TypeInit.ParseRoutine = ObioParseFile;
-    // TypeInit.CreateRoutine = ObioCreateFile;
     // TypeInit.DeleteRoutine = ObioDeleteFile;
     // TypeInit.QueryNameMethod  = ObioQueryNameFile;
 
@@ -230,7 +231,7 @@ ObioInitGroupOrderLoad(VOID)
     ObioGroupOrderTable = (PANSI_STRING)UlAllocatePoolZero(NonPagedPool, Count * sizeof(ANSI_STRING), 'Obio');
     if (!ObioGroupOrderTable)
     {
-        Status = STATUS_INSUFFICIENT_MEMORY;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
     }
     ObioGroupOrderCount = Count;
@@ -511,11 +512,40 @@ ObioMarkBootPartition(IN PBLOCK_BOOT_2 LoaderBlock)
     return TRUE;
 }
 
+VOID
+VEAPI
+ObioInitializeSystemDrivers(VOID)
+{
+    PANSI_STRING *DriverList, *SavedList;
+
+    SavedList = DriverList = VkGetSystemDriverList();
+
+    while (*DriverList)
+    {
+        PANSI_STRING CurrentDriverPath = *DriverList;
+
+        DPRINT("[OBIO] Loading driver: %Z\n", CurrentDriverPath);
+
+        VeaLoadDriver(*DriverList);
+
+        UlFreePool(*DriverList);
+        DriverList++;
+    }
+
+    UlFreePool(SavedList);
+
+    ObioQueueDeviceAction(
+        ObioRootDeviceNode->PhysicalDeviceObject,
+        PiActionEnumDeviceTree,
+        NULL,
+        NULL
+    );
+}
+
 VEASTATUS
 VEAPI
-ObioReassignSystemRoot(
-    IN PBLOCK_BOOT_2 LoaderBlock,
-    OUT PANSI_STRING AnsiString
+ObioCreateSystemRootLink(
+    IN PBLOCK_BOOT_2 LoaderBlock
 )
 {
     OBJECT_ATTRIBUTES ObjAttr;
@@ -531,7 +561,7 @@ ObioReassignSystemRoot(
     InitializeObjectAttributes(
         &ObjAttr,
         &SystemRootTarget,
-        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+        OBJ_KERNEL_HANDLE,
         NULL,
         NULL
     );
@@ -569,90 +599,88 @@ ObioReassignSystemRoot(
     return Status;
 }
 
-VOID
-VEAPI
-ObioInitializeSystemDrivers(VOID)
-{
-    PANSI_STRING *DriverList, *SavedList;
-
-    SavedList = DriverList = VkGetSystemDriverList();
-
-    while (*DriverList)
-    {
-        PANSI_STRING CurrentDriverPath = *DriverList;
-
-        DPRINT("[OBIO] Loading driver: %Z\n", CurrentDriverPath);
-
-        // TODO: Load Driver and resolve symbol with Mm module and Rtl
-
-                DriverList++;
-    }
-
-    UlFreePool(SavedList);
-
-    ObioQueueDeviceAction(
-        ObioRootDeviceNode->PhysicalDeviceObject,
-        PiActionEnumDeviceTree,
-        NULL,
-        NULL
-    );
-}
-
-//
-// Initialize our System IO
-//
 BOOLEAN
 VEAPI
 ObioInitSystem1(VOID)
+//
+// Routine Description:
+// Initializing IO Subsystem such as Device Storage Stack, File System,
+// and /SystemRoot path
+// 
+// Parameter:
+// VOID
+// 
+// Return BOOLEAN:
+// TRUE if succeed, FALSE if not succeed
+//
 {
     VEASTATUS Status;
     ANSI_STRING VeaBootPath;
     LARGE_INTEGER TimerExpired;
 
     DPRINT("ObioInitSystem1\n");
-    VkDumpTree();
 
-    /* Iniialize List Head */
     InitializeListHead(&ObioFsNetworkListHead);
     InitializeListHead(&ObioFsDiskListHead);
     InitializeListHead(&ObioFsCdRomListHead);
     InitializeListHead(&ObioTimerQueueHead);
     
-    /* Save our BlockBoot */
     ObioBlockBoot = KsLoaderBlock;
 
-    /* Initialize Timer SpinLock, HeadList, and it's DPC and timer */
+    //
+    // Initializing IO Timer which is the mechanism to set timeout
+    // or timer in case the Driver acted up so weird. Initializing Timer Expired
+    // by 1 Second and period of also 1 Second (which is run every tick of sec)
+    //
+
     TimerExpired.QuadPart = -10000000;
     KsInitializeDpc(&ObioTimerDpc, ObioTimerDispatch, NULL);
     KsInitializeTimer(&ObioTimer);
     KsSetTimer(&ObioTimer, TimerExpired, 1000, &ObioTimerDpc);
 
-    /* Initialize Pnp */
+    //
+    // Initializing PnP Service
+    // Initializing PnP will create or open Control and DeviceClasses key in case
+    // the OS haven't make one, also creating HTREE/ROOT/0 (dont have any cases why
+    // HTREE/ROOT/0 is useful. this is TODO)
+    //
+
     Status = ObioInitializePnPService();
     if(!VEA_SUCCESS(Status))
     {
-        /* BugCheck */
         KsBugCheckEx(IO1_INITIALIZATION_FAILED, Status, 0, 0, 0);
     }
 
-    /* It should initialize ACPI_HCT by itself (read ACPI, more) */
+    //
+    // Query what HCT does bring to us (HCT uses ACPI, and it will create it's own
+    // PDO under main HTREE)
+    //
+
     HctInitializePnp();
 
-    /* Inititalize what HCT has added to us */
     ObioQueueDeviceAction(ObioRootDeviceNode->PhysicalDeviceObject,
                           PiActionEnumRootDevices,
                           NULL,
                           NULL);
 
-    /* So we can initialize BootDrivers now (it must SUCCESS) */
+    //
+    // Initializing every Boot Driver now will automatically make the Device Stack
+    // of storage. After this function runned, Storage should be working and we can
+    // Mark Boot Partition and create BDI symlink
+    //
+
     if(!ObioInitializeBootDriver())
     {
         /* Bugcheck then if it's not success */
         KsBugCheckEx(IO1_INITIALIZATION_FAILED, 0x1, 0, 0, 0);
     }
 
-    /* Io no needing this now */
     ObioBlockBoot = NULL;
+
+    //
+    // Creating BDI to share the access of disk to anyone and 
+    // for marking boot partition
+    //
 
     ObioCreateBdiSymlink(KsLoaderBlock);
 
@@ -662,28 +690,45 @@ ObioInitSystem1(VOID)
         return FALSE;
     }
 
-    /* Everything loaded here. we can load System Start Drivers*/
-    
-    ObioInitializeSystemDrivers();
+    //
+    // PnP is fully established. The storage stack is working so set
+    // ObioPnpSystemInit to TRUE will trigger the mechanism of automatically
+    // loading driver from storage if we call ObioQueueDeviceAction 
+    // and there is no problem
+    //
 
     ObioPnpSystemInit = TRUE;
 
-    Status = ObioReassignSystemRoot(KsLoaderBlock, &VeaBootPath);
-    if (!VEA_SUCCESS(Status))
-    {
-        return FALSE;
-    }
+    //
+    // This is different than main ReactOS or WindowsNT idea. We create our
+    // SystemRoot link here, and query BDI object and then we make Symlink
+    // to actually point to D1P1:/VeaOS/. After that, we can Initialize System
+    // Driver to start and load succeed
+    //
 
-    /*
+    Status = ObioCreateSystemRootLink(KsLoaderBlock);
+    if (!VEA_SUCCESS(Status)) return FALSE;
+
+    ObioInitializeSystemDrivers();
+
+    //
+    // Initializing Triage Dump here so BSOD will actually be meaningful
+    // rather than just showing Blue Screen. We need to dump to disk anyway
+    // 
+    
+    ObioInitializeDumpSystem();
+
+    //
+    // Locating VeaOS system SO to help Ps set the entry point for every 
+    // Thread condition and so on. This read will suceed in any way
+    //
     
     Status = PtLocateSystemSo();
-    if (!VEA_SUCCESS)
+    if (!VEA_SUCCESS(Status))
     {
         DPRINT("PtLocateSystemSo failed: 0x%x\n", Status);
         return FALSE;
     }
-
-    */
 
     return TRUE;
 }

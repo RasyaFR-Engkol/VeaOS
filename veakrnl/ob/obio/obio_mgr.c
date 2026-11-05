@@ -213,7 +213,7 @@ ObioCreateDriver(
 
     Attr.RootDirectory = DriverHandle;
     Attr.ObjectName = &NameAnsi;
-    Attr.Attributes = OBJ_CASE_INSENSITIVE;
+    Attr.Attributes = OBJ_CASE_INSENSITIVE | OBJ_PERMANENT;
     Attr.SecurityDescriptor = NULL;
     Attr.SecurityQualityOfServiceLife = NULL;
 
@@ -603,7 +603,7 @@ ObioRegisterDeviceInterface(
     );
     if (!AllocatedSymbolicLinkName)
     {
-        Status = STATUS_INSUFFICIENT_MEMORY;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
     }
     RtlCopyMemory(AllocatedSymbolicLinkName, OutputNameBuffer, OutputLength);
@@ -947,7 +947,7 @@ ObioEnsureMultiSzCapacity(
                                       TAG_RTL_STRING);
     if (!NewBuffer)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     RtlCopyMemory(NewBuffer, *Buffer, *Capacity);
@@ -1009,7 +1009,7 @@ ObioGetDeviceInterfaces(
                                          TAG_RTL_STRING);
     if (!ResultBuffer)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     ResultBuffer[0] = '\0';
     ResultBuffer[1] = '\0';
@@ -1035,7 +1035,7 @@ ObioGetDeviceInterfaces(
         TAG_RTL_STRING);
     if (!ClassPath.Buffer)
     {
-        Status = STATUS_INSUFFICIENT_MEMORY;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
     }
     RtlCopyMemory(ClassPath.Buffer, (PVOID)ClassPathPrefix, PrefixLength);
@@ -1516,7 +1516,7 @@ ObioSetDeviceInterfaceState(
                                              TAG_RTL_STRING);
     if (!ClassPath.Buffer)
     {
-        Status = STATUS_INSUFFICIENT_MEMORY;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
     }
     RtlCopyMemory(ClassPath.Buffer, (PVOID)ClassPathPrefix, PrefixLength);
@@ -1542,7 +1542,7 @@ ObioSetDeviceInterfaceState(
                                                  TAG_RTL_STRING);
     if (!DeviceKeyName.Buffer)
     {
-        Status = STATUS_INSUFFICIENT_MEMORY;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
     }
     RtlCopyMemory(DeviceKeyName.Buffer,
@@ -1603,7 +1603,7 @@ ObioSetDeviceInterfaceState(
                                            TAG_RTL_STRING);
     if (!InstanceBuffer)
     {
-        Status = STATUS_INSUFFICIENT_MEMORY;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
     }
     RtlCopyMemory(InstanceBuffer,
@@ -1636,7 +1636,7 @@ ObioSetDeviceInterfaceState(
                                                     TAG_RTL_STRING);
     if (!ReferenceKeyName.Buffer)
     {
-        Status = STATUS_INSUFFICIENT_MEMORY;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
     }
     ReferenceKeyName.Buffer[0] = '#';
@@ -1663,7 +1663,7 @@ ObioSetDeviceInterfaceState(
                                      TAG_RTL_STRING);
     if (!LinkName)
     {
-        Status = STATUS_INSUFFICIENT_MEMORY;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
     }
     RtlCopyMemory(LinkName, LinkBody, GuidEndOffset);
@@ -2024,7 +2024,7 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
 
             if (Oip == NULL)
             {
-                Status = STATUS_INSUFFICIENT_MEMORY;
+                Status = STATUS_INSUFFICIENT_RESOURCES;
                 DPRINT("BDI: allocating disk-style IOCTL request failed for %p, status=0x%x\n",
                        TopDeviceObject, Status);
                 goto NextDisk;
@@ -2068,7 +2068,7 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
             SectorBuffer = (PCHAR)UlAllocatePoolZero(NonPagedPool, 512, TAG_OBIO);
             if (SectorBuffer == NULL)
             {
-                Status = STATUS_INSUFFICIENT_MEMORY;
+                Status = STATUS_INSUFFICIENT_RESOURCES;
                 DPRINT("BDI: allocating MBR sector buffer failed for disk[%u], status=0x%x\n",
                        DiskIndex - 1, Status);
                 goto NextDisk;
@@ -2089,7 +2089,7 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
             if (ReadOip == NULL)
             {
                 UlFreePoolWithTag(SectorBuffer, TAG_OBIO);
-                Status = STATUS_INSUFFICIENT_MEMORY;
+                Status = STATUS_INSUFFICIENT_RESOURCES;
                 DPRINT("BDI: building MBR read request failed for device %p, status=0x%x\n",
                        TopDeviceObject, Status);
                 goto NextDisk;
@@ -2163,7 +2163,7 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
 
                 if (DiskNumOip == NULL)
                 {
-                    Status = STATUS_INSUFFICIENT_MEMORY;
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
                     DPRINT("BDI: allocating harddisk-number IOCTL request failed "
                            "for device %p, status=0x%x\n",
                            TopDeviceObject, Status);
