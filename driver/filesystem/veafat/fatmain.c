@@ -23,12 +23,15 @@ FatObIntHandler(
 )
 {
     POIP_STACK Stack = ObioGetCurrentOipStackLocation(Oip);
-
+    
     switch (Stack->MajorFunction)
     {
         case OIP_MJ_READ:
-            break;
-
+            return FatMjRead(
+                (PDEVICE_OBJECT)Object,
+                Oip,
+                Stack
+            );
         case OIP_MJ_WRITE:
             break;
 
@@ -46,10 +49,8 @@ FatObIntHandler(
             break;
 
         case OIP_MJ_DEVICE_CONTROL:
-            break;
-
         case OIP_MJ_INTERNAL_DEVICE_CTL:
-            break;
+            goto GoToLowerDevice;
         
         case OIP_MJ_FLUSH_BUFFERS:
             break;
@@ -69,7 +70,11 @@ FatObIntHandler(
         case OIP_MJ_DIRECTORY_CONTROL:
             break;
     }
+GoToLowerDevice:
+    ObioSkipCurrentOipStackLocation(Oip);
+    return ObioCallObject(((PFAT32_DEVICE_EXTENSION)((PDEVICE_OBJECT)Object)->DeviceExtension)->TargetDeviceObject, Oip);
 
+Unimplemented:
     DPRINT("STATUS NOT IMPLEMENTED: 0x%x Minor 0x%x\n", Stack->MajorFunction, Stack->MinorFunction);
     Oip->StatusInformation.Status = STATUS_NOT_IMPLEMENTED;
     return STATUS_NOT_IMPLEMENTED;
