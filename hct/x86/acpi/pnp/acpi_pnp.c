@@ -85,9 +85,9 @@ AcpiPnpProcessMnQueryId(
         {
             PCHAR String = AcpiPciBuildDeviceId(PciExt->VendorId, PciExt->DeviceId);
             if (!String) {
-                OIP->StatusInformation.Status = STATUS_INSUFFICIENT_MEMORY;
+                OIP->StatusInformation.Status = STATUS_INSUFFICIENT_RESOURCES;
                 OIP->StatusInformation.Information = 0;
-                return STATUS_INSUFFICIENT_MEMORY;
+                return STATUS_INSUFFICIENT_RESOURCES;
             }
 
             OIP->StatusInformation.Status = STATUS_SUCCESS;
@@ -103,9 +103,9 @@ AcpiPnpProcessMnQueryId(
                 PciExt->Function
             );
             if (!String) {
-                OIP->StatusInformation.Status = STATUS_INSUFFICIENT_MEMORY;
+                OIP->StatusInformation.Status = STATUS_INSUFFICIENT_RESOURCES;
                 OIP->StatusInformation.Information = 0;
-                return STATUS_INSUFFICIENT_MEMORY;
+                return STATUS_INSUFFICIENT_RESOURCES;
             }
 
             OIP->StatusInformation.Status = STATUS_SUCCESS;
@@ -125,9 +125,9 @@ AcpiPnpProcessMnQueryId(
                 SIZE_T Len = RtlRawStringLength(HwId) + 1;
                 PCHAR String = (PCHAR)UlAllocatePoolZero(NonPagedPool, Len, TAG_OBIO);
                 if (!String) {
-                    OIP->StatusInformation.Status = STATUS_INSUFFICIENT_MEMORY;
+                    OIP->StatusInformation.Status = STATUS_INSUFFICIENT_RESOURCES;
                     OIP->StatusInformation.Information = 0;
-                    return STATUS_INSUFFICIENT_MEMORY;
+                    return STATUS_INSUFFICIENT_RESOURCES;
                 }
 
                 RtlCopyRawString(String, HwId);
@@ -140,9 +140,9 @@ AcpiPnpProcessMnQueryId(
                 // Root PDO kasih aja InstanceID "0"
                 PCHAR String = (PCHAR)UlAllocatePoolZero(NonPagedPool, 2, TAG_OBIO);
                 if (!String) {
-                    OIP->StatusInformation.Status = STATUS_INSUFFICIENT_MEMORY;
+                    OIP->StatusInformation.Status = STATUS_INSUFFICIENT_RESOURCES;
                     OIP->StatusInformation.Information = 0;
-                    return STATUS_INSUFFICIENT_MEMORY;
+                    return STATUS_INSUFFICIENT_RESOURCES;
                 }
 
                 RtlCopyRawString(String, "0");
@@ -249,9 +249,9 @@ AcpiPnpProcessMnQueryDeviceRelations(
                 /* Cleanup bila memori habis */
                 if (PciRelations) UlFreePoolWithTag(PciRelations, TAG_OBIO);
                 
-                OIP->StatusInformation.Status = STATUS_INSUFFICIENT_MEMORY;
+                OIP->StatusInformation.Status = STATUS_INSUFFICIENT_RESOURCES;
                 OIP->StatusInformation.Information = 0;
-                return STATUS_INSUFFICIENT_MEMORY;
+                return STATUS_INSUFFICIENT_RESOURCES;
             }
 
             CombinedRelations->Count = TotalCount;
@@ -354,9 +354,9 @@ AcpiPnpProcessMnQueryResourceRequirements(
     );
     if (!ListEx)
     {
-        OIP->StatusInformation.Status = STATUS_INSUFFICIENT_MEMORY;
+        OIP->StatusInformation.Status = STATUS_INSUFFICIENT_RESOURCES;
         OIP->StatusInformation.Information = 0;
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     ListEx->ListSize = sizeof(OBIO_REQUIRED_RESOURCES_LIST_EX);
