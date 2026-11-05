@@ -30,7 +30,7 @@ VOCPIInitNamespace(VOID)
         'IpcV'
     );
 
-    if (!VOCPIRootNode) return STATUS_INSUFFICIENT_MEMORY;
+    if (!VOCPIRootNode) return STATUS_INSUFFICIENT_RESOURCES;
 
     VOCPIRootNode->Name[0] = '\\';
     VOCPIRootNode->NodeType = VocpiNodeRoot;
@@ -271,7 +271,7 @@ VOCPIQueryDeviceRelations(
         if (!DeviceRelations)
         {
             DPRINT("[VOCPI] ERR: DeviceRelations can't be allocated\n");
-            return STATUS_INSUFFICIENT_MEMORY;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         DeviceRelations->Count = 0;

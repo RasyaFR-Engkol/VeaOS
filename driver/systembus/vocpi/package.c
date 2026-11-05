@@ -302,7 +302,7 @@ VOCPIProcessNameOp(VOID)
             NamePath[Index],
             Index + 1 == NamePathCount ? VocpiNodeName : VocpiNodeScope
         );
-        if (!NameParent) return STATUS_INSUFFICIENT_MEMORY;
+        if (!NameParent) return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     return VOCPIConsumeTermArg(NameParent);
@@ -450,7 +450,7 @@ VOCPIProcessScopeOp(VOID)
         return STATUS_SUCCESS;
     }
 
-    return STATUS_INSUFFICIENT_MEMORY;
+    return STATUS_INSUFFICIENT_RESOURCES;
 }
 
 VEASTATUS
@@ -538,7 +538,7 @@ VOCPIProcessMethodOp(VOID)
             MethodPath[Index],
             Index + 1 == MethodPathCount ? VocpiNodeMethod : VocpiNodeScope
         );
-        if (!MethodNode) return STATUS_INSUFFICIENT_MEMORY;
+        if (!MethodNode) return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     BodyStart = VOCPIPointerAmlByte;
