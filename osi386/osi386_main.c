@@ -49,32 +49,64 @@ void printA(int* i)
 
 BOOLEAN
 VEAPI
-LdrLoadVeakrnl(OUT PUCHAR *BufferToKernel)
+LdrLoadVeakrnl(IN OUT PBLOCK_BOOT_2 BlockBoot, OUT PUCHAR *BufferToKernel)
 {
     VFS_FILE_INFO FileInfo;
     cmemset(&FileInfo, 0, sizeof(FileInfo));
 
     LdrInfo("Loading: /veakrnl.elf\n");
 
-    if(FsLookupFileInformation("/veakrnl.elf", &FileInfo) < 0)
+    if (FsLookupFileInformation("/veakrnl.elf", &FileInfo) < 0)
     {
         LdrError(STATUS_FILE_NOT_FOUND);
     }
     
     PVOID Buffer = LmAllocatePool(LdrUnreclaimablePool, FileInfo.FileSize);
-    if(!Buffer)
+    if (!Buffer)
     {
         LdrError(STATUS_INSUFFICIENT_RESOURCES);
     }
 
     ULONG BytesReaded = 0;
     BytesReaded = FsReadFile(&FileInfo, Buffer);
-    if(BytesReaded == 0)
+    if (BytesReaded == 0)
     {
         LdrError(STATUS_READ_DISK_ERROR);
     }
 
     *BufferToKernel = (PUCHAR)Buffer;
+
+    Elf32_Ehdr *ElfHeader = (Elf32_Ehdr *)Buffer;
+    Elf32_Phdr *ElfPhdr   = (Elf32_Phdr *)((PUCHAR)Buffer + ElfHeader->e_phoff);
+    PVOID EntryPoint      = (PVOID)(ULONG_PTR)ElfHeader->e_entry;
+
+    // Hitung Virtual Address dasar berkas ELF di Higher-Half
+    ULONG_PTR VirtLoadBase = 0;
+    ULONG FileOffset = 0;
+    
+    for (ULONG i = 0; i < ElfHeader->e_phnum; i++)
+    {
+        if (ElfPhdr[i].p_type == PT_LOAD)
+        {
+            VirtLoadBase = ElfPhdr[i].p_vaddr; // Misal 0xC0100000
+            FileOffset   = ElfPhdr[i].p_offset;
+            break;
+        }
+    }
+
+    PVOID KernelVirtBase = (PVOID)(VirtLoadBase - FileOffset);
+
+    /* SEKARANG SUDAH 100% AMAN DI-INSERT DI SINI */
+    LdrInsertToModuleListEntry(
+        BlockBoot,
+        "/veakrnl.elf",     // FilePath
+        NULL,               // RegistryPath (N/A untuk Kernel)
+        KernelVirtBase,     // ImageBase (Metadata Higher-Half Base)
+        FileInfo.FileSize,  // ImageSize
+        EntryPoint,         // EntryPoint (0xC01xxxxx)
+        0x00000001          // Flags (LDRP_SYSTEM_MAPPED)
+    );
+    
     return TRUE;
 }
 
@@ -88,7 +120,7 @@ LdrAdvancedMode(VOID)
 {
     BvRerenderLayout();
     LdrInfo("Now you're in advanced mode. Now go fuck yourself.\n");
-    LdrInfo("Or, Preff F8 again to go back to Selection Menu.\n");
+    LdrInfo("Or, Press F8 again to go back to Selection Menu.\n");
     while(1)
     {
         ULONG KeyCode = GetKeycode();
@@ -323,7 +355,7 @@ void LdrPrepareBlockBootAndBoot(
     // Read the veakrnl ELF File
     //
     PUCHAR BufferToVeaKrnl = NULL;
-    if(!LdrLoadVeakrnl(&BufferToVeaKrnl))
+    if(!LdrLoadVeakrnl(block_boot, &BufferToVeaKrnl))
     {
         LdrError(STATUS_FILE_NOT_FOUND);
     }
