@@ -234,7 +234,7 @@ AhciCallLowerDeviceOip(
     if (!Oip)
     {
         ObDereferenceObject(TargetDeviceObject);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     /* Setup status default */

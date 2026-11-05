@@ -41,7 +41,7 @@ AhciSendIdentifyDevice(
     if (!DmaVirtual)
     {
         AhciFreeCommandSlot(PortCtx, Slot);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     RtlZeroMemory(DmaVirtual, 512);
@@ -87,7 +87,7 @@ AhciExecutePassThroughCommand(
         DmaBufferVirtual = MmAllocateContiguousMemory(AtaPt->DataTransferLength, MaxPhysicalAddress);
         if (!DmaBufferVirtual)
         {
-            return STATUS_INSUFFICIENT_MEMORY;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         if (IsWrite)
@@ -190,6 +190,7 @@ AhciPdoReadWrite(
 
     if (ByteLength == 0 || (ByteLength % PortCtx->SectorSize) != 0)
     {
+        DPRINT("AHCI: ByteLength not aligned or not mentioned: %d\n", ByteLength);
         Oip->StatusInformation.Status = STATUS_INVALID_PARAMETER;
         Oip->StatusInformation.Information = 0;
         return STATUS_INVALID_PARAMETER;
@@ -244,7 +245,7 @@ AhciSendTrimCommand(
         if (!TrimPayload)
         {
             AhciFreeCommandSlot(PortCtx, Slot);
-            return STATUS_INSUFFICIENT_MEMORY;
+            return STATUS_INSUFFICIENT_RESOURCES;
         }
 
         RtlZeroMemory(TrimPayload, 512);
@@ -277,5 +278,130 @@ AhciSendTrimCommand(
 
     return Status;
 }
+
+PAHCI_PORT_CONTEXT AhciDumpPortContext = NULL;
+
+ULONG
+VEAPI
+AhciDumpWriteSectorPolling(
+    IN PVOID Data,
+    IN ULONG LBA,
+    IN ULONG Length
+)
+//
+// Routine Description:
+//     Direct Polling Write for Crash Dump / BSOD context.
+//     N.B. MUST NOT use Interrupts, DPCs, Events, or Memory Allocation!
+//
+{
+    PAHCI_PORT_CONTEXT PortCtx = AhciDumpPortContext;
+    PAHCI_PORT_REGISTERS PortRegs;
+    PAHCI_COMMAND_HEADER CmdHeader;
+    PAHCI_COMMAND_TABLE CmdTable;
+    PFIS_REG_H2D Fis;
+    ULONG Slot = 0; 
+    ULONG SectorCount;
+    ULONG Timeout;
+
+    if (!PortCtx || !Data || Length == 0) return 0;
+
+    PortRegs = PortCtx->Registers;
+    SectorCount = (Length + PortCtx->SectorSize - 1) / PortCtx->SectorSize;
+
+    if (Length > (64 * 1024) || !PortCtx->BounceBufferVirtual)
+    {
+        return 0; // Return 0 = Gagal
+    }
+
+    RtlCopyMemory(PortCtx->BounceBufferVirtual, Data, Length);
+
+    PortRegs->Is   = PortRegs->Is;
+    PortRegs->Serr = PortRegs->Serr;
+
+    AhciPrepareH2dCommand(PortCtx, Slot, TRUE, 1, &CmdHeader, &CmdTable, &Fis);
+    AhciSetupSinglePrdt(CmdTable, 0, PortCtx->BounceBufferPhysical, Length, FALSE);
+
+    Fis->Command         = ATA_CMD_WRITE_DMA_EX;
+    Fis->LbaLow          = (UCHAR)(LBA & 0xFF);
+    Fis->LbaMid          = (UCHAR)((LBA >> 8) & 0xFF);
+    Fis->LbaHigh         = (UCHAR)((LBA >> 16) & 0xFF);
+    Fis->Device          = 0x40; // Bit 6 = LBA Mode
+    Fis->LbaLowExp       = (UCHAR)((LBA >> 24) & 0xFF);
+    Fis->LbaMidExp       = 0;
+    Fis->LbaHighExp      = 0;
+    Fis->SectorCountLow  = (UCHAR)(SectorCount & 0xFF);
+    Fis->SectorCountHigh = (UCHAR)((SectorCount >> 8) & 0xFF);
+
+    PortRegs->Ci |= (1 << Slot);
+
+    Timeout = 200000; // Timeout 1 detik (200.000 * 5us)
+    while (Timeout > 0)
+    {
+        ULONG Ci  = PortRegs->Ci;
+        ULONG Tfd = PortRegs->Tfd;
+
+        // Cek jika Task File Data menandakan Error (ERR bit set)
+        if (Tfd & AHCI_PxTFD_STS_ERR)
+        {
+            return 0; // Gagal
+        }
+
+        // Cek jika Hardware sudah selesai memproses command slot 0
+        if (!(Ci & (1 << Slot)))
+        {
+            return 1; // Berhasil! (Return 1 / TRUE)
+        }
+
+        KsStallExecutionProcessor(5); // Stall 5 mikrodetik
+        Timeout--;
+    }
+
+    return 0; // Timeout
+}
+
+VOID
+VEAPI
+AhciDumpFlushCachePolling(VOID)
+//
+// Routine Description:
+//     Direct Polling Flush Cache for Crash Dump / BSOD context.
+//
+{
+    PAHCI_PORT_CONTEXT PortCtx = AhciDumpPortContext;
+    PAHCI_PORT_REGISTERS PortRegs;
+    PAHCI_COMMAND_HEADER CmdHeader;
+    PAHCI_COMMAND_TABLE CmdTable;
+    PFIS_REG_H2D Fis;
+    ULONG Slot = 0;
+    ULONG Timeout;
+
+    if (!PortCtx) return;
+
+    PortRegs = PortCtx->Registers;
+
+    PortRegs->Is   = PortRegs->Is;
+    PortRegs->Serr = PortRegs->Serr;
+
+    AhciPrepareH2dCommand(PortCtx, Slot, FALSE, 0, &CmdHeader, &CmdTable, &Fis);
+    Fis->Command = (PortCtx->TotalSectors > 0) ? ATA_CMD_FLUSH_CACHE_EX : ATA_CMD_FLUSH_CACHE;
+
+    PortRegs->Ci |= (1 << Slot);
+
+    Timeout = 200000;
+    while (Timeout > 0)
+    {
+        ULONG Ci  = PortRegs->Ci;
+        ULONG Tfd = PortRegs->Tfd;
+
+        if ((Tfd & AHCI_PxTFD_STS_ERR) || !(Ci & (1 << Slot)))
+        {
+            break;
+        }
+
+        KsStallExecutionProcessor(5);
+        Timeout--;
+    }
+}
+
 
 /* EOF */
