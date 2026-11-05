@@ -26,7 +26,7 @@ kdp_activate_serial(VOID);
 
 BOOLEAN
 VEAPI
-KdpHandleDebug(PKREGISTER_FRAME RegisterFrame);
+KdpHandleDebug(IN PKTRAP_FRAME Frame, IN ULONG Vector);
 
 VOID
 VEAPI
@@ -61,7 +61,7 @@ BOOLEAN
 VEAPI
 KdpProcessInput(
     PCHAR String,
-    PKREGISTER_FRAME Frame
+    PKTRAP_FRAME Frame
 );
 
 VOID
