@@ -5,14 +5,19 @@ set(SDK_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/sdk/include")
 set(KERNEL_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 # =====================================================================
-# DDK HEADER GENERATOR (veaddk.h from export.lst)
+# DDK HEADER & EXPORT TABLE GENERATOR (from export.lst)
 # =====================================================================
 set(EXPORT_LST_FILE "${CMAKE_CURRENT_SOURCE_DIR}/export.lst")
 set(DDK_INCLUDE_DIR "${SDK_INCLUDE_DIR}/ddk")
 set(DDK_HEADER_FILE "${DDK_INCLUDE_DIR}/veaddk.h")
+set(AUTEXP_C_FILE "${CMAKE_CURRENT_BINARY_DIR}/autexp.c")
+
+# Path ke script generator di folder tool/ (atau tools/)
 set(GEN_DDK_SCRIPT "${CMAKE_SOURCE_DIR}/tool/gen_ddk.py")
+set(GEN_EXP_SCRIPT "${CMAKE_SOURCE_DIR}/tool/gen_exp.py")
 
 if(EXISTS ${EXPORT_LST_FILE})
+    # 1. Generate veaddk.h untuk DDK
     execute_process(
         COMMAND python3 ${GEN_DDK_SCRIPT} 
                 ${EXPORT_LST_FILE} 
@@ -23,8 +28,20 @@ if(EXISTS ${EXPORT_LST_FILE})
     if(NOT GEN_DDK_RESULT EQUAL 0)
         message(WARNING "[VeaDDK] Failed to generate veaddk.h!")
     endif()
+
+    # 2. Generate autexp.c untuk seksi .veasymboltable kernel
+    execute_process(
+        COMMAND python3 ${GEN_EXP_SCRIPT}
+                ${EXPORT_LST_FILE}
+                ${KERNEL_INCLUDE_DIR}
+                ${AUTEXP_C_FILE}
+        RESULT_VARIABLE GEN_EXP_RESULT
+    )
+    if(NOT GEN_EXP_RESULT EQUAL 0)
+        message(WARNING "[VeaExport] Failed to generate autexp.c!")
+    endif()
 else()
-    message(WARNING "[VeaDDK] export.lst not found in ${CMAKE_CURRENT_SOURCE_DIR}!")
+    message(WARNING "[VeaExport] export.lst not found in ${CMAKE_CURRENT_SOURCE_DIR}!")
 endif()
 
 # =============================================================
@@ -40,6 +57,11 @@ file(GLOB_RECURSE KERNEL_C_SOURCES "*.c")
 file(GLOB_RECURSE RTL_SOURCES "${CMAKE_SOURCE_DIR}/sdk/lib/rtl/*.c")
 list(APPEND KERNEL_C_SOURCES ${RTL_SOURCES})
 
+# Tambahkan autexp.c hasil generate ke daftar sumber C kernel
+if(EXISTS ${AUTEXP_C_FILE})
+    list(APPEND KERNEL_C_SOURCES ${AUTEXP_C_FILE})
+endif()
+
 set(KERNEL_OBJS "")
 
 foreach(ASM_FILE ${KERNEL_ASM_SOURCES})
@@ -49,7 +71,6 @@ foreach(ASM_FILE ${KERNEL_ASM_SOURCES})
     
     add_custom_command(
         OUTPUT ${OBJ_FILE}
-        # Tambahkan -I${CMAKE_SOURCE_DIR}/ di sini
         COMMAND nasm -f elf32 ${ASM_FILE} -I${CMAKE_SOURCE_DIR}/ -I${ASM_INCLUDE_DIR}/ -o ${OBJ_FILE}
         DEPENDS ${ASM_FILE}
         COMMENT "Compiling Kernel ASM: ${SAFE_NAME}"
@@ -64,8 +85,8 @@ foreach(C_FILE ${KERNEL_C_SOURCES})
     
     add_custom_command(
         OUTPUT ${OBJ_FILE}
-        # PASTIKAN -DBUILDING_VEAKRNL ADA DI SINI
-        COMMAND clang --target=i686-pc-none-elf -march=i686 -m32 -ffreestanding -nostdlib -fno-builtin -fno-builtin-memcpy -c -g -DBUILDING_VEAKRNL ${VEA_INCLUDES} -c ${C_FILE} -o ${OBJ_FILE} -std=gnu23 -fshort-wchar -fms-extensions -fstack-protector-all -Wthread-safety -Wthread-safety-analysis -Werror=thread-safety -fmacro-prefix-map=/home/xvrasya/VeaOS/=
+        COMMAND clang --target=i686-pc-none-elf -march=i686 -m32 -ffreestanding -nostdlib -fno-builtin -fno-builtin-memcpy -c -g -DBUILDING_VEAKRNL ${VEA_INCLUDES} -c ${C_FILE} -o ${OBJ_FILE} -std=gnu23 -fshort-wchar -fms-extensions -fstack-protector-all -Wthread-safety -Wthread-safety-analysis -Werror=thread-safety 
+        -fmacro-prefix-map=/home/xvrasya/VeaOS/= -fno-omit-frame-pointer
         DEPENDS ${C_FILE}
         COMMENT "Compiling C: ${SAFE_NAME}"
     )
@@ -85,7 +106,7 @@ target_include_directories(clangd_kernel_dummy PRIVATE
 
 # LINKING: Sekarang OUTPUT dan COMMAND sama-sama menunjuk ke OUT_DIR
 add_custom_command(
-    OUTPUT ${OUT_DIR}/veakrnl.elf # <--- DIBETULKAN (Pakai OUT_DIR)
+    OUTPUT ${OUT_DIR}/veakrnl.elf
     COMMAND ld.lld -T ${CMAKE_CURRENT_SOURCE_DIR}/linker.ld -m elf_i386 ${KERNEL_OBJS} ${HCT_OBJS} -o ${OUT_DIR}/veakrnl.elf
     DEPENDS ${KERNEL_OBJS} ${HCT_OBJS} ${CMAKE_CURRENT_SOURCE_DIR}/linker.ld
     COMMENT "Linking veakrnl.elf (with HCT included) using Clang/LLD"

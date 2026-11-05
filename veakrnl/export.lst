@@ -88,3 +88,11 @@ export MmUnmapIoSpace
 export ObioStopTimer
 export ObioStartTimer
 export ObioInitializeIoTimer
+export RtlZeroMemory
+export RtlInitAnsiString
+export RtlInitUnicodeString
+export RtlAnsiStringToUnicodeString
+export RtlDuplicateAnsiString
+export RtlUpperChar
+export RtlFreeAnsiString
+export UlFreePool
