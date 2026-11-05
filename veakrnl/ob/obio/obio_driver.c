@@ -15,6 +15,32 @@
  * REVISION   : Creating file obio_driver.c
  * --------------------------------------------------------------------- */
 
+/* STRUCT */
+typedef enum _ADD_DEV_DRIVER_TYPE
+{
+    LowerFilter,
+    LowerClassFilter,
+    DeviceDriver,
+    UpperFilter,
+    UpperClassFilter
+} ADD_DEV_DRIVER_TYPE;
+
+typedef struct _ADD_DEV_DRIVERS_LIST
+{
+    LIST_ENTRY ListEntry;
+    PDRIVER_OBJECT DriverObject;
+    ADD_DEV_DRIVER_TYPE DriverType;
+} ADD_DEV_DRIVERS_LIST, *PADD_DEV_DRIVERS_LIST;
+
+typedef struct _ATTACH_FILTER_DRIVERS_CONTEXT
+{
+    ADD_DEV_DRIVER_TYPE DriverType;
+    PDEVICE_NODE DeviceNode;
+    PLIST_ENTRY DriversListHead;
+} ATTACH_FILTER_DRIVERS_CONTEXT, *PATTACH_FILTER_DRIVERS_CONTEXT;
+
+/* FUNCTION */
+
 VEASTATUS
 VEAPI
 ObioGetDriverName(
@@ -105,7 +131,7 @@ ObioGetDriverName(
     if(!ServiceName)
     {
         DPRINT("ERROR: Failed to allocate memory for ServiceName\n");
-        Status = STATUS_INSUFFICIENT_MEMORY;
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto Cleanup;
     }
 
@@ -123,6 +149,49 @@ Cleanup:
     return Status;
 }
 
+#define OBIO_MATCH_VERBOSE 1
+
+#if OBIO_MATCH_VERBOSE
+#define MTRACE(...) DPRINT(__VA_ARGS__)
+#else
+#define MTRACE(...) ((void)0)
+#endif
+
+static UCHAR
+ObiopUpAscii(UCHAR c)
+{
+    return (c >= 'a' && c <= 'z') ? (UCHAR)(c - 'a' + 'A') : c;
+}
+
+static VOID
+ObiopDumpMismatch(
+    IN PANSI_STRING EnumValue,
+    IN PANSI_STRING NodePath
+)
+{
+    USHORT Common = EnumValue->Length < NodePath->Length ?
+                    EnumValue->Length : NodePath->Length;
+    USHORT i;
+
+    for (i = 0; i < Common; i++)
+    {
+        if (ObiopUpAscii((UCHAR)EnumValue->Buffer[i]) !=
+            ObiopUpAscii((UCHAR)NodePath->Buffer[i]))
+        {
+            break;
+        }
+    }
+
+    DPRINT("[MATCH]   mismatch: enumLen=%u nodeLen=%u firstDiff=%u "
+           "enumCh=0x%x nodeCh=0x%x\n",
+           (ULONG)EnumValue->Length,
+           (ULONG)NodePath->Length,
+           (ULONG)i,
+           i < EnumValue->Length ? (ULONG)(UCHAR)EnumValue->Buffer[i] : 0xFFFF,
+           i < NodePath->Length  ? (ULONG)(UCHAR)NodePath->Buffer[i]  : 0xFFFF);
+}
+
+
 static
 VEASTATUS
 ObioDriverMatchesDeviceNode(
@@ -131,31 +200,48 @@ ObioDriverMatchesDeviceNode(
     OUT PBOOLEAN Matches
 )
 {
-    static const CHAR EnumName[] = "Enum";
+    static const CHAR EnumName[]  = "Enum";
     static const CHAR CountName[] = "Count";
     VEASTATUS Status;
     HANDLE EnumHandle = NULL;
     ANSI_STRING ValueName;
-    ULONG ValueType;
+    ULONG ValueType = 0;
     ULONG InstanceCount = 0;
-    ULONG DataSize;
+    ULONG DataSize = 0;
+
+    /* statistik untuk ringkasan */
+    ULONG Scanned = 0;
+    ULONG SkipQuery = 0;      /* query size != BUFFER_TOO_SMALL */
+    ULONG SkipSize = 0;       /* DataSize == 0 atau > 0xFFFE */
+    ULONG SkipRead = 0;      /* query kedua gagal */
+    ULONG SkipType = 0;       /* tipe bukan FILE_KEY_STRING */
+    ULONG Mismatch = 0;
+    VEASTATUS FirstBadStatus = STATUS_SUCCESS;
+    ULONG FirstBadIndex = 0xFFFFFFFF;
 
     if (!ServiceHandle || !DeviceNode || !Matches ||
         !DeviceNode->InstancePath.Buffer ||
         DeviceNode->InstancePath.Length == 0)
     {
+        DPRINT("[MATCH] invalid param: svc=%p node=%p matches=%p\n",
+               ServiceHandle, DeviceNode, Matches);
         return STATUS_INVALID_PARAMETER;
     }
 
     *Matches = FALSE;
+
     RtlInitAnsiString(&ValueName, (PCHAR)EnumName);
     Status = ObioOpenVeaKey(ServiceHandle, &EnumHandle, &ValueName, KEY_READ);
     if (!VEA_SUCCESS(Status))
     {
+        /* tampilkan status MENTAH sebelum dipetakan ke NOT_FOUND */
+        DPRINT("[MATCH] svc=%p: open 'Enum' failed raw=0x%x node=%Z\n",
+               ServiceHandle, Status, &DeviceNode->InstancePath);
         return Status == STATUS_OBJECT_NAME_NOT_FOUND ? STATUS_NOT_FOUND : Status;
     }
 
     RtlInitAnsiString(&ValueName, (PCHAR)CountName);
+    DataSize = 0;
     Status = VeaQueryValueKey(
         EnumHandle,
         &ValueName,
@@ -166,14 +252,22 @@ ObioDriverMatchesDeviceNode(
     );
     if (!VEA_SUCCESS(Status))
     {
+        DPRINT("[MATCH] svc=%p: query 'Count' failed st=0x%x\n",
+               ServiceHandle, Status);
         goto Exit;
     }
 
     if (ValueType != FILE_KEY_DWORD || DataSize != sizeof(InstanceCount))
     {
+        DPRINT("[MATCH] svc=%p: 'Count' bad type=%u (want %u) size=%u (want %u)\n",
+               ServiceHandle, ValueType, (ULONG)FILE_KEY_DWORD,
+               DataSize, (ULONG)sizeof(InstanceCount));
         Status = STATUS_INVALID_PARAMETER;
         goto Exit;
     }
+
+    MTRACE("[MATCH] svc=%p node=%Z Count=%u\n",
+           ServiceHandle, &DeviceNode->InstancePath, InstanceCount);
 
     Status = STATUS_NOT_FOUND;
     for (ULONG Index = 0; Index < InstanceCount; Index++)
@@ -182,6 +276,8 @@ ObioDriverMatchesDeviceNode(
         ANSI_STRING InstanceValue;
         PCHAR InstancePathBuffer;
         VEASTATUS ValueStatus;
+
+        Scanned++;
 
         RtlStringCbPrintfA(IndexBuffer, sizeof(IndexBuffer), "%u", Index);
         RtlInitAnsiString(&ValueName, IndexBuffer);
@@ -197,22 +293,34 @@ ObioDriverMatchesDeviceNode(
         );
         if (ValueStatus != STATUS_BUFFER_TOO_SMALL)
         {
+            SkipQuery++;
+            if (FirstBadIndex == 0xFFFFFFFF)
+            {
+                FirstBadIndex = Index;
+                FirstBadStatus = ValueStatus;
+            }
+            MTRACE("[MATCH]   [%u] size query st=0x%x (want 0x%x) size=%u\n",
+                   Index, ValueStatus, (ULONG)STATUS_BUFFER_TOO_SMALL, DataSize);
             continue;
         }
 
         if (DataSize == 0 || DataSize > 0xFFFE)
         {
+            SkipSize++;
+            MTRACE("[MATCH]   [%u] bad size=%u\n", Index, DataSize);
             continue;
         }
 
+        /* +1 untuk terminator supaya MaximumLength valid */
         InstancePathBuffer = UlAllocatePoolWithTag(
             PagedPool,
-            DataSize,
+            DataSize + 1,
             TAG_OBIO
         );
         if (!InstancePathBuffer)
         {
-            Status = STATUS_INSUFFICIENT_MEMORY;
+            DPRINT("[MATCH] out of memory (size=%u)\n", DataSize + 1);
+            Status = STATUS_INSUFFICIENT_RESOURCES;
             goto Exit;
         }
 
@@ -226,15 +334,27 @@ ObioDriverMatchesDeviceNode(
         );
         if (!VEA_SUCCESS(ValueStatus))
         {
-            UlFreePoolWithTag(InstancePathBuffer, TAG_OBIO);
-            continue;
-        }
-        if (ValueType != FILE_KEY_STRING)
-        {
+            SkipRead++;
+            if (FirstBadIndex == 0xFFFFFFFF)
+            {
+                FirstBadIndex = Index;
+                FirstBadStatus = ValueStatus;
+            }
+            MTRACE("[MATCH]   [%u] read failed st=0x%x\n", Index, ValueStatus);
             UlFreePoolWithTag(InstancePathBuffer, TAG_OBIO);
             continue;
         }
 
+        if (ValueType != FILE_KEY_STRING)
+        {
+            SkipType++;
+            MTRACE("[MATCH]   [%u] bad type=%u (want %u)\n",
+                   Index, ValueType, (ULONG)FILE_KEY_STRING);
+            UlFreePoolWithTag(InstancePathBuffer, TAG_OBIO);
+            continue;
+        }
+
+        InstancePathBuffer[DataSize] = '\0';
         if (DataSize > 0 && InstancePathBuffer[DataSize - 1] == '\0')
         {
             DataSize--;
@@ -243,16 +363,34 @@ ObioDriverMatchesDeviceNode(
         InstanceValue.Buffer = InstancePathBuffer;
         InstanceValue.Length = (USHORT)DataSize;
         InstanceValue.MaximumLength = (USHORT)(DataSize + 1);
+
         if (RtlEqualString(&InstanceValue, &DeviceNode->InstancePath, TRUE))
         {
+            DPRINT("[MATCH] svc=%p MATCH at [%u]: %Z\n",
+                   ServiceHandle, Index, &InstanceValue);
             *Matches = TRUE;
             Status = STATUS_SUCCESS;
             UlFreePoolWithTag(InstancePathBuffer, TAG_OBIO);
             goto Exit;
         }
 
+        Mismatch++;
+#if OBIO_MATCH_VERBOSE
+        DPRINT("[MATCH]   [%u] enum='%Z' node='%Z'\n",
+               Index, &InstanceValue, &DeviceNode->InstancePath);
+        ObiopDumpMismatch(&InstanceValue, &DeviceNode->InstancePath);
+#endif
         UlFreePoolWithTag(InstancePathBuffer, TAG_OBIO);
     }
+
+    /* tidak ada yang cocok: ringkasan kenapa */
+    DPRINT("[MATCH] svc=%p NO MATCH node=%Z | count=%u scanned=%u "
+           "mismatch=%u skipQuery=%u skipSize=%u skipRead=%u skipType=%u "
+           "firstBad=[%u]/0x%x\n",
+           ServiceHandle, &DeviceNode->InstancePath,
+           InstanceCount, Scanned, Mismatch,
+           SkipQuery, SkipSize, SkipRead, SkipType,
+           FirstBadIndex, FirstBadStatus);
 
 Exit:
     VeaClose(EnumHandle);
@@ -262,80 +400,304 @@ Exit:
 VEASTATUS
 VEAPI
 ObioCallDriverAddDevice(
-    IN PDEVICE_NODE DeviceNode
+    IN PDEVICE_NODE DeviceNode,
+    IN BOOLEAN MustLoadDriver
 )
 {
     VEASTATUS Status;
-    VEASTATUS SearchStatus = STATUS_NOT_FOUND;
+    HANDLE EnumRootKey, SubKey;
+    HANDLE ClassKey = NULL;
+    ANSI_STRING EnumRoot = RTL_CONSTANT_ANSI_STRING("/REGISTRY/MACHINE/SYSTEM/CurrentControlSet/Enum");
+    LIST_ENTRY DriverListHead;
+    ATTACH_FILTER_DRIVERS_CONTEXT RoutineContext;
+    PLIST_ENTRY listEntry;
+    ANSI_STRING ServiceValueName = RTL_CONSTANT_ANSI_STRING("Service");
+    ULONG ValueType = 0;
+    ULONG ResultSize = 0;
+    PCHAR ServiceNameBuffer = NULL;
 
-    if (!DeviceNode || !DeviceNode->PhysicalDeviceObject)
+    /* Open ENUM Key */
+    Status = ObioOpenVeaKey(
+        NULL,
+        &EnumRootKey,
+        &EnumRoot,
+        KEY_READ
+    );
+    if (!VEA_SUCCESS(Status))
     {
-        return STATUS_INVALID_PARAMETER;
+        DPRINT("[OBIO] ObioOpenVeaKey failed for ENUM root ('%Z'): 0x%08x\n", &EnumRoot, Status);
+        return Status;
     }
 
-    if (!ObioGroupTable || ObioGroupTableCount == 0)
+    /* Open Instance SubKey */
+    Status = ObioOpenVeaKey(
+        EnumRootKey,
+        &SubKey,
+        &DeviceNode->InstancePath,
+        KEY_READ
+    );
+    VeaClose(EnumRootKey);
+
+    if (!VEA_SUCCESS(Status))
     {
-        return STATUS_NOT_FOUND;
+        DPRINT("[OBIO] ObioOpenVeaKey failed for InstancePath '%Z': 0x%08x\n", 
+               &DeviceNode->InstancePath, Status);
+        return Status;
     }
 
-    for (ULONG GroupIndex = 0; GroupIndex < ObioGroupTableCount; GroupIndex++)
-    {
-        PLIST_ENTRY Entry;
+    /* TODO: Handle Class GUID */
 
-        for (Entry = ObioGroupTable[GroupIndex].Flink;
-             Entry != &ObioGroupTable[GroupIndex];
-             Entry = Entry->Flink)
+    InitializeListHead(&DriverListHead);
+
+    /* TODO: Implement this 
+    
+    Status = PiAttachFilterDrivers(&drvListHead, DeviceNode, SubKey, ClassKey, TRUE, LoadDrivers);
+    if (!NT_SUCCESS(Status))
+    {
+        goto Cleanup;
+    }
+
+    */
+
+    RoutineContext.DriversListHead = &DriverListHead;
+    RoutineContext.DriverType = DeviceDriver;
+    RoutineContext.DeviceNode = DeviceNode;
+
+    Status = VeaQueryValueKey(
+        SubKey,
+        &ServiceValueName,
+        &ValueType,
+        NULL,
+        0,
+        &ResultSize
+    );
+
+    if (Status == STATUS_BUFFER_TOO_SMALL)
+    {
+        /* 2. Alokasikan buffer + 1 byte buat Null-Terminator safety */
+        ServiceNameBuffer = (PCHAR)UlAllocatePoolZero(NonPagedPool, ResultSize + 1, 'vRcS');
+        if (!ServiceNameBuffer)
         {
-            POBIO_DRIVER_INFORMATION DriverInformation;
-            BOOLEAN Matches;
+            DPRINT("[OBIO] Out of memory allocating %u bytes for Service name!\n", ResultSize + 1);
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Cleanup;
+        }
 
-            DriverInformation = CONTAINING_RECORD(
-                Entry,
-                OBIO_DRIVER_INFORMATION,
-                Link
+        /* 3. Query kedua: Ambil data stringnya secara utuh */
+        Status = VeaQueryValueKey(
+            SubKey,
+            &ServiceValueName,
+            &ValueType,
+            ServiceNameBuffer,
+            ResultSize,
+            NULL
+        );
+    }
+
+    if (VEA_SUCCESS(Status))
+    {
+        PDRIVER_OBJECT DriverObject = NULL;
+        CHAR DriverObjPathBuf[256];
+        ANSI_STRING DriverObjPath;
+        OBJECT_ATTRIBUTES DriverObjAttr;
+        HANDLE DriverHandle = NULL;
+
+        RtlZeroMemory(DriverObjPathBuf, sizeof(DriverObjPathBuf));
+        RtlStringCbPrintfA(DriverObjPathBuf, sizeof(DriverObjPathBuf), "/Driver/%s", ServiceNameBuffer);
+        RtlInitAnsiString(&DriverObjPath, DriverObjPathBuf);
+
+        InitializeObjectAttributes(&DriverObjAttr, &DriverObjPath, 0, NULL, NULL);
+
+        Status = ObOpenObjectByName(
+            &DriverObjAttr,
+            ObpDriverObjectType,
+            KernelMode,
+            0,
+            NULL,
+            &DriverHandle
+        );
+
+        if (VEA_SUCCESS(Status))
+        {
+            /* Driver SUDAH LOADED di RAM! Ambil reference-nya */
+            Status = ObReferenceObjectByHandle(
+                DriverHandle,
+                0,
+                ObpDriverObjectType,
+                KernelMode,
+                (PVOID*)&DriverObject
+            );
+            VeaClose(DriverHandle);
+        }
+        else
+        {
+            /* B. Driver BELUM ADA di RAM */
+            if (MustLoadDriver)
+            {
+                CHAR ServiceKeyPathBuf[256];
+                ANSI_STRING ServiceKeyPath;
+                HANDLE ServiceKeyHandle = NULL;
+
+                RtlZeroMemory(ServiceKeyPathBuf, sizeof(ServiceKeyPathBuf));
+                RtlStringCbPrintfA(ServiceKeyPathBuf, sizeof(ServiceKeyPathBuf),
+                                   "/REGISTRY/MACHINE/SYSTEM/CurrentControlSet/Services/%s",
+                                   ServiceNameBuffer);
+                RtlInitAnsiString(&ServiceKeyPath, ServiceKeyPathBuf);
+
+                Status = ObioOpenVeaKey(NULL, &ServiceKeyHandle, &ServiceKeyPath, KEY_READ);
+                if (VEA_SUCCESS(Status))
+                {
+                    Status = ObioLoadDriver(ServiceKeyHandle, &DriverObject);
+                    VeaClose(ServiceKeyHandle);
+                }
+            }
+            else
+            {
+                DPRINT("[OBIO] Service '%s' will not be loaded now (MustLoadDriver=FALSE)\n", ServiceNameBuffer);
+                Status = STATUS_NOT_FOUND;
+                goto Cleanup;
+            }
+        }
+
+        if (VEA_SUCCESS(Status) && DriverObject)
+        {
+            PADD_DEV_DRIVERS_LIST DriverEntry = (PADD_DEV_DRIVERS_LIST)UlAllocatePoolWithTag(
+                PagedPool,
+                sizeof(ADD_DEV_DRIVERS_LIST),
+                TAG_OBIO
             );
 
-            if (!DriverInformation->DriverObject ||
-                !DriverInformation->ServiceHandle)
+            if (DriverEntry)
             {
-                continue;
-            }
+                RtlZeroMemory(DriverEntry, sizeof(ADD_DEV_DRIVERS_LIST));
+                DriverEntry->DriverType = DeviceDriver;
+                DriverEntry->DriverObject = DriverObject;
 
-            Status = ObioDriverMatchesDeviceNode(
-                DriverInformation->ServiceHandle,
-                DeviceNode,
-                &Matches
-            );
-            if (Status == STATUS_NOT_FOUND)
-            {
-                continue;
+                InsertTailList(&DriverListHead, &DriverEntry->ListEntry);
             }
-            if (!VEA_SUCCESS(Status))
+            else
             {
-                SearchStatus = Status;
-                DPRINT("Failed to match driver service to %Z: 0x%x\n",
-                       &DeviceNode->InstancePath,
-                       Status);
-                continue;
+                ObDereferenceObject(DriverObject);
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                goto Cleanup;
             }
-            if (!Matches)
-            {
-                continue;
-            }
+        }
+        else
+        {
+            DPRINT("[OBIO] Failed to obtain DriverObject for '%s': 0x%08x\n", ServiceNameBuffer, Status);
+            goto Cleanup;
+        }
+    }
+    else if (Status == STATUS_OBJECT_NAME_NOT_FOUND && 
+            (DeviceNode->CapabilityFlags & 0x00000040)) // DEVCAP_RAWDEVICEOK
+    {
+        PADD_DEV_DRIVERS_LIST DriverEntry = UlAllocatePoolWithTag(
+            PagedPool,
+            sizeof(*DriverEntry),
+            TAG_OBIO
+        );
+        if (DriverEntry)
+        {
+            RtlZeroMemory(DriverEntry, sizeof(*DriverEntry));
+            DriverEntry->DriverType = DeviceDriver;
+            DriverEntry->DriverObject = NULL;
+            InsertTailList(&DriverListHead, &DriverEntry->ListEntry);
+        }
+        else
+        {
+            DPRINT("[OBIO] Out of memory allocating raw ADD_DEV_DRIVERS_LIST!\n");
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Cleanup;
+        }
+    }
+    else
+    {
+        if (Status == STATUS_OBJECT_TYPE_MISMATCH && !(DeviceNode->Flags & DNF_PROBLEM))
+        {
+            DPRINT("[OBIO] Service value type mismatch for '%Z'. Setting DN_PROB_REGISTRY.\n", 
+                   &DeviceNode->InstancePath);
+            ObioSetDevNodeProblem(DeviceNode, DN_PROB_REGISTRY);
+        }
+        DPRINT("[OBIO] FAILED: No valid service for '%Z' (Status: 0x%08x, MustLoadDriver: %u)\n", 
+               &DeviceNode->InstancePath, Status, MustLoadDriver);
+        goto Cleanup;
+    }
 
-            DPRINT("Calling AddDevice for %Z using driver %p\n",
-                   &DeviceNode->InstancePath,
-                   DriverInformation->DriverObject);
-            return ObioAddDeviceByDeviceObject(
-                DeviceNode,
-                NULL,
-                DriverInformation->DriverObject,
-                NULL
-            );
+    /* TODO: Implement this:
+    
+    // upper (class) filters
+    Status = PiAttachFilterDrivers(&drvListHead, DeviceNode, SubKey, ClassKey, FALSE, LoadDrivers);
+    if (!NT_SUCCESS(Status))
+    {
+        goto Cleanup;
+    }
+        
+    */
+
+    for (listEntry = DriverListHead.Flink;
+         listEntry != &DriverListHead;
+         listEntry = listEntry->Flink)
+    {
+        PADD_DEV_DRIVERS_LIST DriverEntry;
+        PDRIVER_OBJECT DriverObject;
+
+        DriverEntry = CONTAINING_RECORD(listEntry, ADD_DEV_DRIVERS_LIST, ListEntry);
+        DriverObject = DriverEntry->DriverObject;
+
+        if (DriverObject && DriverObject->AddDeviceRoutine)
+        {
+            Status = DriverObject->AddDeviceRoutine(DriverEntry->DriverObject, DeviceNode->PhysicalDeviceObject);
+        }
+        else if (DriverObject == NULL)
+        {
+            Status = STATUS_SUCCESS;
+        }
+        else
+        {
+            DPRINT("[OBIO] ERROR: DriverObject 0x%p has NO AddDeviceRoutine!\n", DriverObject);
+            Status = STATUS_UNSUCCESSFUL;
+        }
+
+        if (DriverEntry->DriverType == DeviceDriver)
+        {
+            if (VEA_SUCCESS(Status))
+            {
+                PDEVICE_OBJECT Fdo = ObioGetTopDeviceObject(DeviceNode->PhysicalDeviceObject);
+                
+                ObDereferenceObject(Fdo);
+                ObioSetDevNodeState(DeviceNode, DeviceNodeDriversAdded);
+            }
+            else
+            {
+                DPRINT("[OBIO] AddDevice FAILED (0x%08x)! Setting DN_PROB_FAILED_ADD.\n", Status);
+                ObioSetDevNodeProblem(DeviceNode, DN_PROB_FAILED_ADD);
+                ObioSetDevNodeState(DeviceNode, DeviceNodeAwaitingQueuedRemoval);
+                break;
+            }
         }
     }
 
-    return SearchStatus;
+Cleanup:
+    while (!IsListEmpty(&DriverListHead))
+    {
+        PLIST_ENTRY listEntry = RemoveHeadList(&DriverListHead);
+        PADD_DEV_DRIVERS_LIST DriverEntry;
+
+        DriverEntry = CONTAINING_RECORD(listEntry, ADD_DEV_DRIVERS_LIST, ListEntry);
+        if (DriverEntry->DriverObject)
+        {
+            ObDereferenceObject(DriverEntry->DriverObject);
+        }
+        UlFreePoolWithTag(DriverEntry, TAG_OBIO);
+    }
+
+    VeaClose(SubKey);
+    if (ClassKey != NULL)
+    {
+        VeaClose(ClassKey);
+    }
+
+    return Status;
 }
 
 VEASTATUS
@@ -474,7 +836,7 @@ ObioLoadBootDriver(
 
                 if (!InstancePath.Buffer)
                 {
-                    Status = STATUS_INSUFFICIENT_MEMORY;
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
                     break;
                 }
 
@@ -495,7 +857,7 @@ ObioLoadBootDriver(
                 {
                     DPRINT("DEVICE NODE Found: %Z. Is try to attach\n", &InstancePath);
 
-                    Status = ObioCallDriverAddDevice(PDO->DeviceNode);
+                    Status = ObioCallDriverAddDevice(PDO->DeviceNode, FALSE);
 
                     if (!VEA_SUCCESS(Status))
                     {
@@ -504,7 +866,6 @@ ObioLoadBootDriver(
                         goto cleanup;
                     }
 
-                    ObioSetDevNodeState(PDO->DeviceNode, DeviceNodeDriversAdded);
                     ObDereferenceObject(PDO);
                 }
                 else
@@ -909,15 +1270,187 @@ ObioNormalizeImagePath(
 
 VEASTATUS
 VEAPI
+ObioInitializeDriverModule(
+    IN PDATA_TABLE_ENTRY ModuleObject,
+    IN HANDLE ServiceHandle,
+    OUT PDRIVER_OBJECT *OutDriverObject,
+    OUT PVEASTATUS DriverEntryStatus
+)
+{
+    PCHAR DriverNameStr = NULL;
+    ANSI_STRING DriverName, RegistryPath;
+    HANDLE DriverDirHandle = NULL;
+    PDRIVER_OBJECT DriverObject = NULL;
+    OBJECT_ATTRIBUTES Attr, DirAttr;
+    ANSI_STRING DirString;
+    VEASTATUS Status;
+    PDRIVER_INITIALIZE DriverInitRoutine;
+
+    if (!ModuleObject || !ServiceHandle || !OutDriverObject)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(&RegistryPath, sizeof(ANSI_STRING));
+    RtlZeroMemory(&DriverName, sizeof(ANSI_STRING));
+
+    Status = ObioGetDriverName(ServiceHandle, &DriverNameStr);
+    if (!VEA_SUCCESS(Status) || !DriverNameStr)
+    {
+        DPRINT("[OBIO] Failed to get driver name from ServiceHandle: 0x%08X\n", Status);
+        return Status;
+    }
+
+    RtlInitAnsiString(&DriverName, DriverNameStr);
+
+    Status = VeaQueryKeyPath(ServiceHandle, &RegistryPath);
+    if (Status == STATUS_BUFFER_TOO_SMALL)
+    {
+        /* Alokasikan buffer sesuai kebutuhan yang dilaporkan VeaQueryKeyPath */
+        RegistryPath.Buffer = (PCHAR)UlAllocatePoolWithTag(
+            NonPagedPool,
+            RegistryPath.MaximumLength,
+            'gReR'
+        );
+
+        if (!RegistryPath.Buffer)
+        {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        /* Query ulang (Pass 2) dengan buffer yang sudah siap */
+        Status = VeaQueryKeyPath(ServiceHandle, &RegistryPath);
+    }
+
+    if (!VEA_SUCCESS(Status))
+    {
+        DPRINT("[OBIO] Failed to query registry path for service '%s': 0x%08X\n",
+                DriverNameStr, Status);
+        if (RegistryPath.Buffer) UlFreePoolWithTag(RegistryPath.Buffer, 'gReR');
+        return Status;
+    }
+
+    DPRINT("[OBIO] Initializing Driver '%s' (RegPath: %s) at 0x%p\n",
+           DriverNameStr, RegistryPath.Buffer, ModuleObject->ImageBase);
+
+    RtlInitAnsiString(&DirString, "/Driver");
+    InitializeObjectAttributes(&DirAttr, &DirString, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    Status = ObOpenObjectByName(
+        &DirAttr,
+        ObpDirectoryObjectType,
+        KernelMode,
+        0x10000,
+        NULL,
+        &DriverDirHandle
+    );
+
+    if (!VEA_SUCCESS(Status))
+    {
+        DPRINT("[OBIO] Failed to open '/Driver' directory object: 0x%08X\n", Status);
+        goto CleanupStrings;
+    }
+
+    InitializeObjectAttributes(&Attr, &DriverName, OBJ_PERMANENT, DriverDirHandle, NULL);
+
+    Status = ObCreateObject(
+        KernelMode,
+        ObpDriverObjectType,
+        &Attr,
+        KernelMode,
+        NULL,
+        sizeof(DRIVER_OBJECT),
+        0,
+        0,
+        (PVOID*)&DriverObject
+    );
+
+    if (!VEA_SUCCESS(Status))
+    {
+        DPRINT("[OBIO] Failed to create DriverObject for '%s': 0x%08X\n", DriverNameStr, Status);
+        goto CleanupHandle;
+    }
+
+    RtlZeroMemory(DriverObject, sizeof(DRIVER_OBJECT));
+
+    /* Populate Metadata Driver Object */
+    DriverObject->DriverStart    = ModuleObject->ImageBase;
+    DriverObject->DeviceObject  = NULL;
+    DriverObject->InterruptHandler = NULL;
+
+    Status = ObInsertObject(
+        DriverObject,
+        NULL,
+        0,
+        0,
+        NULL,
+        NULL
+    );
+
+    if (!VEA_SUCCESS(Status))
+    {
+        DPRINT("[OBIO] Failed to insert DriverObject for '%s': 0x%08X\n", DriverNameStr, Status);
+        ObDereferenceObject(DriverObject);
+        goto CleanupHandle;
+    }
+
+    DriverInitRoutine = (PDRIVER_INITIALIZE)ModuleObject->EntryPoint;
+
+    if (!DriverInitRoutine)
+    {
+        DPRINT("[OBIO] Driver '%s' has NO valid EntryPoint!\n", DriverNameStr);
+        Status = STATUS_INVALID_IMAGE_FORMAT;
+        goto CleanupObject;
+    }
+
+    DPRINT("Calling DriverInitRoutine()\n");
+    Status = DriverInitRoutine(DriverObject);
+    DPRINT("Calling Status: 0x%x\n", Status);
+
+    if (DriverEntryStatus)
+    {
+        *DriverEntryStatus = Status;
+    }
+
+    if (!VEA_SUCCESS(Status))
+    {
+        DPRINT("[OBIO] Driver '%s' DriverEntry failed with status: 0x%08X\n", DriverNameStr, Status);
+        goto CleanupObject;
+    }
+
+    ObioReadyDeviceObject(DriverObject);
+
+    *OutDriverObject = DriverObject;
+    Status = STATUS_SUCCESS;
+    goto CleanupHandle;
+
+CleanupObject:
+    /* Jika DriverEntry gagal, bersihkan objek dari tree */
+    ObMakeTemporaryObject(DriverObject);
+    ObDereferenceObject(DriverObject);
+    DriverObject = NULL;
+
+CleanupHandle:
+    if (DriverDirHandle) VeaClose(DriverDirHandle);
+
+CleanupStrings:
+    if (RegistryPath.Buffer) UlFreePool(RegistryPath.Buffer);
+
+    return Status;
+}
+
+VEASTATUS
+VEAPI
 ObioLoadDriver(
     IN HANDLE ServiceHandle,
     OUT PDRIVER_OBJECT *DriverObject
 )
 {
     ANSI_STRING ImagePath;
-    VEASTATUS Status;
+    VEASTATUS Status, DriverStatus;
     PVOID BaseAddress;
     ULONG ResultSizeOut;
+    PDATA_TABLE_ENTRY ModuleObject;
     ANSI_STRING ImagePathPrefix = RTL_CONSTANT_ANSI_STRING("ImagePath");
 
     Status = ObioGetValueKey(ServiceHandle, &ImagePathPrefix, NULL, 0, NULL, &ResultSizeOut);
@@ -962,14 +1495,34 @@ ObioLoadDriver(
 
     DPRINT("Normalized Image Path: %Z\n", &ImagePath);
 
-    // Status = MmLoadSystemImage(&ImagePath, NULL, NULL, 0, NULL, &BaseAddress);
+    KsEnterCriticalRegion();
+
+    Status = MmLoadSystemImage(&ImagePath, NULL, NULL, 0, (PVOID*)&ModuleObject, &BaseAddress);
+    DPRINT("Loading driver %Z at address %p\n", &ImagePath, BaseAddress);
+
     UlFreePool(ImagePath.Buffer);
     
     if (!VEA_SUCCESS(Status))
     {
         DPRINT("[OBIO] Failed: MmLoadSystemImage failed: 0x%x\n", Status);
+        KsLeaveCriticalRegion();
         return Status;
     }
+
+    Status = ObioInitializeDriverModule(
+        ModuleObject,
+        ServiceHandle,
+        DriverObject,
+        &DriverStatus
+    );
+    if (!VEA_SUCCESS(Status))
+    {
+        DPRINT("[Obio] Fail to initialize driver module: 0x%x driver 0x%x\n", Status, DriverStatus);
+    }
+
+    KsLeaveCriticalRegion();
+
+    return Status;
 }
 
 static
@@ -1053,6 +1606,16 @@ VeaLoadDriver(IN PANSI_STRING DriverServiceName)
 
     DriverObject = NULL;
     Status = ObioDoLoadUnloadDriver(DriverServiceName, &DriverObject);
+
+    return Status;
+}
+
+VOID
+VEAPI
+ObioDeleteDriver(IN PVOID ObjectBody)
+{
+    /* UNIMPLEMENTED */
+    UNIMPLEMENTED_DBGBREAK;
 }
 
 /* EOF */

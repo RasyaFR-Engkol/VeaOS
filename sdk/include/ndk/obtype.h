@@ -545,11 +545,16 @@ typedef struct _VPB *PVPB;
 // Struktur DRIVER_OBJECT
 typedef struct _DRIVER_OBJECT {
     PVOID DriverStart;          // Pointer ke base address driver di memory (opsional)
+    ULONG DriverSize;
+    PVOID DriverSection;
     PDEVICE_OBJECT DeviceObject;// Pointer ke Device pertama yang dibuat oleh driver ini
     PVOID DriverExtension;      // Data tambahan spesifik driver
     POBIO_INTERRUPT_HANDLER InterruptHandler;
     POBIO_ADD_DEVICE_ROUTINE AddDeviceRoutine;
     POBIO_REMOVE_DEVICE_ROUTINE RemoveDeviceRoutine;
+    ANSI_STRING DriverName;
+    ANSI_STRING ServiceKeyName;
+    ULONG Flags;
 } DRIVER_OBJECT, *PDRIVER_OBJECT;
 
 typedef VOID
@@ -631,6 +636,7 @@ typedef struct _DEVICE_NODE {
     ULONG Problem;
     POBIO_REQUIRED_RESOURCES_LIST_EX RequiredResources;
     POBIO_RESOURCE_LIST AdditionalResources;
+    ULONG CapabilityFlags;
 } DEVICE_NODE, *PDEVICE_NODE;
 
 typedef VEASTATUS (VEAPI *POBIO_PDO_TRAVERSE_ROUTINE)(
@@ -1457,5 +1463,175 @@ typedef struct _LOAD_UNLOAD_PARAMS
 #define SYSTEMROOT_VAR_LEN 12
 #define SYSTEMROOT_TARGET  "/SystemRoot"
 #define SYSTEMROOT_TGT_LEN 11
+
+typedef VOID
+(VEAPI *PIO_APC_ROUTINE)(
+  _In_ PVOID ApcContext,
+  _In_ POIP_INFORMATION IoStatusBlock,
+  _In_ ULONG Reserved);
+
+// FILE_OBJECT Flags
+#define FO_FILE_OPEN                 0x00000001
+#define FO_SYNCHRONOUS_IO            0x00000002
+#define FO_ALERTABLE_IO              0x00000004
+#define FO_NO_INTERMEDIATE_BUFFERING 0x00000008
+#define FO_WRITE_THROUGH             0x00000010
+#define FO_SEQUENTIAL_ONLY           0x00000020
+#define FO_CACHE_SUPPORTED           0x00000040
+#define FO_NAMED_PIPE                0x00000080
+#define FO_STREAM_FILE               0x00000100
+#define FO_MAILSLOT                  0x00000200
+#define FO_GENERATE_AUDIT_ON_CLOSE   0x00000400
+#define FO_QUEUE_IRP_TO_THREAD       0x00000400
+#define FO_DIRECT_DEVICE_OPEN        0x00000800
+#define FO_FILE_MODIFIED             0x00001000
+#define FO_FILE_SIZE_CHANGED         0x00002000
+#define FO_CLEANUP_COMPLETE          0x00004000
+#define FO_TEMPORARY_FILE            0x00008000
+#define FO_DELETE_ON_CLOSE           0x00010000
+#define FO_OPENED_CASE_SENSITIVE     0x00020000
+#define FO_HANDLE_CREATED            0x00040000
+#define FO_FILE_FAST_IO_READ         0x00080000
+#define FO_RANDOM_ACCESS             0x00100000
+#define FO_FILE_OPEN_CANCELLED       0x00200000
+#define FO_VOLUME_OPEN               0x00400000
+#define FO_REMOTE_ORIGIN             0x01000000
+#define FO_DISALLOW_EXCLUSIVE        0x02000000
+#define FO_SKIP_COMPLETION_PORT      0x02000000
+#define FO_SKIP_SET_EVENT            0x04000000
+#define FO_SKIP_SET_FAST_IO          0x08000000
+#define FO_FLAGS_VALID_ONLY_DURING_CREATE FO_DISALLOW_EXCLUSIVE
+
+#define FILE_SHARE_READ                   0x00000001
+#define FILE_SHARE_WRITE                  0x00000002
+#define FILE_SHARE_DELETE                 0x00000004
+#define FILE_SHARE_VALID_FLAGS            0x00000007
+
+/* LDR Module Flags */
+#define LDRP_DRIVER_LOADED                  0x00000001
+#define LDRP_SYSTEM_MAPPED                  0x00000002
+
+typedef struct _GENERIC_FCB {
+    PVOID Vcb;
+    ULONG FirstCluster;
+    ULONG FileSize;
+} GENERIC_FCB, *PGENERIC_FCB;
+
+extern BOOLEAN ObioPnpSystemInit;
+
+#define DN_PROB_NOT_CONFIGURED              0x00000001
+#define DN_PROB_DEVLOADER_FAILED            0x00000002
+#define DN_PROB_OUT_OF_MEMORY               0x00000003
+#define DN_PROB_ENTRY_IS_WRONG_TYPE         0x00000004
+#define DN_PROB_LACKED_ARBITRATOR           0x00000005
+#define DN_PROB_BOOT_CONFIG_CONFLICT        0x00000006
+#define DN_PROB_FAILED_FILTER               0x00000007
+#define DN_PROB_DEVLOADER_NOT_FOUND         0x00000008
+#define DN_PROB_INVALID_DATA                0x00000009
+#define DN_PROB_FAILED_START                0x0000000A
+#define DN_PROB_LIAR                        0x0000000B
+#define DN_PROB_NORMAL_CONFLICT             0x0000000C
+#define DN_PROB_NOT_VERIFIED                0x0000000D
+#define DN_PROB_NEED_RESTART                0x0000000E
+#define DN_PROB_REENUMERATION               0x0000000F
+#define DN_PROB_PARTIAL_LOG_CONF            0x00000010
+#define DN_PROB_UNKNOWN_RESOURCE            0x00000011
+#define DN_PROB_REINSTALL                   0x00000012
+#define DN_PROB_REGISTRY                    0x00000013
+#define DN_PROB_VXDLDR                      0x00000014
+#define DN_PROB_WILL_BE_REMOVED             0x00000015
+#define DN_PROB_DISABLED                    0x00000016
+#define DN_PROB_DEVLOADER_NOT_READY         0x00000017
+#define DN_PROB_DEVICE_NOT_THERE            0x00000018
+#define DN_PROB_MOVED                       0x00000019
+#define DN_PROB_TOO_EARLY                   0x0000001A
+#define DN_PROB_NO_VALID_LOG_CONF           0x0000001B
+#define DN_PROB_FAILED_INSTALL              0x0000001C
+#define DN_PROB_HARDWARE_DISABLED           0x0000001D
+#define DN_PROB_CANT_SHARE_IRQ              0x0000001E
+#define DN_PROB_FAILED_ADD                  0x0000001F
+#define DN_PROB_DISABLED_SERVICE            0x00000020
+#define DN_PROB_TRANSLATION_FAILED          0x00000021
+#define DN_PROB_NO_SOFTCONFIG               0x00000022
+#define DN_PROB_BIOS_TABLE                  0x00000023
+#define DN_PROB_IRQ_TRANSLATION_FAILED      0x00000024
+#define DN_PROB_FAILED_DRIVER_ENTRY         0x00000025
+#define DN_PROB_DRIVER_FAILED_PRIOR_UNLOAD  0x00000026
+#define DN_PROB_DRIVER_FAILED_LOAD          0x00000027
+#define DN_PROB_DRIVER_SERVICE_KEY_INVALID  0x00000028
+#define DN_PROB_LEGACY_SERVICE_NO_DEVICES   0x00000029
+#define DN_PROB_DUPLICATE_DEVICE            0x0000002A
+#define DN_PROB_FAILED_POST_START           0x0000002B
+#define DN_PROB_HALTED                      0x0000002C
+#define DN_PROB_PHANTOM                     0x0000002D
+#define DN_PROB_SYSTEM_SHUTDOWN             0x0000002E
+#define DN_PROB_HELD_FOR_EJECT              0x0000002F
+#define DN_PROB_DRIVER_BLOCKED              0x00000030
+#define DN_PROB_REGISTRY_TOO_LARGE          0x00000031
+#define DN_PROB_SETPROPERTIES_FAILED        0x00000032
+#define DN_PROB_WAITING_ON_DEPENDENCY       0x00000033
+#define DN_PROB_UNSIGNED_DRIVER             0x00000034
+
+typedef struct _PARTITION_INFORMATION
+{
+    LARGE_INTEGER  StartingOffset;
+    LARGE_INTEGER  PartitionLength;
+    ULONG  HiddenSectors;
+    ULONG  PartitionNumber;
+    UCHAR  PartitionType;
+    BOOLEAN  BootIndicator;
+    BOOLEAN  RecognizedPartition;
+    BOOLEAN  RewritePartition;
+} PARTITION_INFORMATION, *PPARTITION_INFORMATION;
+
+typedef struct _STARTING_LCN_INPUT_BUFFER {
+    LARGE_INTEGER StartingLcn;
+} STARTING_LCN_INPUT_BUFFER, *PSTARTING_LCN_INPUT_BUFFER;
+
+typedef struct _STARTING_VCN_INPUT_BUFFER {
+    LARGE_INTEGER StartingVcn;
+} STARTING_VCN_INPUT_BUFFER, *PSTARTING_VCN_INPUT_BUFFER;
+
+typedef struct _RETRIEVAL_POINTERS_BUFFER {
+    ULONG ExtentCount;
+    LARGE_INTEGER StartingVcn;
+    struct {
+        LARGE_INTEGER NextVcn;
+        LARGE_INTEGER Lcn;
+    } Extents[1];
+} RETRIEVAL_POINTERS_BUFFER, *PRETRIEVAL_POINTERS_BUFFER;
+
+#define IO_METHOD_FROM_CTL_CODE(c)                      (c & 0x00000003)
+
+typedef enum _IOP_TRANSFER_TYPE
+{
+    IopReadTransfer,
+    IopWriteTransfer,
+    IopOtherTransfer
+} IOP_TRANSFER_TYPE, *PIOP_TRANSFER_TYPE;
+
+typedef ULONG 
+(VEAPI IO_DUMP_WRITE_ROUTINE)
+(PVOID Data, ULONG LBA, ULONG Length);
+typedef IO_DUMP_WRITE_ROUTINE *PIO_DUMP_WRITE_ROUTINE;
+
+typedef VOID (VEAPI IO_DUMP_FLUSH_ROUTINE)(VOID);
+typedef IO_DUMP_FLUSH_ROUTINE *PIO_DUMP_FLUSH_ROUTINE;
+
+typedef struct _IO_DUMP_ROUTINE{
+    PIO_DUMP_FLUSH_ROUTINE Flush;
+    PIO_DUMP_WRITE_ROUTINE Write;
+} IO_DUMP_ROUTINE, *PIO_DUMP_ROUTINE;
+
+#define OIP_GET_CREATE_DISPOSITION(Options) (((Options) >> 24) & 0xFF)
+#define OIP_GET_CREATE_OPTIONS(Options)     ((Options) & 0x00FFFFFF)
+
+#define FILE_SUPERSEDED                   0x00000000
+#define FILE_OPENED                       0x00000001
+#define FILE_CREATED                      0x00000002
+#define FILE_OVERWRITTEN                  0x00000003
+#define FILE_EXISTS                       0x00000004
+#define FILE_DOES_NOT_EXIST               0x00000005
+
 
 /* EOF */

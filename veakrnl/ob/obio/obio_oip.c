@@ -57,6 +57,7 @@ ObioCompleteRequest(
 {
     POIP_STACK Stack;
     VEASTATUS Status;
+    UCHAR RequestMajor = 0; // PENYELAMAT MAJOR FUNCTION
 
     if (!Oip) {
         KsBugCheckEx(OIP_STACK_CORRUPTION, 0, 0, 0, 0);
@@ -64,6 +65,11 @@ ObioCompleteRequest(
 
     if (Oip->CurrentLocation > Oip->StackCount + 1) {
         KsBugCheckEx(OIP_MULTIPLE_COMPLETE_REQUESTS, (ULONG_PTR)Oip, Oip->CurrentLocation, 0, 0);
+    }
+
+    // CATAT MAJOR FUNCTION SEKARANG JUGA (SEBELUM LOOP!)
+    if (Oip->CurrentLocation <= Oip->StackCount) {
+        RequestMajor = Oip->CurrentStackLocation->MajorFunction;
     }
 
     while(Oip->CurrentLocation <= Oip->StackCount)
@@ -81,15 +87,31 @@ ObioCompleteRequest(
             Status = Routine(Stack->TargetObject, Oip, Stack->Context);
 
             if (Status == STATUS_MORE_PROCESSING_REQUIRED) {
-                // STOP UNWINDING! Biarkan OIP tertahan di layer ini.
-                // Driver tersebut bertanggung jawab memanggil ObioCompleteRequest 
-                // lagi nanti kalau tugas lanjutannya udah beneran beres.
                 return; 
             }
         }
 
         Oip->CurrentLocation++;
         Oip->CurrentStackLocation++;
+    }
+
+    // FIX COPY-BACK BUFFER
+    // Menggunakan RequestMajor yang sudah di-backup dari stack yang valid
+    if ((Oip->Flags & OIP_INPUT_OPERATION) && 
+        (Oip->Flags & OIP_BUFFERED_IO) && 
+        Oip->UserBuffer != NULL && 
+        Oip->AssociatedOip.SystemBuffer != NULL && 
+        Oip->StatusInformation.Information > 0)
+    {
+        if (RequestMajor == OIP_MJ_DEVICE_CONTROL || 
+            RequestMajor == OIP_MJ_FILE_SYSTEM_CONTROL)
+        {
+            RtlCopyMemory(
+                Oip->UserBuffer,
+                Oip->AssociatedOip.SystemBuffer,
+                Oip->StatusInformation.Information
+            );
+        }
     }
 
     if (Oip->Flags & OIP_DEALLOCATE_ON_COMPLETION) {
@@ -115,7 +137,6 @@ ObioCompleteRequest(
     }
 
     if (Oip->Flags & OIP_DEALLOCATE_ON_COMPLETION) {
-        DPRINT("[OBIO] Oip will be deallocated on Completion\n");
         ObioFreeOip(Oip);
     }
 }
@@ -136,7 +157,7 @@ ObioSendWriteRequest(
     POIP Oip = ObioAllocateOip(1);
     if(!Oip)
     {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     POIP_STACK Stack = ObioGetNextOipStackLocation(Oip);
@@ -145,7 +166,7 @@ ObioSendWriteRequest(
     if(!Oip->AssociatedOip.SystemBuffer)
     {
         //ObioFreeOip(Oip);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     Oip->SystemTag = 'OIPP';
     RtlCopyMemory(Oip->AssociatedOip.SystemBuffer, DataBuffer, DataLength);
@@ -161,7 +182,7 @@ ObioSendWriteRequest(
     ObioFreeOip(Oip);
 
     if (!Handled) {
-        return STATUS_UNSUCCESSFULL;
+        return STATUS_UNSUCCESSFUL;
     }
 
     return FinalStatus;
@@ -185,7 +206,7 @@ ObioSendReadRequest(
     // 1. Alokasi OIP dengan 1 layer stack
     POIP Oip = ObioAllocateOip(1);
     if (!Oip) {
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     // 2. Ambil next stack
@@ -195,7 +216,7 @@ ObioSendReadRequest(
     Oip->AssociatedOip.SystemBuffer = UlAllocatePoolWithTag(NonPagedPool, DataLength, 'OIPP');
     if (!Oip->AssociatedOip.SystemBuffer) {
         ObioFreeOip(Oip);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     Oip->SystemTag = 'OIPP';
 
@@ -225,7 +246,7 @@ ObioSendReadRequest(
     ObioFreeOip(Oip);
 
     if (!Handled) {
-        return STATUS_UNSUCCESSFULL;
+        return STATUS_UNSUCCESSFUL;
     }
 
     return FinalStatus;
@@ -539,7 +560,6 @@ ObioFreeOip(
         Oip->AssociatedOip.SystemBuffer = NULL;
     }
 
-    DPRINT("[OBIO] Calling ObioFreeOip for Oip at %p\n", Oip);
     UlFreePoolWithTag(Oip, OB_OIP_TAG); 
 }
 
@@ -572,7 +592,7 @@ ObioSynchronusCallByStack
     if (!Oip)
     {
         ObDereferenceObject(DeviceObject);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     /* Default parameter */
