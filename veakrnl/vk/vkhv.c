@@ -28,14 +28,14 @@ HvAllocateVolatileCell(
     if(!Hive || Hive->VolatileBinCount >= MAX_VOLATILE_BINS)
     {
         KeLowerIrql(OldIRQL);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     // Allocate New Bin
     PVOID NewBin = (PVOID)UlAllocatePoolWithTag(NonPagedPool, VK_BIN_SIZE, 'VkHv');
     if(!NewBin) {
         KeLowerIrql(OldIRQL);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     
     // Zero it's memory, fill the information with BIN1
@@ -72,7 +72,7 @@ HvAllocateStableCell(IN PVK_HIVE Hive)
     if (!Hive || Hive->StableBinCount >= MAX_STABLE_BINS)
     {
         KeLowerIrql(OldIRQL);
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     // Should be OK, right?
@@ -81,7 +81,7 @@ HvAllocateStableCell(IN PVK_HIVE Hive)
     {
         KeLowerIrql(OldIRQL);
         KdPrintf("[Vk] ERROR | Failed to allocate new Stable Bin!\n");
-        return STATUS_INSUFFICIENT_MEMORY;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     RtlZeroMemory(NewBinBase, VK_BIN_SIZE);
