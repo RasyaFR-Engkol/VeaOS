@@ -1,3 +1,5 @@
+#pragma once
+
 // VEAOS GCC INTRIN
 //
 // Feel Free to use. This is FREE

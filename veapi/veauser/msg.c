@@ -22,7 +22,7 @@ ULONG       MsgQueueTail = 0;
 KSPIN_LOCK  MsgQueueLock;
 BOOLEAN MsgQueueReady = FALSE;
 
-static VOID
+VOID
 MsgEnqueueMessage(
     IN HWND      hWnd,
     IN ULONG     Message,

@@ -62,13 +62,18 @@ RiSyscallDispatcherHandler(
     PKTRAP_FRAME OldTrapFrame;
     VEASTATUS Status = STATUS_SUCCESS;
     ULONG SyscallNumber;
-    UCHAR ParamBytes;
+    ULONG TableIndex;
+    ULONG ServiceIndex;
+    UCHAR ParamBytes = 0;
     ULONG_PTR TargetFunction = 0;
     PULONG_PTR UserArgs;
+    PKSERVICE_TABLE_DESCRIPTOR Descriptor = NULL;
 
     UNREFERENCED_PARAMETER(Context);
 
     SyscallNumber = TrapFrame->Eax;
+    TableIndex    = (SyscallNumber >> 12) & 0x3;
+    ServiceIndex  = SyscallNumber & 0xFFF;
 
     OldTrapFrame = CurrentThread->TrapFrame;
     OldPreviousMode = CurrentThread->PreviousMode;
@@ -86,28 +91,42 @@ RiSyscallDispatcherHandler(
         UserArgs = (PULONG_PTR)TrapFrame->Edx;
     }
 
-    if (SyscallNumber >= MainNumberOfSysCalls)
+    /* Hanya mendukung Table 0 (veakrnl) dan Table 1 (veapi / Shadow SSDT) */
+    if (TableIndex > 1)
     {
         Status = STATUS_INVALID_SYSTEM_SERVICE;
         goto Exit;
     }
 
-    PULONG_PTR ServiceTable = (PULONG_PTR)CurrentThread->ServiceTable;
-    if ((ULONG_PTR)ServiceTable == (ULONG_PTR)KsServiceTableDescriptor)
+    if (SyscallNumber >= 0x1000)
     {
-        PKSERVICE_TABLE_DESCRIPTOR Descriptor = (PKSERVICE_TABLE_DESCRIPTOR)CurrentThread->ServiceTable;
-        TargetFunction = Descriptor[0].Base[SyscallNumber];
+        /* Syscall >= 0x1000 (TableIndex == 1): arahkan ke KsServiceTableDescriptorShadow */
+        Descriptor = &KsServiceTableDescriptorShadow[TableIndex];
+
+        /* Opsional: sinkronkan ServiceTable thread ke Shadow SSDT jika belum */
+        if ((ULONG_PTR)CurrentThread->ServiceTable == (ULONG_PTR)KsServiceTableDescriptor)
+        {
+            CurrentThread->ServiceTable = KsServiceTableDescriptorShadow;
+        }
     }
-    else if (ServiceTable != NULL)
+    else if (CurrentThread->ServiceTable != NULL)
     {
-        TargetFunction = ServiceTable[SyscallNumber];
+        Descriptor = &((PKSERVICE_TABLE_DESCRIPTOR)CurrentThread->ServiceTable)[TableIndex];
     }
     else
     {
-        TargetFunction = MainSSDT[SyscallNumber];
+        Descriptor = &KsServiceTableDescriptor[TableIndex];
     }
 
-    ParamBytes = MainSSPT[SyscallNumber];
+    /* Pastikan descriptor valid dan ServiceIndex tidak melewati batas tabel terkait */
+    if (!Descriptor || !Descriptor->Base || !Descriptor->Number || ServiceIndex >= Descriptor->Limit)
+    {
+        Status = STATUS_INVALID_SYSTEM_SERVICE;
+        goto Exit;
+    }
+
+    TargetFunction = Descriptor->Base[ServiceIndex];
+    ParamBytes     = Descriptor->Number[ServiceIndex];
 
     if (!TargetFunction || TargetFunction < 0xC0000000)
     {
@@ -116,6 +135,12 @@ RiSyscallDispatcherHandler(
     }
 
     ULONG_PTR KernelArgs[16];
+
+    if (ParamBytes > sizeof(KernelArgs))
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto Exit;
+    }
 
     if (ParamBytes > 0)
     {
@@ -140,7 +165,7 @@ RiSyscallDispatcherHandler(
         _VEA_END
     }
 
-    // Eksekusi Syscall via Dynamic ASM Trampoline!
+    /* Eksekusi Syscall via Dynamic ASM Trampoline */
     Status = KsiSystemCallTrampoline((PVOID)TargetFunction, KernelArgs, ParamBytes);
 
 Exit:

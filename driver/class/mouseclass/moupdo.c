@@ -19,6 +19,43 @@ static volatile LONG MouNextUnitId = 0;
 
 VEASTATUS VEAPI MouArmPortRead(IN PMOUSE_DEVICE_EXTENSION DevExt);
 
+static
+ULONG_PTR
+MouAcquireDeviceLock(
+    IN PKSPIN_LOCK SpinLock
+)
+{
+    ULONG_PTR Flags;
+    KIRQL DummyIrql;
+
+    __asm__ __volatile__(
+        "pushf\n\t"
+        "pop %0\n\t"
+        "cli"
+        : "=r"(Flags)
+        :
+        : "memory"
+    );
+
+    KsAcquireSpinLock(SpinLock, &DummyIrql);
+    return Flags;
+}
+
+static
+VOID
+MouReleaseDeviceLock(
+    IN PKSPIN_LOCK SpinLock,
+    IN ULONG_PTR   SavedFlags
+)
+{
+    KsReleaseSpinLock(SpinLock, PASSIVE_LEVEL);
+
+    if (SavedFlags & 0x200)
+    {
+        __asm__ __volatile__("sti" ::: "memory");
+    }
+}
+
 VOID
 VEAPI
 MouInputDpcRoutine(
@@ -169,14 +206,16 @@ MouPortReadCompletion(
     if (VEA_SUCCESS(Oip->StatusInformation.Status) &&
         Oip->StatusInformation.Information >= sizeof(MOUSE_INPUT_DATA))
     {
-        KIRQL OldIrql;
-
-        KsAcquireSpinLock(&DevExt->PdoData.MouseLock, &OldIrql);
+        ULONG_PTR LockFlags = MouAcquireDeviceLock(&DevExt->PdoData.MouseLock);
         MouPushInputDataLocked(DevExt, &DevExt->PdoData.RawPacket);
-        KsReleaseSpinLock(&DevExt->PdoData.MouseLock, OldIrql);
+        MouReleaseDeviceLock(&DevExt->PdoData.MouseLock, LockFlags);
     }
 
-    KsInsertQueueDpc(&DevExt->PdoData.InputDpc, NULL, NULL);
+    if (Oip->StatusInformation.Status != STATUS_CANCELLED)
+    {
+        KsInsertQueueDpc(&DevExt->PdoData.InputDpc, NULL, NULL);
+    }
+
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
 

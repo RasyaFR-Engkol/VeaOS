@@ -1057,4 +1057,250 @@ WndAdoptOrphanWindowsToDesktop(
     KsReleaseSpinLock(&gWindowListLock, OldIrql);
 }
 
+PWND_OBJECT
+VEAPI
+WndHitTestPoint(
+    IN  LONG  ScreenX,
+    IN  LONG  ScreenY,
+    OUT PLONG OutClientX,
+    OUT PLONG OutClientY
+)
+{
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+    PWND_OBJECT HitWnd = NULL;
+    LONG HitOriginX = 0;
+    LONG HitOriginY = 0;
+
+    KsAcquireSpinLock(&gWindowListLock, &OldIrql);
+    for (Entry = gWindowListHead.Blink; Entry != &gWindowListHead; Entry = Entry->Blink)
+    {
+        PWND_OBJECT Wnd = CONTAINING_RECORD(Entry, WND_OBJECT, GlobalListEntry);
+        if (Wnd->Magic != WND_OBJECT_MAGIC || !Wnd->Used || !(Wnd->Style & WS_VISIBLE))
+        {
+            continue;
+        }
+
+        LONG Left, Top, Right, Bottom;
+        if (Wnd->Style & WS_CHILD)
+        {
+            WndGetClientOriginOnScreen(Wnd, &Left, &Top);
+            Right  = Left + (LONG)Wnd->Width;
+            Bottom = Top  + (LONG)Wnd->Height;
+        }
+        else
+        {
+            Left   = Wnd->X;
+            Top    = Wnd->Y;
+            Right  = Wnd->X + (LONG)Wnd->Width;
+            Bottom = Wnd->Y + (LONG)Wnd->Height;
+        }
+
+        if (ScreenX >= Left && ScreenX < Right && ScreenY >= Top && ScreenY < Bottom)
+        {
+            HitWnd = Wnd;
+            if (Wnd->Style & WS_CHILD)
+            {
+                HitOriginX = Left;
+                HitOriginY = Top;
+            }
+            else
+            {
+                HitOriginX = Wnd->X + WND_BORDER_WIDTH;
+                HitOriginY = Wnd->Y + WND_TITLEBAR_HEIGHT;
+            }
+            break;
+        }
+    }
+    KsReleaseSpinLock(&gWindowListLock, OldIrql);
+
+    if (HitWnd)
+    {
+        *OutClientX = ScreenX - HitOriginX;
+        *OutClientY = ScreenY - HitOriginY;
+    }
+
+    return HitWnd;
+}
+
+PWND_OBJECT
+WndGetTopLevelAncestor(
+    IN PWND_OBJECT Wnd
+)
+{
+    PWND_OBJECT Cur = Wnd;
+    while (Cur && (Cur->Style & WS_CHILD) && Cur->hWndParent != NULL)
+    {
+        PWND_OBJECT Parent = WndLookupHandle(Cur->hWndParent);
+        if (!Parent) break;
+        Cur = Parent;
+    }
+    return Cur;
+}
+
+VOID
+VEAPI
+UserProcessMousePacket(
+    IN PMOUSE_INPUT_DATA Mou
+)
+{
+    LONG ScreenW;
+    LONG ScreenH;
+    BOOLEAN Moved = FALSE;
+
+    if (!Mou)
+    {
+        return;
+    }
+
+    ScreenW = (LONG)GpPrimaryDisplay.PrimarySurface.Width;
+    ScreenH = (LONG)GpPrimaryDisplay.PrimarySurface.Height;
+    if (ScreenW <= 0) ScreenW = 800;
+    if (ScreenH <= 0) ScreenH = 600;
+
+    if (Mou->Flags & MOUSE_MOVE_ABSOLUTE)
+    {
+        gCursorX = (Mou->LastX * ScreenW) / 65535;
+        gCursorY = (Mou->LastY * ScreenH) / 65535;
+        Moved = TRUE;
+    }
+    else if (Mou->LastX != 0 || Mou->LastY != 0)
+    {
+        gCursorX += Mou->LastX;
+        gCursorY += Mou->LastY; /* Jika driver PS/2 kamu masih inverted Y, ganti jadi -= */
+        Moved = TRUE;
+    }
+
+    /* Jepit koordinat agar kursor tidak keluar batas layar */
+    if (gCursorX < 0) gCursorX = 0;
+    if (gCursorY < 0) gCursorY = 0;
+    if (gCursorX >= ScreenW) gCursorX = ScreenW - 1;
+    if (gCursorY >= ScreenH) gCursorY = ScreenH - 1;
+
+    /* Pindahkan gambar kursor di layar (panggil EngMovePointer jika sudah siap) */
+    if (Moved)
+    {
+        /* EngMovePointer(gCursorX, gCursorY); */
+    }
+
+    LONG ClientX = 0;
+    LONG ClientY = 0;
+    PWND_OBJECT Target = gCaptureWindow ? WndLookupHandle(gCaptureWindow) : NULL;
+
+    if (Target)
+    {
+        if (Target->Style & WS_CHILD)
+        {
+            LONG OrigX, OrigY;
+            WndGetClientOriginOnScreen(Target, &OrigX, &OrigY);
+            ClientX = gCursorX - OrigX;
+            ClientY = gCursorY - OrigY;
+        }
+        else
+        {
+            ClientX = gCursorX - (Target->X + WND_BORDER_WIDTH);
+            ClientY = gCursorY - (Target->Y + WND_TITLEBAR_HEIGHT);
+        }
+    }
+    else
+    {
+        gCaptureWindow = NULL;
+        Target = WndHitTestPoint(gCursorX, gCursorY, &ClientX, &ClientY);
+    }
+
+    /* Tetap update status tombol global walaupun klik jatuh di luar window */
+    if (Mou->ButtonFlags & MOUSE_LEFT_BUTTON_DOWN)
+    {
+        gMouseButtonState |= MK_LBUTTON;
+        IptAsyncKeyState[VK_LBUTTON] = 0x80;
+    }
+    if (Mou->ButtonFlags & MOUSE_LEFT_BUTTON_UP)
+    {
+        gMouseButtonState &= ~MK_LBUTTON;
+        IptAsyncKeyState[VK_LBUTTON] = 0x00;
+    }
+    if (Mou->ButtonFlags & MOUSE_RIGHT_BUTTON_DOWN)
+    {
+        gMouseButtonState |= MK_RBUTTON;
+        IptAsyncKeyState[VK_RBUTTON] = 0x80;
+    }
+    if (Mou->ButtonFlags & MOUSE_RIGHT_BUTTON_UP)
+    {
+        gMouseButtonState &= ~MK_RBUTTON;
+        IptAsyncKeyState[VK_RBUTTON] = 0x00;
+    }
+    if (Mou->ButtonFlags & MOUSE_MIDDLE_BUTTON_DOWN)
+    {
+        gMouseButtonState |= MK_MBUTTON;
+        IptAsyncKeyState[VK_MBUTTON] = 0x80;
+    }
+    if (Mou->ButtonFlags & MOUSE_MIDDLE_BUTTON_UP)
+    {
+        gMouseButtonState &= ~MK_MBUTTON;
+        IptAsyncKeyState[VK_MBUTTON] = 0x00;
+    }
+
+    if (!Target)
+    {
+        return;
+    }
+
+    /* Pack koordinat signed 16-bit (penting saat ClientX/Y negatif ketika drag keluar window) */
+    LONG_PTR ClientLParam = ((LONG_PTR)(SHORT)ClientY << 16) | ((ULONG_PTR)(USHORT)ClientX);
+
+    /* 3. Kirim pesan gerakan mouse */
+    if (Moved)
+    {
+        MsgPostMouseMessage(Target->hWnd, WM_MOUSEMOVE, gMouseButtonState, ClientLParam);
+    }
+
+    /* 4. Kirim pesan klik & pindahkan fokus ke window/control yang diklik */
+    if (Mou->ButtonFlags & MOUSE_LEFT_BUTTON_DOWN)
+    {
+        if (GpActiveDesktop)
+        {
+            KIRQL OldIrql;
+            KsAcquireSpinLock(&GpActiveDesktop->Lock, &OldIrql);
+            GpActiveDesktop->FocusWindow      = Target;
+            GpActiveDesktop->ForegroundWindow = WndGetTopLevelAncestor(Target);
+            KsReleaseSpinLock(&GpActiveDesktop->Lock, OldIrql);
+        }
+        IptFocusWindow = Target->hWnd;
+
+        MsgPostMouseMessage(Target->hWnd, WM_LBUTTONDOWN, gMouseButtonState, ClientLParam);
+    }
+
+    if (Mou->ButtonFlags & MOUSE_LEFT_BUTTON_UP)
+    {
+        MsgPostMouseMessage(Target->hWnd, WM_LBUTTONUP, gMouseButtonState, ClientLParam);
+    }
+
+    if (Mou->ButtonFlags & MOUSE_RIGHT_BUTTON_DOWN)
+    {
+        MsgPostMouseMessage(Target->hWnd, WM_RBUTTONDOWN, gMouseButtonState, ClientLParam);
+    }
+
+    if (Mou->ButtonFlags & MOUSE_RIGHT_BUTTON_UP)
+    {
+        MsgPostMouseMessage(Target->hWnd, WM_RBUTTONUP, gMouseButtonState, ClientLParam);
+    }
+
+    if (Mou->ButtonFlags & MOUSE_MIDDLE_BUTTON_DOWN)
+    {
+        MsgPostMouseMessage(Target->hWnd, WM_MBUTTONDOWN, gMouseButtonState, ClientLParam);
+    }
+
+    if (Mou->ButtonFlags & MOUSE_MIDDLE_BUTTON_UP)
+    {
+        MsgPostMouseMessage(Target->hWnd, WM_MBUTTONUP, gMouseButtonState, ClientLParam);
+    }
+
+    if (Mou->ButtonFlags & MOUSE_WHEEL)
+    {
+        ULONG_PTR WheelWParam = ((ULONG_PTR)(USHORT)Mou->ButtonData << 16) | gMouseButtonState;
+        LONG_PTR  ScreenLParam = ((LONG_PTR)(SHORT)gCursorY << 16) | ((ULONG_PTR)(USHORT)gCursorX);
+        MsgPostMouseMessage(Target->hWnd, WM_MOUSEWHEEL, WheelWParam, ScreenLParam);
+    }
+}
+
 /* EOF */

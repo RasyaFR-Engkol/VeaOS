@@ -87,3 +87,28 @@
 #define MAPVK_VK_TO_CHAR    2
 #define MAPVK_VSC_TO_VK_EX  3
 #define MAPVK_VK_TO_VSC_EX  4
+
+/* Mouse Button */
+
+#ifndef VK_LBUTTON
+#define VK_LBUTTON                  0x01
+#define VK_RBUTTON                  0x02
+#define VK_MBUTTON                  0x04
+#endif
+
+#ifndef MK_LBUTTON
+#define MK_LBUTTON                  0x0001
+#define MK_RBUTTON                  0x0002
+#define MK_MBUTTON                  0x0010
+#endif
+
+#ifndef WM_MOUSEMOVE
+#define WM_MOUSEMOVE                0x0200
+#define WM_LBUTTONDOWN              0x0201
+#define WM_LBUTTONUP                0x0202
+#define WM_RBUTTONDOWN              0x0204
+#define WM_RBUTTONUP                0x0205
+#define WM_MBUTTONDOWN              0x0207
+#define WM_MBUTTONUP                0x0208
+#define WM_MOUSEWHEEL               0x020A
+#endif

@@ -80,6 +80,16 @@ DriverEntry(
         NULL
     );
 
+    Status = PtCreateSystemThread(
+        &hRitThread,
+        0,
+        NULL,
+        NULL,
+        NULL,
+        IptMouseRawInputThread,
+        NULL
+    );
+
     if (!VEA_SUCCESS(Status))
     {
         KdPrintf("[VEAPI] Gagal membuat Raw Input Thread: 0x%08X\n", Status);

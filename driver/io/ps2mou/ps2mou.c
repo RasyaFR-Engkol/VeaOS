@@ -16,6 +16,44 @@
  * --------------------------------------------------------------------- */
 
 static
+ULONG_PTR
+PS2MouAcquireDeviceLock(
+    IN  PKSPIN_LOCK Lock,
+    OUT PKIRQL      OldIrql
+)
+{
+    ULONG_PTR Flags;
+
+    __asm__ __volatile__(
+        "pushf\n\t"
+        "pop %0\n\t"
+        "cli"
+        : "=r"(Flags)
+        :
+        : "memory"
+    );
+
+    KsAcquireSpinLock(Lock, OldIrql);
+    return Flags;
+}
+
+static
+VOID
+PS2MouReleaseDeviceLock(
+    IN PKSPIN_LOCK Lock,
+    IN KIRQL       OldIrql,
+    IN ULONG_PTR   Flags
+)
+{
+    KsReleaseSpinLock(Lock, OldIrql);
+
+    if (Flags & 0x200)
+    {
+        __asm__ __volatile__("sti" ::: "memory");
+    }
+}
+
+static
 UCHAR
 PS2MouReadPort(IN USHORT Port)
 {
@@ -36,9 +74,7 @@ static
 BOOLEAN
 PS2MouWaitForInputBufferEmpty(IN ULONG CommandPort)
 {
-    ULONG Retry;
-
-    for (Retry = 0; Retry < PS2MOU_IO_TIMEOUT; Retry++)
+    for (ULONG Retry = 0; Retry < PS2MOU_POLL_LIMIT; Retry++)
     {
         if (!(PS2MouReadPort((USHORT)CommandPort) & 0x02))
         {
@@ -53,9 +89,7 @@ static
 BOOLEAN
 PS2MouWaitForOutputBufferFull(IN ULONG CommandPort)
 {
-    ULONG Retry;
-
-    for (Retry = 0; Retry < PS2MOU_IO_TIMEOUT; Retry++)
+    for (ULONG Retry = 0; Retry < PS2MOU_POLL_LIMIT; Retry++)
     {
         if (PS2MouReadPort((USHORT)CommandPort) & 0x01)
         {
@@ -67,6 +101,23 @@ PS2MouWaitForOutputBufferFull(IN ULONG CommandPort)
 }
 
 static
+VOID
+PS2MouFlushOutputBuffer(
+    IN ULONG DataPort,
+    IN ULONG CommandPort
+)
+{
+    for (ULONG Retry = 0; Retry < 64; Retry++)
+    {
+        if (!(PS2MouReadPort((USHORT)CommandPort) & 0x01))
+        {
+            break;
+        }
+        (VOID)PS2MouReadPort((USHORT)DataPort);
+    }
+}
+
+static
 BOOLEAN
 PS2MouSendMouseCommand(
     IN ULONG DataPort,
@@ -74,28 +125,50 @@ PS2MouSendMouseCommand(
     IN UCHAR Command
 )
 {
-    if (!PS2MouWaitForInputBufferEmpty(CommandPort))
+    for (ULONG Attempt = 0; Attempt < 3; Attempt++)
     {
+        PS2MouFlushOutputBuffer(DataPort, CommandPort);
+
+        if (!PS2MouWaitForInputBufferEmpty(CommandPort))
+        {
+            DPRINT("PS2MOU: Timeout tunggu IBF sebelum 0xD4 (cmd=0x%02X)\n", Command);
+            return FALSE;
+        }
+
+        /* 0xD4: Arahkan byte berikutnya di DataPort ke PS/2 Auxiliary (Mouse) */
+        PS2MouWritePort((USHORT)CommandPort, 0xD4);
+
+        if (!PS2MouWaitForInputBufferEmpty(CommandPort))
+        {
+            DPRINT("PS2MOU: Timeout tunggu IBF sebelum cmd=0x%02X\n", Command);
+            return FALSE;
+        }
+
+        PS2MouWritePort((USHORT)DataPort, Command);
+
+        if (!PS2MouWaitForOutputBufferFull(CommandPort))
+        {
+            DPRINT("PS2MOU: Timeout tunggu ACK untuk cmd=0x%02X\n", Command);
+            return FALSE;
+        }
+
+        UCHAR Resp = PS2MouReadPort((USHORT)DataPort);
+        if (Resp == 0xFA)
+        {
+            return TRUE;
+        }
+
+        if (Resp == 0xFE)
+        {
+            /* Device minta Resend */
+            continue;
+        }
+
+        DPRINT("PS2MOU: Unexpected resp 0x%02X untuk cmd=0x%02X\n", Resp, Command);
         return FALSE;
     }
 
-    /* 0xD4: Arahkan byte berikutnya di DataPort ke PS/2 Auxiliary (Mouse) */
-    PS2MouWritePort((USHORT)CommandPort, 0xD4);
-
-    if (!PS2MouWaitForInputBufferEmpty(CommandPort))
-    {
-        return FALSE;
-    }
-
-    PS2MouWritePort((USHORT)DataPort, Command);
-
-    if (!PS2MouWaitForOutputBufferFull(CommandPort))
-    {
-        return FALSE;
-    }
-
-    /* ACK dari device PS/2 adalah 0xFA */
-    return (PS2MouReadPort((USHORT)DataPort) == 0xFA);
+    return FALSE;
 }
 
 static
@@ -164,56 +237,52 @@ PS2MouInitializeController(IN PPS2MOU_DEVICE_EXTENSION Extension)
 {
     ULONG DataPort = Extension->DataPort;
     ULONG CommandPort = Extension->CommandPort;
-    ULONG Retry;
-    UCHAR Status;
-    UCHAR Config;
+    UCHAR OrigConfig;
+    UCHAR WorkConfig;
+    BOOLEAN KbdWasEnabled;
 
-    /* 1. Kuras sisa output buffer */
-    for (Retry = 0; Retry < PS2MOU_IO_TIMEOUT; Retry++)
-    {
-        Status = PS2MouReadPort((USHORT)CommandPort);
-        if (!(Status & 0x01))
-        {
-            break;
-        }
-        (VOID)PS2MouReadPort((USHORT)DataPort);
-    }
+    /* 1. Disable sementara Port 1 (Keyboard) & Port 2 (Mouse) agar tidak tabrakan di 0x60 */
+    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) return FALSE;
+    PS2MouWritePort((USHORT)CommandPort, 0xAD);
 
-    /* 2. Enable Second PS/2 Port (Auxiliary / Mouse) */
-    if (!PS2MouWaitForInputBufferEmpty(CommandPort))
-    {
-        return FALSE;
-    }
-    PS2MouWritePort((USHORT)CommandPort, 0xA8);
+    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) return FALSE;
+    PS2MouWritePort((USHORT)CommandPort, 0xA7);
 
-    /* 3. Baca 8042 Configuration Byte (0x20), aktifkan IRQ12 & clock port 2 */
-    if (!PS2MouWaitForInputBufferEmpty(CommandPort))
-    {
-        return FALSE;
-    }
+    PS2MouFlushOutputBuffer(DataPort, CommandPort);
+
+    /* 2. Baca 8042 Controller Configuration Byte (0x20) */
+    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) return FALSE;
     PS2MouWritePort((USHORT)CommandPort, 0x20);
+
     if (!PS2MouWaitForOutputBufferFull(CommandPort))
     {
+        DPRINT("PS2MOU: Gagal baca i8042 config byte\n");
         return FALSE;
     }
-    Config = PS2MouReadPort((USHORT)DataPort);
-    Config |= 0x02;   /* Enable IRQ12 (Auxiliary Interrupt) */
-    Config &= ~0x20;  /* Enable Port 2 Clock */
+    OrigConfig = PS2MouReadPort((USHORT)DataPort);
+    KbdWasEnabled = ((OrigConfig & 0x10) == 0);
 
-    if (!PS2MouWaitForInputBufferEmpty(CommandPort))
-    {
-        return FALSE;
-    }
+    /* Matikan IRQ1 & IRQ12 selama proses probing, tapi nyalakan clock Port 2 (~0x20) */
+    WorkConfig = OrigConfig;
+    WorkConfig &= ~0x03; /* Clear bit 0 (IRQ1) & bit 1 (IRQ12) sementara */
+    WorkConfig &= ~0x20; /* Clear bit 5 (Enable Mouse Clock) */
+
+    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) return FALSE;
     PS2MouWritePort((USHORT)CommandPort, 0x60);
-    if (!PS2MouWaitForInputBufferEmpty(CommandPort))
-    {
-        return FALSE;
-    }
-    PS2MouWritePort((USHORT)DataPort, Config);
+    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) return FALSE;
+    PS2MouWritePort((USHORT)DataPort, WorkConfig);
+
+    /* 3. Aktifkan Second PS/2 Port (Auxiliary / Mouse) */
+    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) return FALSE;
+    PS2MouWritePort((USHORT)CommandPort, 0xA8);
+    PS2MouFlushOutputBuffer(DataPort, CommandPort);
 
     /* 4. Reset ke pengaturan default (0xF6) */
     if (!PS2MouSendMouseCommand(DataPort, CommandPort, 0xF6))
     {
+        DPRINT("PS2MOU: Gagal kirim 0xF6 (Set Defaults)\n");
+        if (KbdWasEnabled && PS2MouWaitForInputBufferEmpty(CommandPort))
+            PS2MouWritePort((USHORT)CommandPort, 0xAE);
         return FALSE;
     }
 
@@ -223,13 +292,38 @@ PS2MouInitializeController(IN PPS2MOU_DEVICE_EXTENSION Extension)
     Extension->PacketLength = 3;
     (VOID)PS2MouDetectIntelliMouse(Extension);
 
-    /* Set sample rate kerja ke 100 Hz agar gerak kursor responsif */
+    /* Set sample rate kerja ke 100 Hz */
     (VOID)PS2MouSetSampleRate(DataPort, CommandPort, 100);
 
     /* 6. Enable Data Reporting (0xF4) */
     if (!PS2MouSendMouseCommand(DataPort, CommandPort, 0xF4))
     {
+        DPRINT("PS2MOU: Gagal kirim 0xF4 (Enable Streaming)\n");
+        if (KbdWasEnabled && PS2MouWaitForInputBufferEmpty(CommandPort))
+            PS2MouWritePort((USHORT)CommandPort, 0xAE);
         return FALSE;
+    }
+
+    /* 7. Kembalikan Port 1 (jika sebelumnya aktif) dan aktifkan IRQ12 (+ IRQ1 jika aktif) */
+    if (KbdWasEnabled)
+    {
+        if (PS2MouWaitForInputBufferEmpty(CommandPort))
+        {
+            PS2MouWritePort((USHORT)CommandPort, 0xAE);
+        }
+    }
+
+    WorkConfig |= (OrigConfig & 0x01); /* Pertahankan IRQ1 keyboard */
+    WorkConfig |= 0x02;                /* Aktifkan IRQ12 mouse */
+    WorkConfig &= ~0x20;               /* Pastikan clock Port 2 tetap aktif */
+
+    if (PS2MouWaitForInputBufferEmpty(CommandPort))
+    {
+        PS2MouWritePort((USHORT)CommandPort, 0x60);
+        if (PS2MouWaitForInputBufferEmpty(CommandPort))
+        {
+            PS2MouWritePort((USHORT)DataPort, WorkConfig);
+        }
     }
 
     return TRUE;
@@ -266,6 +360,7 @@ PS2MouIrqHandler(IN PKINTERRUPT Interrupt, IN PVOID ServiceContext)
     CHAR WheelDelta = 0;
     MOUSE_INPUT_DATA Packet;
     POIP OipToComplete = NULL;
+    ULONG_PTR LockFlags;
 
     UNREFERENCED_PARAMETER(Interrupt);
 
@@ -385,7 +480,7 @@ PS2MouIrqHandler(IN PKINTERRUPT Interrupt, IN PVOID ServiceContext)
 
     Extension->PreviousButtons = CurrButtons;
 
-    KsAcquireSpinLock(&Extension->RingLock, &OldIrql);
+    LockFlags = PS2MouAcquireDeviceLock(&Extension->RingLock, &OldIrql);
 
     if (Extension->PendingReadOip != NULL)
     {
@@ -401,7 +496,7 @@ PS2MouIrqHandler(IN PKINTERRUPT Interrupt, IN PVOID ServiceContext)
         Extension->RingCount++;
     }
 
-    KsReleaseSpinLock(&Extension->RingLock, OldIrql);
+    PS2MouReleaseDeviceLock(&Extension->RingLock, OldIrql, LockFlags);
 
     if (OipToComplete != NULL)
     {
@@ -498,6 +593,7 @@ PS2MouStartDevice(
         RequiredOip->StatusInformation.Information;
     if (!ListEx || !ListEx->AlternativeLists)
     {
+        DPRINT("PS2MOU: STATUS NOT FOUND FOR OBIO\n");
         Status = STATUS_NOT_FOUND;
         goto cleanup;
     }
@@ -533,6 +629,7 @@ PS2MouStartDevice(
         {
             if (Desc->Interrupt.MinimumVector > Desc->Interrupt.MaximumVector)
             {
+                DPRINT("PS2MOU: IRQ INVALID\n");
                 Status = STATUS_INVALID_PARAMETER;
                 goto cleanup;
             }
@@ -555,6 +652,7 @@ PS2MouStartDevice(
 
     if (!HasDataPort || !HasCommandPort || !HasInterrupt)
     {
+        DPRINT("PS2MOU: DATA OR COMMAND PORT NOT FOUND\n");
         Status = STATUS_NOT_FOUND;
         goto cleanup;
     }
@@ -562,6 +660,7 @@ PS2MouStartDevice(
     if (!PS2MouInitializeController(Extension))
     {
         Status = STATUS_DEVICE_NOT_CONNECTED;
+        DPRINT("PS2MOU: MOUSE NOT CONNECTED\n");
         PS2MouDisableController(Extension->DataPort, Extension->CommandPort);
         goto cleanup;
     }
@@ -570,6 +669,7 @@ PS2MouStartDevice(
     if (IsrVector > 0xBF)
     {
         Status = STATUS_INVALID_PARAMETER;
+        DPRINT("PS2MOU: IRQ IS NOT VALID: 0x%x\n", IsrVector);
         PS2MouDisableController(Extension->DataPort, Extension->CommandPort);
         goto cleanup;
     }
@@ -651,6 +751,7 @@ PS2MouObjectInterruptHandler(PVOID Object, POIP Oip)
             ULONG MaxPackets;
             ULONG PacketsRead = 0;
             KIRQL OldIrql;
+            ULONG_PTR LockFlags;
 
             if (!DeviceObject || !DeviceObject->DeviceExtension)
             {
@@ -669,13 +770,13 @@ PS2MouObjectInterruptHandler(PVOID Object, POIP Oip)
                 break;
             }
 
-            KsAcquireSpinLock(&Extension->RingLock, &OldIrql);
+            LockFlags = PS2MouAcquireDeviceLock(&Extension->RingLock, &OldIrql);
 
             if (Extension->RingCount == 0)
             {
                 if (Extension->PendingReadOip != NULL)
                 {
-                    KsReleaseSpinLock(&Extension->RingLock, OldIrql);
+                    PS2MouReleaseDeviceLock(&Extension->RingLock, OldIrql, LockFlags);
                     Oip->StatusInformation.Status = STATUS_DEVICE_BUSY;
                     Oip->StatusInformation.Information = 0;
                     break;
@@ -683,7 +784,7 @@ PS2MouObjectInterruptHandler(PVOID Object, POIP Oip)
 
                 /* Tahan OIP sebagai pending sampai IRQ12 masuk */
                 Extension->PendingReadOip = Oip;
-                KsReleaseSpinLock(&Extension->RingLock, OldIrql);
+                PS2MouReleaseDeviceLock(&Extension->RingLock, OldIrql, LockFlags);
                 return STATUS_PENDING;
             }
 
@@ -698,7 +799,7 @@ PS2MouObjectInterruptHandler(PVOID Object, POIP Oip)
                 Extension->RingCount--;
             }
 
-            KsReleaseSpinLock(&Extension->RingLock, OldIrql);
+            PS2MouReleaseDeviceLock(&Extension->RingLock, OldIrql, LockFlags);
 
             Oip->StatusInformation.Status = STATUS_SUCCESS;
             Oip->StatusInformation.Information = PacketsRead * sizeof(MOUSE_INPUT_DATA);
@@ -722,11 +823,12 @@ PS2MouObjectInterruptHandler(PVOID Object, POIP Oip)
                     (PPS2MOU_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
                 KIRQL OldIrql;
                 POIP Pending;
+                ULONG_PTR LockFlags;
 
-                KsAcquireSpinLock(&Extension->RingLock, &OldIrql);
+                LockFlags = PS2MouAcquireDeviceLock(&Extension->RingLock, &OldIrql);
                 Pending = Extension->PendingReadOip;
                 Extension->PendingReadOip = NULL;
-                KsReleaseSpinLock(&Extension->RingLock, OldIrql);
+                PS2MouReleaseDeviceLock(&Extension->RingLock, OldIrql, LockFlags);
 
                 if (Pending != NULL)
                 {
@@ -827,6 +929,8 @@ PS2MouAddDevice(
     if (VEA_SUCCESS(Status))
     {
         Extension->InterfaceRegistered = TRUE;
+
+        ObioSetDeviceInterfaceState(&Extension->SymbolicLinkName, TRUE);
     }
 
     return STATUS_SUCCESS;

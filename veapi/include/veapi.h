@@ -18,6 +18,7 @@
 #include <gdi.h>
 #include <winsta.h>
 #include <userapi2.h>
+#include <psdk/veamouse.h>
 
 // FIXME
 #define MAX_INPUT_QUEUE 64
@@ -364,6 +365,49 @@ VOID
 VEAPI
 VeaUserPostQuitMessage(
     IN INT ExitCode
+);
+
+VOID
+VEAPI
+IptMouseRawInputThread(
+    IN PVOID StartContext
+);
+
+extern LONG gCursorX;
+extern LONG gCursorY;
+extern HWND gCaptureWindow;
+
+VOID
+MsgEnqueueMessage(
+    IN HWND      hWnd,
+    IN ULONG     Message,
+    IN ULONG_PTR wParam,
+    IN LONG_PTR  lParam,
+    IN BOOLEAN   ForceIfFull
+);
+
+VOID
+WndGetClientOriginOnScreen(
+    IN PWND_OBJECT Wnd,
+    OUT PLONG ScreenX,
+    OUT PLONG ScreenY
+);
+
+VOID
+VEAPI
+MsgPostMouseMessage(
+    IN HWND      hWnd,
+    IN ULONG     Message,
+    IN ULONG_PTR wParam,
+    IN LONG_PTR  lParam
+);
+
+extern ULONG  gMouseButtonState;
+
+VOID
+VEAPI
+UserProcessMousePacket(
+    IN PMOUSE_INPUT_DATA Mou
 );
 
 #endif

@@ -17,6 +17,10 @@
 
 BOOLEAN IptRITRunning = FALSE;
 UCHAR IptAsyncKeyState[256] = {0};
+LONG   gCursorX          = 320;
+LONG   gCursorY          = 240;
+ULONG  gMouseButtonState = 0;   
+HWND   gCaptureWindow    = NULL;
 
 VOID
 VEAPI
@@ -91,6 +95,79 @@ IptUserRawInputThread(
     if (hKeyboard)
     {
         VzClose(hKeyboard);
+    }
+}
+
+VOID
+VEAPI
+IptMouseRawInputThread(
+    IN PVOID StartContext
+)
+{
+    VEASTATUS Status;
+    HANDLE hMouse = NULL;
+    OIP_INFORMATION OipInfo;
+    OBJECT_ATTRIBUTES ObjAttr;
+    ANSI_STRING MouseName;
+    MOUSE_INPUT_DATA MouData[8];
+
+    UNREFERENCED_PARAMETER(StartContext);
+
+    RtlInitAnsiString(&MouseName, "/Device/Mouse0");
+    InitializeObjectAttributes(&ObjAttr, &MouseName, OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    Status = VzCreateFile(
+        &hMouse,
+        FILE_READ_DATA | VEA_SYNCHRONIZE,
+        &ObjAttr,
+        &OipInfo,
+        NULL,
+        FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_READ,
+        FILE_OPEN,
+        FILE_SYNCHRONOUS_IO_NONALERT,
+        NULL,
+        0
+    );
+
+    if (!VEA_SUCCESS(Status))
+    {
+        KdPrintf("[VEAPI] RIT failed to open /Device/Mouse0: 0x%08X\n", Status);
+        return;
+    }
+
+    while (IptRITRunning)
+    {
+        RtlZeroMemory(&OipInfo, sizeof(OipInfo));
+
+        Status = VzReadFile(
+            hMouse,
+            NULL,
+            NULL,
+            NULL,
+            &OipInfo,
+            MouData,
+            sizeof(MouData),
+            NULL,
+            NULL
+        );
+
+        if (!VEA_SUCCESS(Status))
+        {
+            KdPrintf("[VEAPI] RIT Mouse VzReadFile error: 0x%08X\n", Status);
+            break;
+        }
+
+        ULONG PacketCount = (ULONG)(OipInfo.Information / sizeof(MOUSE_INPUT_DATA));
+        for (ULONG i = 0; i < PacketCount; i++)
+        {
+            UserProcessMousePacket(&MouData[i]);
+        }
+    }
+
+    if (hMouse)
+    {
+        VzClose(hMouse);
     }
 }
 

@@ -18,7 +18,7 @@
 #define WND_BORDER_WIDTH    2
 #define WND_TITLEBAR_HEIGHT 24
 
-static VOID
+VOID
 WndGetClientOriginOnScreen(
     IN PWND_OBJECT Wnd,
     OUT PLONG ScreenX,

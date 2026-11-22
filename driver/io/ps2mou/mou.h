@@ -7,6 +7,7 @@
 #define PS2MOU_RING_BUFFER_SIZE 256
 #define PS2MOU_IO_TIMEOUT       100000
 #define WHEEL_DELTA             120
+#define PS2MOU_POLL_LIMIT  100000
 
 typedef struct _PS2MOU_DEVICE_EXTENSION {
     PVOID Pdo;
