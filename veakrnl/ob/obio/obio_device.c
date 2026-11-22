@@ -278,3 +278,78 @@ ObioDeleteDeviceInternal(IN PVOID ObjectBody)
 {
     UNIMPLEMENTED_DBGBREAK;
 }
+
+VEASTATUS
+VEAPI
+ObioGetDeviceObjectPointer(
+    IN PANSI_STRING ObjectName,
+    IN ACCESS_MASK DesiredAccess,
+    OUT PFILE_OBJECT *FileObject,
+    OUT PDEVICE_OBJECT *DeviceObject
+)
+{
+    OBJECT_ATTRIBUTES ObjAttr;
+    OIP_INFORMATION IoStatusBlock;
+    HANDLE FileHandle = NULL;
+    PFILE_OBJECT LocalFileObject = NULL;
+    PDEVICE_OBJECT TopDeviceObject = NULL;
+    VEASTATUS Status;
+
+    if (!ObjectName || !FileObject || !DeviceObject)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *FileObject = NULL;
+    *DeviceObject = NULL;
+
+    InitializeObjectAttributes(
+        &ObjAttr,
+        ObjectName,
+        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+        NULL,
+        NULL
+    );
+
+    Status = VeaOpenFile(
+        &FileHandle,
+        DesiredAccess,
+        &ObjAttr,
+        &IoStatusBlock,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        0
+    );
+    if (!VEA_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    Status = ObReferenceObjectByHandle(
+        FileHandle,
+        DesiredAccess,
+        ObpFileObjectType,
+        KernelMode,
+        (PVOID *)&LocalFileObject
+    );
+
+    VeaClose(FileHandle);
+
+    if (!VEA_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    TopDeviceObject = ObioGetRelatedDeviceObject(LocalFileObject);
+    if (!TopDeviceObject)
+    {
+        ObDereferenceObject(LocalFileObject);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    *FileObject = LocalFileObject;
+    *DeviceObject = TopDeviceObject;
+
+    return STATUS_SUCCESS;
+}
+
+/* EOF */

@@ -58,30 +58,18 @@ VEAPI
 SfCreateNormalSecurityDescriptor(VOID)
 {
     PVEA_SECURITY_DESCRIPTOR Sd = (PVEA_SECURITY_DESCRIPTOR)UlAllocatePoolWithTag(
-        NonPagedPool, 
-        sizeof(VEA_SECURITY_DESCRIPTOR), 
-        'SdSf'
+        NonPagedPool, sizeof(VEA_SECURITY_DESCRIPTOR), 'SdSf'
     );
+    if (!Sd) return NULL;
 
-    if (!Sd)
-    {
-        return NULL;
-    }
+    PVEA_ACL Dacl = (SfSystemToken && SfSystemToken->DefaultDacl)
+                    ? SfSystemToken->DefaultDacl
+                    : SfCreateDefaultSystemDacl();
 
-    Sd->Revision = 'S';
-    Sd->ControlFlags = 0;
-    Sd->Reserved = 0;
-    Sd->Owner = SfSystemSid;        
-    Sd->Group = SfAdministratorSid; 
-
-    if (SfSystemToken && SfSystemToken->DefaultDacl)
-    {
-        Sd->Dacl = SfSystemToken->DefaultDacl; 
-    }
-    else
-    {
-        Sd->Dacl = SfCreateDefaultSystemDacl();
-    }
+    RtlCreateSecurityDescriptor(Sd, VEA_SECURITY_DESCRIPTOR_REVISION);
+    RtlSetOwnerSecurityDescriptor(Sd, SfSystemSid, FALSE);
+    RtlSetGroupSecurityDescriptor(Sd, SfAdministratorSid, FALSE);
+    RtlSetDaclSecurityDescriptor(Sd, TRUE, Dacl, TRUE);
 
     return Sd;
 }

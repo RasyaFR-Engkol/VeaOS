@@ -91,6 +91,7 @@ typedef unsigned long ULONG, *PULONG, DWORD, *PDWORD;
 typedef unsigned int UINT, *PUINT;
 
 typedef void VOID, *PVOID;
+typedef void * __ptr64 PVOID64;
 
 typedef unsigned char BOOLEAN, *PBOOLEAN;
 #define TRUE  1
@@ -420,3 +421,57 @@ extern VEA_EXPORT_ENTRY __veasymboltable_end[];
     ALIGN_UP_POINTER_BY(ptr, sizeof(type))
 
 #define ALIGN(X) __attribute__((aligned(X)))
+
+typedef struct _PROCESSOR_NUMBER {
+    USHORT Group;
+    UCHAR Number;
+    UCHAR Reserved;
+} PROCESSOR_NUMBER, *PPROCESSOR_NUMBER;
+
+typedef DWORD LCID, *PLCID;
+
+#define EFLAGS_CF               0x01L
+#define EFLAGS_ZF               0x40L
+#define EFLAGS_TF               0x100L
+#define EFLAGS_INTERRUPT_MASK   0x200L
+#define EFLAGS_DF               0x400L
+#define EFLAGS_IOPL             0x3000L
+#define EFLAGS_NESTED_TASK      0x4000L
+#define EFLAGS_RF               0x10000
+#define EFLAGS_V86_MASK         0x20000
+#define EFLAGS_ALIGN_CHECK      0x40000
+#define EFLAGS_VIF              0x80000
+#define EFLAGS_VIP              0x100000
+#define EFLAGS_ID               0x200000
+#define EFLAGS_USER_SANITIZE    0x3F4DD7
+#define EFLAG_SIGN              0x8000
+#define EFLAG_ZERO              0x4000
+
+typedef PVOID HANDLE, *PHANDLE;
+
+#define ROUND_DOWN(n, align) \
+    (((ULONG_PTR)(n)) & ~((ULONG_PTR)(align) - 1))
+
+#define ROUND_UP(n, align) \
+    ROUND_DOWN(((ULONG_PTR)(n)) + (align) - 1, (align))
+    
+#define BYTES_TO_PAGES(Size) \
+  (((Size) >> PAGE_SHIFT) + (((Size) & (PAGE_SIZE - 1)) != 0))
+
+typedef struct _KCALLOUT_FRAME {
+    ULONG_PTR    SavedEbp;
+    ULONG_PTR    SavedEdi;
+    ULONG_PTR    SavedEsi;
+    ULONG_PTR    SavedEbx;
+    PKTRAP_FRAME SavedTrapFrame;
+    ULONG_PTR    SavedCallbackStack;
+    PVOID        SavedInitialStack;
+    ULONG_PTR    SavedEsp0;
+    ULONG_PTR    ReturnAddress;
+    PVOID        *ResultPtr;
+    PULONG       ResultLengthPtr;
+} KCALLOUT_FRAME, *PKCALLOUT_FRAME;
+
+#define CONST const
+
+/* EOF */

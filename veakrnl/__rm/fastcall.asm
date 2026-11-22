@@ -47,6 +47,7 @@ STRUC KTRAP_FRAME
 ENDSTRUC
 
 GLOBAL KsiFastCallService
+GLOBAL KsiSystemCallTrampoline
 EXTERN RiSyscallDispatcherHandler
 
 SECTION .text
@@ -100,28 +101,49 @@ KsiFastCallService:
     PUSH eax
     CALL RiSyscallDispatcherHandler
 
-    CLI
 
-    MOV [esp + KTRAP_FRAME.Eax], eax
+ALIGN 16
+; ==============================================================================
+; VEASTATUS VEAPI KsiSystemCallTrampoline(
+;     IN PVOID TargetFunction,  ; [ebp + 8]
+;     IN PULONG_PTR KernelArgs, ; [ebp + 12]
+;     IN ULONG ParamBytes       ; [ebp + 16]
+; )
+; ==============================================================================
+KsiSystemCallTrampoline:
+    PUSH ebp
+    MOV ebp, esp
 
-    MOV ax, [esp + KTRAP_FRAME.SegDs]
-    MOV ds, ax
-    MOV ax, [esp + KTRAP_FRAME.SegEs]
-    MOV es, ax
-    MOV ax, [esp + KTRAP_FRAME.SegFs]
-    MOV fs, ax
+    ; Preserve callee-saved registers (EBX, ESI, EDI)
+    PUSH esi
+    PUSH edi
+    PUSH ebx
 
-    MOV edx, [esp + KTRAP_FRAME.Eip]
-    MOV ecx, [esp + KTRAP_FRAME.HardwareEsp]
+    MOV eax, [ebp + 8]          ; TargetFunction Address
+    MOV esi, [ebp + 12]         ; KernelArgs Array Pointer
+    MOV ecx, [ebp + 16]         ; ParamBytes
 
-    MOV ebx, [esp + KTRAP_FRAME.Ebx]
-    MOV ebp, [esp + KTRAP_FRAME.Ebp]
-    MOV esi, [esp + KTRAP_FRAME.Esi]
-    MOV edi, [esp + KTRAP_FRAME.Edi]
-    MOV eax, [esp + KTRAP_FRAME.Eax] ; Return status in EAX for Userland
+    SHR ecx, 2      
+    JZ .call_target
+    LEA edi, [esi + ecx * 4 - 4]
 
-    ADD esp, KTRAP_FRAME_size
+.copy_loop:
+    MOV edx, [edi]
+    PUSH edx            
+    SUB edi, 4           
+    DEC ecx
+    JNZ .copy_loop
 
-    SYSEXIT
+.call_target:
+    CALL eax
+
+    ; Restore callee-saved registers
+    POP ebx
+    POP edi
+    POP esi
+    POP ebp
+
+    ; Clean up 3 parameter 
+    RET 12
 
 ;; EOF

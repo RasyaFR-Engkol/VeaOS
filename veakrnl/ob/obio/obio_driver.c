@@ -95,8 +95,6 @@ ObioGetDriverName(
         goto Cleanup;
     }
 
-    DPRINT("KeyPath: %Z\n", &KeyPath);
-
     USHORT charCount = KeyPath.Length;
     LONG lastSlashIndex = -1;
 
@@ -1403,9 +1401,7 @@ ObioInitializeDriverModule(
         goto CleanupObject;
     }
 
-    DPRINT("Calling DriverInitRoutine()\n");
     Status = DriverInitRoutine(DriverObject);
-    DPRINT("Calling Status: 0x%x\n", Status);
 
     if (DriverEntryStatus)
     {
@@ -1492,8 +1488,6 @@ ObioLoadDriver(
         DPRINT("[OBIO] Failed: Failed to normalize image path: 0x%x\n", Status);
         return Status;
     }
-
-    DPRINT("Normalized Image Path: %Z\n", &ImagePath);
 
     KsEnterCriticalRegion();
 

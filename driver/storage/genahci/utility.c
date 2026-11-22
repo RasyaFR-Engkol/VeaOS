@@ -292,16 +292,25 @@ AhciAllocateCommandSlot(
     IN PAHCI_PORT_CONTEXT PortCtx
 )
 {
-    // Cari bit 0 pertama yang kosong di SlotAllocBitmap
-    for (ULONG Slot = 0; Slot < 32; Slot++)
+    KIRQL OldIrql;
+    ULONG MaxSlots = PortCtx->DevExt->CommandSlotsCount;
+
+    if (MaxSlots == 0 || MaxSlots > 32) MaxSlots = 32;
+
+    KsAcquireSpinLock(&PortCtx->PortLock, &OldIrql);
+
+    for (ULONG Slot = 0; Slot < MaxSlots; Slot++)
     {
         if (!(PortCtx->SlotAllocBitmap & (1 << Slot)))
         {
             PortCtx->SlotAllocBitmap |= (1 << Slot);
-            return Slot; // Dapet slot bebas (0 - 31)
+            KsReleaseSpinLock(&PortCtx->PortLock, OldIrql);
+            return Slot;
         }
     }
-    return 0xFFFFFFFF; // Full/Busy
+
+    KsReleaseSpinLock(&PortCtx->PortLock, OldIrql);
+    return 0xFFFFFFFF;
 }
 
 VOID
@@ -311,7 +320,11 @@ AhciFreeCommandSlot(
     IN ULONG Slot
 )
 {
+    KIRQL OldIrql;
+
+    KsAcquireSpinLock(&PortCtx->PortLock, &OldIrql);
     PortCtx->SlotAllocBitmap &= ~(1 << Slot);
+    KsReleaseSpinLock(&PortCtx->PortLock, OldIrql);
 }
 
 VOID
@@ -471,21 +484,30 @@ AhciExecuteSyncCommand(
 {
     PAHCI_PORT_REGISTERS PortRegs = PortCtx->Registers;
     KEVENT Event;
+    KIRQL OldIrql;
     VEASTATUS Status;
 
+    if (Slot >= AHCI_MAX_COMMAND_SLOTS)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     KsInitializeEvent(&Event, SynchronizationEvent, FALSE);
-    PortCtx->CompletionEvent = &Event;
 
-    /* Clear sisa interrupt/SATA error sebelum issue */
-    PortRegs->Is   = PortRegs->Is;
-    PortRegs->Serr = PortRegs->Serr;
-
-    /* Fire Command Issue */
+    KsAcquireSpinLock(&PortCtx->PortLock, &OldIrql);
+    PortCtx->SyncEvents[Slot] = &Event;
     PortRegs->Ci |= (1 << Slot);
+    KsReleaseSpinLock(&PortCtx->PortLock, OldIrql);
 
     Status = KsWaitForSingleObject(&Event);
 
-    PortCtx->CompletionEvent = NULL;
+    PortCtx->SyncEvents[Slot] = NULL;
+
+    if (VEA_SUCCESS(Status) && (PortRegs->Tfd & AHCI_PxTFD_STS_ERR))
+    {
+        return STATUS_IO_DEVICE_ERROR;
+    }
+
     return Status;
 }
 
@@ -511,6 +533,10 @@ AhciDispatchSubChunk(
     if (Mdl)
     {
         UserCurrentBuffer = (PVOID)((ULONG_PTR)Mdl->MappedSystemVa + Chunk->BufferByteOffset);
+    }
+    else if ((Oip->Flags & OIP_BUFFERED_IO) && Oip->AssociatedOip.SystemBuffer)
+    {
+        UserCurrentBuffer = (PVOID)((ULONG_PTR)Oip->AssociatedOip.SystemBuffer + Chunk->BufferByteOffset);
     }
     else if (Oip->UserBuffer)
     {
@@ -592,11 +618,12 @@ AhciDispatchSubChunk(
     Fis->SectorCountLow  = (UCHAR)(SectorCount & 0xFF);
     Fis->SectorCountHigh = (UCHAR)((SectorCount >> 8) & 0xFF);
 
+    KIRQL OldIrql;
+    
+    KsAcquireSpinLock(&PortCtx->PortLock, &OldIrql);
     PortCtx->PendingOip[Slot] = Oip;
-
-    PortRegs->Is   = PortRegs->Is;
-    PortRegs->Serr = PortRegs->Serr;
-    PortRegs->Ci  |= (1 << Slot);
+    PortRegs->Ci = (1 << Slot);
+    KsReleaseSpinLock(&PortCtx->PortLock, OldIrql);
 
     return STATUS_PENDING;
 }

@@ -30,14 +30,19 @@ with open(input_lst, 'r') as f:
         parts = line.split()
         if len(parts) >= 4:
             ssn = parts[0]
+            arg_count = int(parts[2])
             symbol = parts[3]
+            ret_inst = f"RET {arg_count * 4}" if arg_count > 0 else "RET"
             
-            stub_code = f"""GLOBAL {symbol}
+            stub_code = f"""GLOBAL {symbol}:function ({symbol}.end - {symbol})
 {symbol}:
     MOV eax, {ssn}
-    LEA edx, [esp + 4]
+    CALL .sysenter
+    {ret_inst}
+.sysenter:
+    MOV edx, esp
     SYSENTER
-    RET
+.end:
 """
             stubs.append(stub_code)
 

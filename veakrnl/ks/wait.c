@@ -277,6 +277,7 @@ KsWaitForMultipleObjects(
     KIRQL OldIrql;
     KIRQL WaitIrql;
     BOOLEAN WaitNext;
+    VEASTATUS WaitStatus;
 
     if (ObjectCount == 0 || ObjectCount > THREAD_WAIT_OBJECTS || Objects == NULL)
         return STATUS_INVALID_PARAMETER;
@@ -300,6 +301,7 @@ KsWaitForMultipleObjects(
     if (WaitNext)
     {
         OldIrql = CurrentThread->WaitIrql;
+        WaitIrql = OldIrql;
         CurrentThread->WaitNext = FALSE;
         CurrentThread->WaitIrql = PASSIVE_LEVEL;
     }
@@ -308,6 +310,7 @@ KsWaitForMultipleObjects(
         OldIrql = KsAcquireDispatcherLock();
     }
 
+WaitStart:
     if (KsiAreObjectsSignaled(ObjectCount, Objects, WaitType, &SignaledIndex))
     {
         KsiConsumeObjectSignals(ObjectCount, Objects, WaitType, SignaledIndex);
@@ -339,28 +342,36 @@ KsWaitForMultipleObjects(
         WaitBlock->WaitResult = NULL;
         WaitBlock->WaitType = (UCHAR)WaitType;
         InsertTailList(
-        &((PDISPATCHER_HEADER)Objects[Index])->WaitListHead,
-        &WaitBlock->WaitListEntry
+            &((PDISPATCHER_HEADER)Objects[Index])->WaitListHead,
+            &WaitBlock->WaitListEntry
         );
     }
 
     CurrentThread->WaitBlockList = &CurrentThread->WaitBlock[0];
     CurrentThread->WaitType = (UCHAR)WaitType;
     CurrentThread->WaitStatus = STATUS_PENDING;
+    CurrentThread->WaitIrql = OldIrql;
     CurrentThread->State = Waiting;
 
-    KsReleaseDispatcherLock(OldIrql);
+    PtSwapThread(CurrentThread, KeGetCurrentPrcb());
 
-    PtYieldThread();
+    WaitStatus = (VEASTATUS)CurrentThread->WaitStatus;
 
     OldIrql = KsAcquireDispatcherLock();
     KsiRemoveThreadWaitBlocks(CurrentThread);
 
+    if (WaitStatus == STATUS_KERNEL_APC)
+    {
+        KsReleaseDispatcherLock(WaitIrql);
+        OldIrql = KsAcquireDispatcherLock();
+        goto WaitStart;
+    }
+
     KsReleaseDispatcherLock(OldIrql);
 
     /*
-     * A thread resumed by the scheduler from a timer/DPC path can inherit
-     * DISPATCH_LEVEL. Wait returns at the IRQL where the caller began waiting.
+    - A thread resumed by the scheduler from a timer/DPC path can inherit
+    - DISPATCH_LEVEL. Wait returns at the IRQL where the caller began waiting.
      */
     if (KeGetCurrentIrql() > WaitIrql)
     {
@@ -371,7 +382,7 @@ KsWaitForMultipleObjects(
         KeRaiseIrql(WaitIrql);
     }
 
-    return (VEASTATUS)CurrentThread->WaitStatus;
+    return WaitStatus;
 }
 
 VOID

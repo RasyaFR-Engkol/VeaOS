@@ -1,97 +1,79 @@
 cmake_minimum_required(VERSION 3.20)
+include(${CMAKE_SOURCE_DIR}/sdk/lib/cmake/VeaUserModules.cmake)
 
-# Flag kompilasi khusus Ring 3 Shared Library (32-bit x86)
-set(SO_C_FLAGS
-    -m32
-    -fPIC
-    -ffreestanding
-    -nostdlib
-    -fno-builtin
-    -fno-stack-protector
-    -Wall
-    -Wextra
-)
-
-set(SO_LINK_FLAGS
-    -m32
-    -shared
-    -nostdlib
-    -Wl,-Bsymbolic
-    -Wl,--no-undefined
-)
-
-# Shared Include Directories (SDK & NDK)
-set(SO_INCLUDES
-    ${CMAKE_SOURCE_DIR}/sdk/include
-    ${CMAKE_SOURCE_DIR}/sdk/include/ndk
-    ${CMAKE_SOURCE_DIR}/sdk/include/psdk
-)
-
-# ==============================================================================
-# 1. BUILD TARGET: veaso.so (NTDLL-equivalent)
-# ==============================================================================
-
-set(VEASO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/veaso)
+set(VEASO_DIR       ${CMAKE_CURRENT_SOURCE_DIR}/veaso)
 set(VEASO_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/veaso)
-
-# Lokasi Script Generator & Syscall List
-set(STUB_GEN_TOOL ${CMAKE_SOURCE_DIR}/tool/gen_syscall.py)
-set(SYSCALL_LST   ${CMAKE_SOURCE_DIR}/veakrnl/syscall.lst)
-
-# Target Output NASM Assembly & Compiled Object File
-set(VEASO_STUB_ASM ${VEASO_BUILD_DIR}/veaso_stubs.asm)
-set(VEASO_STUB_OBJ ${VEASO_BUILD_DIR}/veaso_stubs.o)
-
-# Pastikan folder build untuk veaso dibuat
 file(MAKE_DIRECTORY ${VEASO_BUILD_DIR})
 
-# ------------------------------------------------------------------------------
-# Step 1: Generate NASM Assembly Stubs dari syscall.lst
-# ------------------------------------------------------------------------------
+# --- Syscall Kernel (0x0000+) ---
+set(SYSCALL_LST       ${CMAKE_SOURCE_DIR}/veakrnl/syscall.lst)
+set(NDK_DIR           ${CMAKE_SOURCE_DIR}/sdk/include/ndk)
+set(VEASO_STUB_ASM    ${VEASO_BUILD_DIR}/veaso_stubs.asm)
+set(VZ_USER_H         ${VEASO_DIR}/vz_user.h)
+set(VZ_VEASO_STUB_ASM ${VEASO_BUILD_DIR}/vz_syscall_veaso.asm)
+
+# --- Syscall VEAPI / Shadow SSDT (0x1000+) ---
+set(VEAPI_SYSCALL_LST     ${CMAKE_SOURCE_DIR}/veapi/veapi_syscall.lst)
+set(VEAPI_INC_DIR         ${CMAKE_SOURCE_DIR}/veapi/include)
+set(VEAPI_STUB_ASM        ${VEASO_BUILD_DIR}/veapi_stubs.asm)
+set(VEAPI_USER_H          ${VEASO_DIR}/veapi_user.h)
+set(VZ_VEAPI_STUB_ASM     ${VEASO_BUILD_DIR}/vz_veapi_veaso.asm)
+
+# Generator syscall stubs: VEAKRNL
 add_custom_command(
     OUTPUT ${VEASO_STUB_ASM}
-    COMMAND python3 ${STUB_GEN_TOOL} ${SYSCALL_LST} ${VEASO_STUB_ASM}
-    DEPENDS ${SYSCALL_LST} ${STUB_GEN_TOOL}
-    COMMENT "[veaso] Generating NASM syscall stubs from ${SYSCALL_LST}..."
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/tool/gen_syscall.py ${SYSCALL_LST} ${VEASO_STUB_ASM}
+    DEPENDS ${SYSCALL_LST} ${CMAKE_SOURCE_DIR}/tool/gen_syscall.py
+    COMMENT "[veaso] Generating Kernel Vea* stubs..."
     VERBATIM
 )
 
-# ------------------------------------------------------------------------------
-# Step 2: Compile NASM Assembly ke Object File elf32
-# ------------------------------------------------------------------------------
 add_custom_command(
-    OUTPUT ${VEASO_STUB_OBJ}
-    COMMAND nasm -f elf32 ${VEASO_STUB_ASM} -o ${VEASO_STUB_OBJ}
-    DEPENDS ${VEASO_STUB_ASM}
-    COMMENT "[veaso] Compiling NASM syscall stubs to elf32 object..."
+    OUTPUT ${VZ_USER_H} ${VZ_VEASO_STUB_ASM}
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/tool/veaso_vz_syscall.py ${SYSCALL_LST} ${VZ_USER_H} ${VZ_VEASO_STUB_ASM} ${NDK_DIR}
+    DEPENDS ${SYSCALL_LST} ${CMAKE_SOURCE_DIR}/tool/veaso_vz_syscall.py
+    COMMENT "[veaso] Generating vz_user.h & Kernel Vz* stubs..."
     VERBATIM
 )
 
-# Source C tambahan untuk veaso (RTL, Heap, Init)
-file(GLOB VEASO_C_SOURCES
-    "${VEASO_DIR}/*.c"
-    "${VEASO_DIR}/*/*.c"
+# Generator syscall stubs: VEAPI (Shadow SSDT)
+add_custom_command(
+    OUTPUT ${VEAPI_STUB_ASM}
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/tool/gen_syscall.py ${VEAPI_SYSCALL_LST} ${VEAPI_STUB_ASM}
+    DEPENDS ${VEAPI_SYSCALL_LST} ${CMAKE_SOURCE_DIR}/tool/gen_syscall.py
+    COMMENT "[veaso] Generating VEAPI VeaUser* stubs..."
+    VERBATIM
 )
 
-# Gabungkan C Sources + Generated NASM Object File
+add_custom_command(
+    OUTPUT ${VEAPI_USER_H} ${VZ_VEAPI_STUB_ASM}
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/tool/veaso_vz_syscall.py ${VEAPI_SYSCALL_LST} ${VEAPI_USER_H} ${VZ_VEAPI_STUB_ASM} ${VEAPI_INC_DIR}
+    DEPENDS ${VEAPI_SYSCALL_LST} ${CMAKE_SOURCE_DIR}/tool/veaso_vz_syscall.py ${VEAPI_INC_DIR}/veapi.h
+    COMMENT "[veaso] Generating veapi_user.h & VEAPI VzUser* stubs..."
+    VERBATIM
+)
+
+file(GLOB_RECURSE VEASO_C_SOURCES   CONFIGURE_DEPENDS "${VEASO_DIR}/*.c")
+file(GLOB_RECURSE VEASO_ASM_SOURCES CONFIGURE_DEPENDS "${VEASO_DIR}/*.asm")
+file(GLOB_RECURSE RTL_SOURCES       CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/sdk/lib/rtl/*.c")
+
+# RTL User Object Library
+add_library(rtl_user OBJECT ${RTL_SOURCES})
+set_module_type(rtl_user objectlib)
+
+# veaso.so
 add_library(veaso SHARED
     ${VEASO_C_SOURCES}
-    ${VEASO_STUB_OBJ}
+    ${VEASO_ASM_SOURCES}
+    ${VEASO_STUB_ASM}
+    ${VZ_VEASO_STUB_ASM}
+    ${VZ_USER_H}
+    ${VEAPI_STUB_ASM}
+    ${VZ_VEAPI_STUB_ASM}
+    ${VEAPI_USER_H}
+    $<TARGET_OBJECTS:rtl_user>
 )
+target_include_directories(veaso PRIVATE ${VEASO_DIR})
+set_module_type(veaso veadll)
 
-# Set Properties & Include Dirs untuk veaso
-target_include_directories(veaso PRIVATE ${SO_INCLUDES} ${VEASO_DIR})
-target_compile_options(veaso PRIVATE ${SO_C_FLAGS})
-target_link_options(veaso PRIVATE ${SO_LINK_FLAGS})
-
-# Output nama file menjadi veaso.so
-set_target_properties(veaso PROPERTIES
-    PREFIX ""
-    SUFFIX ".so"
-    OUTPUT_NAME "veaso"
-)
-
-# ==============================================================================
-# 2. TARGET SHARED OBJECT LAINNYA (Contoh: veart.so, dll.)
-# ==============================================================================
-# add_subdirectory(veart)
+add_subdirectory(userapi)

@@ -6,6 +6,9 @@
 #include <ndk/veaguid.h>
 #include <ndk/irqtypes.h>
 #include <psdk/veaioctl.h>
+#include <psdk/veaseh.h>
+#include <ddk/keyboard.h>
+#include <../lib/gcc/gcc_intrin.h>
 #include <tag.h>
 
 struct _MDL;
@@ -142,3 +145,10 @@ typedef VEASTATUS (VEAPI *POBIO_INTERRUPT_HANDLER)(
 #define FILE_DEVICE_HOLOGRAPHIC           0x0000005b
 #define FILE_DEVICE_SDFXHCI               0x0000005c
 #define FILE_DEVICE_UCMUCSI               0x0000005d
+
+typedef VOID
+(VEAPI KSTART_ROUTINE)(
+  _In_ PVOID StartContext);
+typedef KSTART_ROUTINE *PKSTART_ROUTINE;
+
+typedef PVOID PVEAPI_CALLOUTS_FPNS;

@@ -112,3 +112,7 @@ typedef struct _BMP_INFO_HEADER {
     ULONG  BiClrUsed;
     ULONG  BiClrImportant;
 } __attribute__((packed)) BMP_INFO_HEADER, *PBMP_INFO_HEADER;
+
+VOID
+VEAPI
+BvFinalizeBootLogo(VOID);

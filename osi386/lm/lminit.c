@@ -76,32 +76,32 @@ LmInitializePaging(VOID)
 
     for (ULONG i = 0; i < 1024; i++) {
         // Identity Map
-        PageTableIdt[i].bits.present = 1;
-        PageTableIdt[i].bits.rw = 1;
-        PageTableIdt[i].bits.user = 0;
-        PageTableIdt[i].bits.frame = i;
+        PageTableIdt[i].Hard.Valid = 1;
+        PageTableIdt[i].Hard.Write = 1;
+        PageTableIdt[i].Hard.Owner = 0;
+        PageTableIdt[i].Hard.PageFrameNumber = i;
 
         // Higher Half Map (Isi sama persis)
-        PageTableHhk[i].bits.present = 1;
-        PageTableHhk[i].bits.rw = 1;
-        PageTableHhk[i].bits.user = 0;
-        PageTableHhk[i].bits.frame = i; 
+        PageTableHhk[i].Hard.Valid = 1;
+        PageTableHhk[i].Hard.Write = 1;
+        PageTableHhk[i].Hard.Owner = 0;
+        PageTableHhk[i].Hard.PageFrameNumber = i; 
     }
 
-    PageDirectory[0].bits.present = 1;
-    PageDirectory[0].bits.rw = 1;
-    PageDirectory[0].bits.user = 0;
-    PageDirectory[0].bits.frame = ((ULONG)PageTableIdt) >> 12;
+    PageDirectory[0].Hard.Valid = 1;
+    PageDirectory[0].Hard.Write = 1;
+    PageDirectory[0].Hard.Owner = 0;
+    PageDirectory[0].Hard.PageFrameNumber = ((ULONG)PageTableIdt) >> 12;
 
-    PageDirectory[768].bits.present = 1;
-    PageDirectory[768].bits.rw = 1;
-    PageDirectory[768].bits.user = 0;
-    PageDirectory[768].bits.frame = ((ULONG)PageTableHhk) >> 12;
+    PageDirectory[768].Hard.Valid = 1;
+    PageDirectory[768].Hard.Write = 1;
+    PageDirectory[768].Hard.Owner = 0;
+    PageDirectory[768].Hard.PageFrameNumber = ((ULONG)PageTableHhk) >> 12;
 
-    PageDirectory[1023].bits.present = 1;
-    PageDirectory[1023].bits.rw = 1;
-    PageDirectory[1023].bits.user = 0;
-    PageDirectory[1023].bits.frame = ((ULONG)PageDirectory) >> 12;
+    PageDirectory[1023].Hard.Valid = 1;
+    PageDirectory[1023].Hard.Write = 1;
+    PageDirectory[1023].Hard.Owner = 0;
+    PageDirectory[1023].Hard.PageFrameNumber = ((ULONG)PageDirectory) >> 12;
 
     return PageDirectory;
 }

@@ -2,7 +2,7 @@ build/
 .cache/
 run_img
 run_img_gdb
-log_interupt.txt
+log_interrupt.txt
 VeaOS.img
 compile_commands.json
 log.txt
@@ -11,3 +11,10 @@ VeaOS.vhd
 SYSTEM
 serial_log.txt
 .clangd
+# Build & Emulator Artifacts
+log_interrupt.txt
+*.log
+*.vhd
+*.vhd.bak
+*.iso
+*.img

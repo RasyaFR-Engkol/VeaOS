@@ -171,7 +171,11 @@ KsAcquireSpinLockAtDpcLevel(
     IN OUT PKSPIN_LOCK Lock
 )
 {
-    /* Instant lock */
+    if (((KSPIN_LOCK)PtGetCurrentThread() | 1) == *Lock)
+    {
+        KsBugCheckEx(SPINLOCK_IS_ALREADY_OWNED, (ULONG_PTR)Lock, 0, 0, 0);
+    }
+
     while (__atomic_exchange_n(Lock, 1, __ATOMIC_ACQUIRE)) {
 #if defined(__x86_64__) || defined(__i386__)
         __builtin_ia32_pause();
@@ -179,6 +183,8 @@ KsAcquireSpinLockAtDpcLevel(
         __asm__ volatile("yield" ::: "memory");
 #endif
     }
+
+    *Lock = (KSPIN_LOCK)PtGetCurrentThread() | 1;
 }
 
 NO_THREAD_SAFETY_ANALYSIS
@@ -189,6 +195,12 @@ KsReleaseSpinLockFromDpcLevel
     IN OUT PKSPIN_LOCK Lock
 )
 {    
+    if (((KSPIN_LOCK)PtGetCurrentThread() | 1) != *Lock)
+    {
+        /* They don't, bugcheck */
+        KsBugCheckEx(SPINLOCK_IS_NOT_OWNED, (ULONG_PTR)Lock, 0, 0, 0);
+    }
+    
      /* Langsung lepas lock tanpa utak-atik IRQL */
     __atomic_store_n(Lock, 0, __ATOMIC_RELEASE);
 }

@@ -84,8 +84,8 @@ KiInitSystem(VOID)
     KsServiceTableDescriptor[1].Limit = 0;
     KsServiceTableDescriptor[0].Number = MainSSPT;
 
-    RtlCopyMemory(KsServiceTableDescriptor,
-                  KsServiceTableDescriptorShadow,
+    RtlCopyMemory(KsServiceTableDescriptorShadow,
+                  KsServiceTableDescriptor,
                   sizeof(KsServiceTableDescriptor));
 
     RmInitSyscall();
@@ -95,7 +95,7 @@ VOID
 VEAPI
 KsiInitMachineDependent(VOID)
 {
-
+    KiEnableSseAndFxsave();
 }
 
 VOID

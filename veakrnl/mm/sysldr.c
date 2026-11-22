@@ -87,6 +87,35 @@ LdrRelocateImage(
         return STATUS_INVALID_IMAGE_FORMAT;
     }
 
+    if (ElfHeader->e_type == ET_REL && ElfHeader->e_shoff != 0)
+    {
+        PELF32_SHDR ShdrTable = (PELF32_SHDR)((ULONG_PTR)BaseAddress + ElfHeader->e_shoff);
+        ULONG MaxFileEnd = ElfHeader->e_shoff + (ElfHeader->e_shnum * sizeof(ELF32_SHDR));
+
+        for (ULONG i = 0; i < ElfHeader->e_shnum; i++)
+        {
+            if (ShdrTable[i].sh_type != SHT_NULL && ShdrTable[i].sh_type != SHT_NOBITS)
+            {
+                ULONG End = ShdrTable[i].sh_offset + ShdrTable[i].sh_size;
+                if (End > MaxFileEnd) MaxFileEnd = End;
+            }
+        }
+
+        ULONG Cursor = ALIGN_UP_BY(MaxFileEnd, 16);
+        for (ULONG i = 0; i < ElfHeader->e_shnum; i++)
+        {
+            if ((ShdrTable[i].sh_flags & SHF_ALLOC) && ShdrTable[i].sh_type == SHT_NOBITS)
+            {
+                ULONG Align = ShdrTable[i].sh_addralign ? ShdrTable[i].sh_addralign : 16;
+                Cursor = ALIGN_UP_BY(Cursor, Align);
+
+                RtlZeroMemory((PUCHAR)BaseAddress + Cursor, ShdrTable[i].sh_size);
+                ShdrTable[i].sh_offset = Cursor;
+                Cursor += ShdrTable[i].sh_size;
+            }
+        }
+    }
+
     PKERNEL_SYMBOL_RESOLVER Resolver = KernelResolver ? KernelResolver : MiFindKernelExport;
 
     VEASTATUS Status = RtlApplyElfRelocations(
@@ -124,25 +153,25 @@ MiLoadImageSection(
     PFN_COUNT PageCount;
     PVOID DriverBase = NULL;
     ULONG_PTR CurrentVa;
-
+ 
     if (!SectionPtr || !*SectionPtr || !ImageBase)
     {
         return STATUS_INVALID_PARAMETER;
     }
-
+ 
     Section = *SectionPtr;
-
+ 
     if (SessionLoad)
     {
         DPRINT("[MM/LDR] Session loading not supported!\n");
         return STATUS_NOT_IMPLEMENTED;
     }
-
+ 
     UNREFERENCED_PARAMETER(LdrEntry);
-
+ 
     Process = (PEPROCESS)PtGetCurrentProcess();
     RtlZeroMemory(&SectionOffset, sizeof(LARGE_INTEGER));
-
+ 
     Status = MmMapViewOfSection(
         Section,
         Process,
@@ -155,23 +184,22 @@ MiLoadImageSection(
         0,
         PAGE_EXECUTE_READ
     );
-
+ 
     if (!VEA_SUCCESS(Status))
     {
         DPRINT("[MM/LDR] MmMapViewOfSection failed with status 0x%08X\n", Status);
         return Status;
     }
-
+ 
     ImageSize = (ULONG)Section->SizeOfSection.QuadPart;
     if (ImageSize == 0)
     {
         MmUnmapViewOfSection(Process, TempBase);
         return STATUS_INVALID_IMAGE_FORMAT;
     }
-
+ 
     PageCount = (PFN_COUNT)((ImageSize + PAGE_SIZE - 1) >> PAGE_SHIFT);
-
-TargetVa_Alloc:
+ 
     DriverBase = (PVOID)MmAllocateVirtualRange(PageCount);
     if (!DriverBase)
     {
@@ -179,47 +207,93 @@ TargetVa_Alloc:
         MmUnmapViewOfSection(Process, TempBase);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-
-    DPRINT("[MM/LDR] Mapping Driver '%Z' at System VA 0x%p (%u KB, %u Pages)\n",
-           FileName, DriverBase, ImageSize / 1024, PageCount);
-
+ 
     CurrentVa = (ULONG_PTR)DriverBase;
-
+ 
     for (PFN_COUNT i = 0; i < PageCount; i++, CurrentVa += PAGE_SIZE)
     {
-        ULONG PhysPage = MmAllocatePhysicalPage();
+        PMMPTE Pte;
+        MMPTE TempPte;
+        ULONG PhysPage;
+ 
+        /* Page table untuk VA ini harus ada dulu (VAD tidak membuatnya) */
+        if (!MmpEnsurePageTable((ULONG)CurrentVa))
+        {
+            DPRINT("[MM/LDR] Out of memory creating page table for driver map!\n");
+            goto Failure;
+        }
+ 
+        PhysPage = MmAllocatePhysicalPage();
         if (PhysPage == 0)
         {
             DPRINT("[MM/LDR] Out of physical memory during driver map!\n");
-            MmUnmapViewOfSection(Process, TempBase);
-            return STATUS_NO_MEMORY;
+            goto Failure;
         }
-
-        /* Dapatkan pointer ke Hardware PTE milik Kernel */
-        PAGE_ENTRY *Pte = MM_GET_PTE(CurrentVa);
-
-        /* Isi Bit PTE (Valid, Read/Write, Ring 0 Only) */
-        Pte->raw = 0;
-        Pte->bits.present = 1;
-        Pte->bits.rw = 1;
-        Pte->bits.user = 0;       // Kernel Mode (Ring 0)
-        Pte->bits.frame = PhysPage >> PAGE_SHIFT;
-
+ 
+        /* PTE Kernel: Valid, Read/Write, Ring 0 only. Ditulis sekali. */
+        Pte = MiAddressToPte(CurrentVa);
+        MI_MAKE_VALID_PTE(TempPte, PhysPage >> PAGE_SHIFT, 0, 1);
+        MI_WRITE_VALID_PTE(Pte, TempPte);
+ 
         /* Invalidate CPU TLB untuk halaman virtual ini */
         MMI_INVALIDATE_TLB(CurrentVa);
     }
 
-    RtlCopyMemory(DriverBase, TempBase, ImageSize);
+    ULONG CopyBytes = ImageSize;
+    {
+        PELF32_EHDR Eh = (PELF32_EHDR)TempBase;
+        if (Eh->e_type == ET_REL && Eh->e_shoff != 0)
+        {
+            PELF32_SHDR Sh = (PELF32_SHDR)((ULONG_PTR)TempBase + Eh->e_shoff);
+            ULONG FileEnd = Eh->e_shoff + (Eh->e_shnum * sizeof(ELF32_SHDR));
+
+            for (ULONG i = 0; i < Eh->e_shnum; i++)
+            {
+                if (Sh[i].sh_type != SHT_NULL && Sh[i].sh_type != SHT_NOBITS)
+                {
+                    ULONG End = Sh[i].sh_offset + Sh[i].sh_size;
+                    if (End > FileEnd && End < (16 * 1024 * 1024))
+                    {
+                        FileEnd = End;
+                    }
+                }
+            }
+
+            if (FileEnd < CopyBytes)
+            {
+                CopyBytes = FileEnd;
+            }
+        }
+    }
+ 
+    RtlCopyMemory(DriverBase, TempBase, CopyBytes);
+ 
+    {
+        ULONG TotalMappedBytes = (ULONG)PageCount << PAGE_SHIFT;
+        if (TotalMappedBytes > CopyBytes)
+        {
+            RtlZeroMemory((PUCHAR)DriverBase + CopyBytes, TotalMappedBytes - CopyBytes);
+        }
+    }
     
     Status = MmUnmapViewOfSection(Process, TempBase);
     if (!VEA_SUCCESS(Status))
     {
         DPRINT("[MM/LDR] Warning: Failed to unmap temporary section view: 0x%08X\n", Status);
     }
-
+ 
     *ImageBase = DriverBase;
-
+ 
     return STATUS_SUCCESS;
+ 
+Failure:
+    /*
+     * Frame yang sudah dipasang milik kita sendiri (hasil MmAllocatePhysicalPage),
+     * jadi MmFreeVirtualRange boleh membebaskannya sekalian dengan VAD-nya.
+     */
+    MmFreeVirtualRange((ULONG)DriverBase);
+    MmUnmapViewOfSection(Process, TempBase);
+    return STATUS_NO_MEMORY;
 }
 
 VEASTATUS
@@ -296,7 +370,6 @@ MmCheckSystemImage(IN HANDLE FileHandle)
         return STATUS_INVALID_IMAGE_FORMAT;
     }
 
-    DPRINT("[MM/LDR] System image header validated successfully!\n");
     return STATUS_SUCCESS;
 }
 
@@ -389,9 +462,7 @@ LoaderScan:
         goto Quickie;
     }
     else if (!Section)
-    {
-        KsLeaveCriticalRegion();
-        
+    {   
         ModuleEntry = NULL;
 
         InitializeObjectAttributes(
@@ -442,8 +513,6 @@ LoaderScan:
             NULL,
             NULL
         );
-
-        DPRINT("[LDR] FileHandle=%p\n", FileHandle);
 
         Status = VeaCreateSection(
             &SectionHandle,
@@ -583,6 +652,7 @@ Quickie:
 
     if (FileHandle) VeaClose(FileHandle);
     if (Buffer) UlFreePoolWithTag(Buffer, 'Ldr ');
+    if (Section) ObDereferenceObject(Section);
 
     return Status;
 }

@@ -24,23 +24,141 @@ PtCounterUniqueThreadId(VOID)
     return PtUniqueThreadId;
 }
 
-VOID 
-VEAPI
-PtpSystemThreadStartup(
-    PVOID StartAddress, 
-    PVOID Argument
+static inline VOID
+PtpInitializeThreadFpuState(
+    IN PKTHREAD Thread
 )
 {
-    // 1. Thread baru mewarisi state CPU dari scheduler (DISPATCH_LEVEL).
-    // Kita WAJIB menurunkan IRQL ke PASSIVE_LEVEL agar OS tidak macet!
-    KeLowerIrql(PASSIVE_LEVEL); // 0 = PASSIVE_LEVEL
+    ULONG_PTR RawAddr = (ULONG_PTR)Thread->FxSaveBuffer;
+    Thread->FxSaveArea = (PFXSAVE_FORMAT)((RawAddr + 15) & ~15UL);
 
-    // 2. Eksekusi fungsi target (misal UlPhase1)
-    ((VOID (VEAPI*)(PVOID))StartAddress)(Argument);
+    RtlZeroMemory(Thread->FxSaveArea, sizeof(FXSAVE_FORMAT));
+    Thread->FxSaveArea->ControlWord = 0x037F;     /* Default x87 FCW (mask all exceptions) */
+    Thread->FxSaveArea->TagWord     = 0x00;       /* Abridged FTW */
+    Thread->FxSaveArea->MxCsr       = 0x00001F80; /* Default SSE MXCSR (mask all exceptions) */
+}
 
-    // 3. Jika fungsi selesai dan nge-return, hancurkan thread
+VOID
+VEAPI
+PiThreadStartup(VOID)
+{
+    PKTHREAD Thread = PtGetCurrentThread();
+    PKSTART_FRAME StartFrame = (PKSTART_FRAME)((ULONG_PTR)Thread->KernelStack + sizeof(KSWITCH_FRAME));
+
+    KeLowerIrql(PASSIVE_LEVEL);
+
+    DPRINT("PiThreadStartup()\n");
+
+    if (StartFrame->UserThread)
+    {
+        if (StartFrame->SystemRoutine)
+        {
+            StartFrame->SystemRoutine(StartFrame->StartRoutine, StartFrame->StartContext);
+        }
+
+        RiServiceExit(Thread->TrapFrame);
+    }
+    else
+    {
+        if (StartFrame->SystemRoutine)
+        {
+            StartFrame->SystemRoutine(StartFrame->StartRoutine, StartFrame->StartContext);
+        }
+        else if (StartFrame->StartRoutine)
+        {
+            StartFrame->StartRoutine(StartFrame->StartContext);
+        }
+
+        // PROTEKSI INTEGRITAS KERNEL:
+        // System Thread TIDAK BOLEH melakukan return! Jika return, hentikan sistem dengan BugCheck.
+        KsBugCheckEx(
+            ABNORMAL_SYSTEM_THREAD_TERMINATION,
+            (ULONG_PTR)StartFrame->StartRoutine,
+            (ULONG_PTR)Thread,
+            0,
+            0
+        );
+    }
+}
+
+VOID
+VEAPI
+PtpSystemThreadStartup(
+    IN PKSTART_ROUTINE StartRoutine,
+    IN PVOID StartContext
+)
+{
+
+    KeLowerIrql(PASSIVE_LEVEL);
+
+    if (StartRoutine)
+    {
+        StartRoutine(StartContext);
+    }
+
     PtpExitThread(STATUS_SUCCESS);
 }
+
+VOID
+VEAPI
+PtpUserThreadStartup(
+    IN PKSTART_ROUTINE StartRoutine,
+    IN PVOID StartContext
+)
+{
+    PETHREAD Thread = (PETHREAD)PtGetCurrentThread();
+    PKTRAP_FRAME TrapFrame;
+    BOOLEAN DeadThread = FALSE;
+    KIRQL OldIrql;
+
+    UNREFERENCED_PARAMETER(StartContext);
+
+    KeLowerIrql(PASSIVE_LEVEL);
+
+    if (Thread->Settings.DeadThread)
+    {
+        DeadThread = TRUE;
+    }
+
+    // Ambil TrapFrame yang sudah dialokasikan di puncak Kernel Stack (bukan InitialStack!)
+    TrapFrame = Thread->Tcb.TrapFrame;
+    if (!TrapFrame)
+    {
+        TrapFrame = (PKTRAP_FRAME)((ULONG_PTR)Thread->Tcb.InitialStack - sizeof(KTRAP_FRAME));
+        Thread->Tcb.TrapFrame = TrapFrame;
+    }
+
+    // Pastikan target akhir setelah LdrpInit (VzContinue) mengarah ke e_entry ELF (StartRoutine)
+    if (StartRoutine)
+    {
+        TrapFrame->Eip = (ULONG_PTR)StartRoutine;
+        TrapFrame->Eax = (ULONG_PTR)StartRoutine;
+    }
+    TrapFrame->PreviousPreviousMode = UserMode;
+
+    if (!DeadThread)
+    {
+        OldIrql = KeRaiseIrql(APC_LEVEL);
+
+        KsiInitializeUserApc(
+            TrapFrame,
+            PtpSystemSoEntryPoint,
+            NULL,
+            PtpSystemSoBase,
+            NULL
+        );
+
+        KeLowerIrql(OldIrql);
+    }
+    else
+    {
+        // PtpTerminateThread(Thread, STATUS_THREAD_IS_TERMINATING, TRUE);
+    }
+
+    // WAJIB: Terjun ke Ring 3 via KsiFastCallExitHandler (jangan return ke PiThreadStartup!)
+    RiServiceExit(TrapFrame);
+}
+
 
 VOID
 VEAPI
@@ -126,171 +244,154 @@ PiInitializeThread(
     Thread->SpecialApcDisable = 0;
     Thread->Alertable = FALSE;
     Thread->WaitMode = KernelMode;
+
+    PtpInitializeThreadFpuState(Thread);
 }
 
 PVOID
 VEAPI
 PtpSetupInitialThreadContext(
-    IN PVOID InitialStack,      // Kernel Stack (Ring 0)
-    IN PVOID UserStack,         // User Stack (Hanya diisi jika UserMode, kalau KernelMode isi NULL)
-    IN PVOID StartAddress,
-    IN PVOID Argument,
+    IN PKTHREAD Thread,
+    IN PVOID UserStack,
+    IN PKSYSTEM_ROUTINE SystemRoutine,
+    IN PKSTART_ROUTINE StartRoutine,
+    IN PVOID StartContext,
     IN KPROCESSOR_MODE ProcessorMode
 )
 {
-    ULONG_PTR StackPtr = (ULONG_PTR)InitialStack;
-
-    // ==========================================
-    // 1. SETUP KTRAP_FRAME DI KERNEL STACK
-    // ==========================================
-    // Trap Frame SELALU ditaruh di Kernel Stack, baik untuk User maupun Kernel thread.
-    StackPtr -= sizeof(KTRAP_FRAME);
-    PKTRAP_FRAME TrapFrame = (PKTRAP_FRAME)StackPtr;
-
-    RtlZeroMemory(TrapFrame, sizeof(KTRAP_FRAME));
-
-    TrapFrame->Eip = (ULONG)StartAddress;
-    TrapFrame->EFlags = 0x202; // PENTING: Enable Interrupt (IF) & Reserved bit 1
-
-    // ==========================================
-    // 2. PRIVILEGE-SPECIFIC SETUP
-    // ==========================================
-    if (ProcessorMode == KernelMode)
+    if (ProcessorMode == UserMode)
     {
-        // 1. Setup Switch Frame (sudah mencakup ruang argumen!)
-        StackPtr -= sizeof(KSWITCH_FRAME);
-        PKSWITCH_FRAME SwitchFrame = (PKSWITCH_FRAME)StackPtr;
+        PKUINIT_FRAME InitFrame = (PKUINIT_FRAME)((ULONG_PTR)Thread->InitialStack - sizeof(KUINIT_FRAME));
+        RtlZeroMemory(InitFrame, sizeof(KUINIT_FRAME));
 
-        RtlZeroMemory(SwitchFrame, sizeof(KSWITCH_FRAME));
+        // 1. Setup TrapFrame untuk Ring 3
+        PKTRAP_FRAME TrapFrame = &InitFrame->TrapFrame;
+        TrapFrame->SegCs = KGDT32_R3_CODE | 3;
+        TrapFrame->SegDs = KGDT32_R3_DATA | 3;
+        TrapFrame->SegEs = KGDT32_R3_DATA | 3;
+        TrapFrame->SegFs = KGDT32_R0_PCR;
+        TrapFrame->HardwareSegSs = KGDT32_R3_DATA | 3;
+        TrapFrame->HardwareEsp = (ULONG)UserStack;
+        TrapFrame->Eip = (ULONG)StartRoutine;
+        TrapFrame->EFlags = 0x202; // IF=1
+        TrapFrame->PreviousPreviousMode = UserMode;
 
-        SwitchFrame->EFlags = 0x202; // IF=1 (Enable Interrupt)
-        
-        // 2. KUNCI: Lompat ke Wrapper kita terlebih dahulu!
-        SwitchFrame->SwapReturnAddress = (ULONG)PtpSystemThreadStartup; 
-        
-        // 3. Setup Argumen yang akan dibaca oleh Wrapper
-        // Karena struktur memori sudah presisi, 'ret 8' akan membuang DummyArg1 & 2,
-        // sehingga ESP persis mendarat di WrapperReturnAddress.
-        SwitchFrame->WrapperReturnAddress = (ULONG)PtpExitThread;
-        SwitchFrame->StartAddress = (ULONG)StartAddress;
-        SwitchFrame->Argument = (ULONG)Argument;
+        Thread->TrapFrame = TrapFrame;
+        Thread->PreviousMode = UserMode;
 
-        return (PVOID)StackPtr;
+        // 2. Setup StartFrame
+        InitFrame->StartFrame.SystemRoutine = SystemRoutine;
+        InitFrame->StartFrame.StartRoutine = StartRoutine;
+        InitFrame->StartFrame.StartContext = StartContext;
+        InitFrame->StartFrame.UserThread = TRUE;
+
+        // 3. Setup Context Switch Frame
+        InitFrame->CtxSwitchFrame.SwapReturnAddress = (ULONG)PiThreadStartup;
+        InitFrame->CtxSwitchFrame.EFlags = 0x202;
+
+        return &InitFrame->CtxSwitchFrame;
     }
-    else if (ProcessorMode == UserMode)
+    else
     {
-        // USER MODE: Segments harus punya RPL = 3 (Ring 3). 
-        // Pastikan macro KGDT32_R3_CODE Anda sudah menyertakan ' | 3 ' di nilainya.
-        TrapFrame->SegCs |= KGDT32_R3_CODE;
-        TrapFrame->SegDs |= KGDT32_R3_DATA;
-        TrapFrame->SegGs |= KGDT32_R3_DATA;
-        TrapFrame->SegEs |= KGDT32_R3_DATA;
+        PKKINIT_FRAME InitFrame = (PKKINIT_FRAME)((ULONG_PTR)Thread->InitialStack - sizeof(KKINIT_FRAME));
+        RtlZeroMemory(InitFrame, sizeof(KKINIT_FRAME));
 
-        // IRET ke Ring 3 AKAN me-pop SS dan ESP, ini wajib diisi!
-        TrapFrame->HardwareSegSs |= KGDT32_R3_DATA;
+        Thread->TrapFrame = NULL;
+        Thread->PreviousMode = KernelMode;
 
-        // USER MODE: Argumen dan Return Address ditaruh di USER STACK
-        ULONG_PTR UserStackPtr = (ULONG_PTR)UserStack;
-        UserStackPtr -= (2 * sizeof(ULONG)); // Pesan 2 slot ULONG
-        
-        PULONG UserThreadStack = (PULONG)UserStackPtr;
-        // TODO: Ganti 0 dengan fungsi Wrapper Ring 3 yang memanggil Syscall Exit
-        UserThreadStack[0] = 0; 
-        UserThreadStack[1] = (ULONG)Argument;
+        // 1. Setup StartFrame
+        InitFrame->StartFrame.SystemRoutine = SystemRoutine;
+        InitFrame->StartFrame.StartRoutine = StartRoutine;
+        InitFrame->StartFrame.StartContext = StartContext;
+        InitFrame->StartFrame.UserThread = FALSE;
 
-        // Arahkan HardwareEsp ke User Stack yang sudah disiapkan
-        TrapFrame->HardwareEsp = (ULONG)UserStackPtr;
+        // 2. Setup Context Switch Frame
+        InitFrame->CtxSwitchFrame.SwapReturnAddress = (ULONG)PiThreadStartup;
+        InitFrame->CtxSwitchFrame.EFlags = 0x202;
+
+        return &InitFrame->CtxSwitchFrame;
     }
-
-    // Mengembalikan ESP baru yang menunjuk ke DbgEbp (paling bawah KTRAP_FRAME)
-    return (PVOID)StackPtr;
 }
 
-PETHREAD
+VEASTATUS
 VEAPI
 PtCreateSystemThread(
-    PEPROCESS ParentProcess,
-    PVOID StartAddress,
-    PVOID Argument,
-    POOL_TYPE PoolType
+    OUT PHANDLE ThreadHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+    IN HANDLE ProcessHandle OPTIONAL,
+    OUT PCLIENT_ID ClientId OPTIONAL,
+    IN PKSTART_ROUTINE StartRoutine,
+    IN PVOID StartContext OPTIONAL
 )
 {
-    PETHREAD Thread = NULL;
-
-    VEASTATUS Status = ObCreateObject(
-        KernelMode,
-        PtEthreadType,
-        NULL,
-        KernelMode,
-        NULL,
-        sizeof(ETHREAD), // Pass sizeof(ETHREAD) agar dialokasikan dengan benar
-        0,
-        0,
-        (PVOID*)&Thread
+    /* 
+     * Memanggil PtpCreateThread dengan:
+     * - TargetProcess = NULL (karena akan fallback ke PtSystemProcess jika ProcessHandle NULL)
+     * - ThreadContext = NULL (Tanda bahwa ini System Thread, bukan User Thread)
+     * - InitialTeb     = NULL (System Thread tidak membutuhkan TEB)
+     * - CreateSuspended = FALSE
+     */
+    return PtpCreateThread(
+        ThreadHandle,
+        DesiredAccess,
+        ObjectAttributes,
+        ProcessHandle,
+        NULL,               // TargetProcess (Fallback ke PtSystemProcess)
+        ClientId,
+        NULL,               // ThreadContext (NULL = Kernel/System Thread)
+        NULL,               // InitialTeb
+        FALSE,              // CreateSuspended
+        StartRoutine,
+        StartContext
     );
-    
-    if(!VEA_SUCCESS(Status))
-    {
-        KdPrintf("ERROR: Failed to create System Thread. Status 0x%x\n\r", Status);
-        return NULL;
-    }
-
-    PVOID StackBase = UlAllocatePoolWithTag(PoolType, PtThreadStackSize, 'Pt  ');
-    if (!StackBase)
-    {
-        ObDereferenceObject(Thread);
-        return NULL;
-    }
-
-    ObReferenceObject(ParentProcess);
-
-    PVOID InitialStack = (PVOID)((ULONG_PTR)StackBase + PtThreadStackSize);
-    PVOID StackLimit = StackBase;
-
-    PVOID KernelStack = PtpSetupInitialThreadContext(
-        InitialStack, 
-        NULL, 
-        StartAddress, 
-        Argument, 
-        KernelMode
-    );
-
-    PiInitializeThread(
-        &Thread->Tcb,
-        KernelStack,
-        InitialStack,
-        StackLimit,
-        ParentProcess->Pcb.BasePriority
-    );
-
-    Thread->Cid.UniqueThread = PtCounterUniqueThreadId();
-    Thread->StartAddress = StartAddress;
-    Thread->ExitStatus = 0;
-    Thread->Tcb.ApcState.Process = &ParentProcess->Pcb;
-    Thread->Tcb.Weight = 1024;
-    Thread->Tcb.VRuntime = 0;
-    KsInitializeTimer(&Thread->Tcb.Timer);
-
-    InsertTailList(&ParentProcess->Pcb.ThreadListHead, &Thread->ThreadListEntry);
-
-    PtEnqueueThreadCfs(
-        &PtRunQueue[KeGetCurrentPrcb()->Number],
-        &Thread->Tcb
-    );
-
-    return Thread;
 }
 
 PETHREAD
 VEAPI
 PtCreateSystemThreadForMainProcess(
-    PVOID StartAddress,
-    PVOID Argument,
-    POOL_TYPE PoolType
+    IN PKSTART_ROUTINE StartRoutine,
+    IN PVOID StartContext,
+    IN POOL_TYPE PoolType
 )
 {
-    PEPROCESS Process = PtSystemProcess;
-    return PtCreateSystemThread(Process, StartAddress, Argument, PoolType);
+    UNREFERENCED_PARAMETER(PoolType); // PoolType sudah dialokasikan otomatis oleh PtpInitThread
+
+    HANDLE ThreadHandle;
+    VEASTATUS Status;
+    PETHREAD Thread = NULL;
+
+    Status = PtCreateSystemThread(
+        &ThreadHandle,
+        THREAD_ALL_ACCESS,
+        NULL,
+        NULL,                               // ProcessHandle NULL -> default ke PtSystemProcess
+        NULL,                               // ClientId
+        StartRoutine,
+        StartContext
+    );
+
+    if (VEA_SUCCESS(Status))
+    {
+        // Dapatkan pointer PETHREAD dari Handle
+        Status = ObReferenceObjectByHandle(
+            ThreadHandle,
+            THREAD_ALL_ACCESS,
+            PtEthreadType,
+            KernelMode,
+            (PVOID*)&Thread
+        );
+
+        // Tutup handle lokal kernel setelah pointer objek di-reference
+        VeaClose(ThreadHandle);
+
+        if (!VEA_SUCCESS(Status))
+        {
+            return NULL;
+        }
+    }
+
+    return Thread;
 }
 
 VOID
@@ -318,31 +419,30 @@ PtInitializeHandBuildThread(
     KsInitializeTimer(&InitialThread->Timer);
     InitializeListHead(&InitialThread->WaitListEntry);
 
-    // 2. ATTACH KE PROCESS 
-    // Hubungkan APC State ke proses induk
+    // 2. Attach ke Process
     InitialThread->ApcState.Process = Process;
 
     if (Process && IsListEmpty(&InitialThread->WaitListEntry))
     {
-        // Masukkan thread ini ke daftar thread milik proses
-        // Asumsi: Kita menggunakan WaitListEntry sebagai List Node seperti di LdrCreateInitialThreadAndProcess
         InsertTailList(&Process->ThreadListHead, &InitialThread->WaitListEntry);
     }
 
-    // 3. SETUP CONTEXT SWITCH FRAME
+    PtpInitializeThreadFpuState(InitialThread);
+
+    // 3. Setup Context Switch Frame
     if (StartAddress != NULL) 
     {
         InitialThread->KernelStack = PtpSetupInitialThreadContext(
-            InitialThread->InitialStack, 
-            NULL,               
-            StartAddress,       
-            NULL,               
+            InitialThread,                      // <-- Oper PKTHREAD di sini!
+            NULL,                               // No User Stack
+            (PVOID)PtpSystemThreadStartup,      // SystemRoutine Wrapper
+            (PVOID)StartAddress,                // StartRoutine Target
+            NULL,                               // No StartContext
             KernelMode
         );
     } 
     else 
     {
-        // Untuk Boot/Idle Thread:
         InitialThread->KernelStack = InitialThread->InitialStack;
     }
 }
@@ -391,6 +491,813 @@ PtpReaperThreadRoutine(
             PtYieldThread();
         }
     }
+}
+
+VEASTATUS
+VEAPI
+PtpInitThread(
+    IN OUT PKTHREAD Thread,
+    IN PVOID Environment OPTIONAL,
+    IN PKSYSTEM_ROUTINE SystemRoutine,
+    IN PKSTART_ROUTINE StartRoutine OPTIONAL,
+    IN PVOID StartContext OPTIONAL,
+    IN PKTRAP_FRAME TrapFrame OPTIONAL,
+    IN PTEB Teb OPTIONAL,
+    IN PKPROCESS Process
+)
+{
+    PVOID StackBase;
+    PVOID InitialStack;
+    PVOID StackLimit;
+    PVOID KernelStack;
+    KPROCESSOR_MODE Mode;
+    UCHAR Prio;
+
+    UNREFERENCED_PARAMETER(Environment);
+
+    //
+    // 1. Alokasikan Kernel Stack (NonPagedPool) berukuran PtThreadStackSize (8KB)
+    //
+    StackBase = UlAllocatePoolWithTag(NonPagedPool, PtThreadStackSize, 'Pt  ');
+    if (!StackBase)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    InitialStack = (PVOID)((ULONG_PTR)StackBase + PtThreadStackSize);
+    StackLimit = StackBase;
+
+    //
+    // 2. Inisialisasi struktur dasar KTHREAD (List, Spinlock, APC State, IRQL)
+    //
+    PiInitializeThread(
+        Thread,
+        NULL, // KernelStack diisi setelah Context Setup
+        InitialStack,
+        StackLimit,
+        Process->BasePriority
+    );
+
+    //
+    // 3. Attach Thread ke Objek Proses Induk & Atur Service Table
+    //
+    Thread->ApcState.Process = Process;
+    Thread->ServiceTable = KsServiceTableDescriptor;
+    Thread->Teb = (PVOID)Teb;
+    
+    Prio = Process->BasePriority;
+    if (Prio > 31) Prio = 31;
+
+    Thread->Weight = PtpPriorityToWeight[Prio];
+    Thread->VRuntime = 0;
+    KsInitializeTimer(&Thread->Timer);
+
+    //
+    // 4. Rakit Stack Context Frame (UserMode vs KernelMode)
+    //
+    if (TrapFrame != NULL)
+    {
+        // Thread User Mode (Dibuat via NtCreateThreadEx / PtpCreateThread dengan Context)
+        Mode = UserMode;
+
+        /* FIX: Oper 6 parameter lengkap termasuk SystemRoutine (PtpUserThreadStartup) */
+        KernelStack = PtpSetupInitialThreadContext(
+            Thread,
+            (PVOID)TrapFrame->HardwareEsp,
+            (PVOID)SystemRoutine,             // PtpUserThreadStartup
+            (PVOID)TrapFrame->Eip,            // EIP User Mode (Entry point)
+            StartContext,                     // Argument / Context
+            Mode
+        );
+    }
+    else
+    {
+        // Thread Kernel Mode (System Thread)
+        Mode = KernelMode;
+
+        /* FIX: Oper 6 parameter lengkap untuk System Thread */
+        KernelStack = PtpSetupInitialThreadContext(
+            Thread,
+            NULL,
+            (PVOID)SystemRoutine,             // PtpSystemThreadStartup
+            (PVOID)StartRoutine,              // Routine asli (misal UlpWorkerEntryPoint)
+            StartContext,                     // Context (CriticalWorkQueue, DelayedWorkQueue, dll)
+            Mode
+        );
+
+        Thread->TrapFrame = NULL;
+    }
+
+    Thread->KernelStack = KernelStack;
+    return STATUS_SUCCESS;
+}
+
+VOID
+VEAPI
+PtUninitThread(
+    IN PKTHREAD Thread
+)
+{
+    if (!Thread) return;
+
+    //
+    // Bebaskan Kernel Stack jika sudah sempat dialokasikan
+    //
+    if (Thread->StackLimit)
+    {
+        UlFreePool(Thread->StackLimit);
+        Thread->StackLimit = NULL;
+        Thread->InitialStack = NULL;
+        Thread->KernelStack = NULL;
+    }
+
+    Thread->State = Terminated;
+    Thread->ApcState.Process = NULL;
+}
+
+VOID
+VEAPI
+PtpStartThread(
+    IN PKTHREAD Thread
+)
+{
+    if (!Thread) return;
+
+    //
+    // Hitung ulang Weight CFS berdasarkan Priority KTHREAD
+    //
+    PtSetThreadPriority(Thread, Thread->Priority);
+
+    //
+    // Set status thread menjadi Initialized / Ready
+    //
+    if (Thread->State != Running)
+    {
+        Thread->State = Ready;
+    }
+}
+
+VOID
+VEAPI
+PtpReadyThread(
+    IN PKTHREAD Thread
+)
+{
+    PKPRCB Prcb;
+
+    if (!Thread) return;
+
+    //
+    // Ambil RunQueue CPU yang mengeksekusi instruksi ini dan Enqueue ke CFS Tree
+    //
+    Prcb = KeGetCurrentPrcb();
+    PtEnqueueThreadCfs(&PtRunQueue[Prcb->Number], Thread);
+}
+
+VEASTATUS
+VEAPI
+PtpCreateThread(
+    OUT PHANDLE ThreadHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjAttr OPTIONAL,
+    IN HANDLE ProcessHandle,
+    IN PEPROCESS TargetProcess,
+    OUT PCLIENT_ID ClientId,
+    IN PKTRAP_FRAME ThreadContext, // IN NT, CONTEXT not KTRAP_FRAME
+    IN PINITIAL_TEB InitialTeb,
+    IN BOOLEAN CreateSuspended,
+    IN PKSTART_ROUTINE StartRoutine OPTIONAL,
+    IN PVOID StartContext OPTIONAL
+)
+// +++
+//
+// Routine Description:
+// Creatig new Thread that attached to Process, then start the Thread afterward or even 
+// suspend it according to BOOLEAN CreateSuspended
+// 
+// Parameters:
+// PHANDLE ThreadHandle: 
+//      Parameter to returning created Thread Handle
+// 
+// ACCESS_MASK DesiredAccess:
+//      DesiredAccess for step in creating Thread
+// 
+// POBJECT_ATTRIBUTES ObjAttr:
+//      Pointer to Object Attribute describing Attribute for Thread Object
+// 
+// HANDLE ProcessHandle:
+//      Handle pointing toward process
+// 
+// PEPROCESS TargetProcess:
+//      Pointer to EPROCESS in memory
+// 
+// PCLIENT_ID ClientId:
+//      Pointer out to Client ID parameter
+// 
+// PKTRAP_FRAME ThreadContext:
+//      Thread Context to start with
+// 
+// PINITIAL_TEB InitialTeb:
+//      Pointer to Initial Teb 
+// 
+// BOOLEAN CreateSuspended:
+//      Suspend the Thread after creating it
+// 
+// PKSTART_ROUTINE StartRoutine:
+//      StartRoutine to run after Thread started
+// 
+// PVOID StartContext:
+//      Context that will passed to Thread after Thread has running
+// 
+// Return VEASTATUS:
+// STATUS_SUCCESS:
+//      Thread successfully Created
+// 
+// STATUS_INVALID_HANDLE:
+//      Handle were invalid for Thread making
+// 
+// STATUS_INSUFFICIENT_RESOURCES:
+//      Memory/Resource were run out for creating Handle or allocating memory
+// 
+// STATUS_PROCESS_IS_TERMINATING:
+//      Passing Process that gonna terminating soon
+// 
+// +++
+{
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    VEASTATUS Status;
+    PEPROCESS Process;
+    PETHREAD Thread;
+    HANDLE_TABLE_ENTRY CidEntry;
+    PTEB TebBase;
+    ACCESS_STATE LocalAccessState;
+    PACCESS_STATE AccessState = &LocalAccessState;
+    AUX_ACCESS_DATA AuxData;
+    HANDLE hThread;
+
+    //
+    // The one who actually call with StartRoutine is only kernel. So set PreviousMode
+    // to kernel to grant ALL ACCESS freely
+    //
+
+    if (StartRoutine) PreviousMode = KernelMode;
+
+    //
+    // Should be mentioned with handle to process because Thread needs to be linked and
+    // attached to process. reference the process with ObReferenceObjectByHandle. If no
+    // ProcessHandle, the argument should pass TargetProcess instead to attach Thread
+    // to some Thread (this is called attaching to another). Make sure UserMode didn't 
+    // create System Thread and also not trying to attaching to Kernel Process
+    //
+
+    if (ProcessHandle)
+    {
+        Status = ObReferenceObjectByHandle(
+            ProcessHandle,
+            PROCESS_CREATE_THREAD,
+            PtEprocessType,
+            PreviousMode,
+            (PVOID*)&Process
+        );
+    }
+    else
+    {
+        if (StartRoutine)
+        {
+            if (!TargetProcess) TargetProcess = PtSystemProcess;
+
+            ObReferenceObject(TargetProcess);
+            Process = TargetProcess;
+            Status = STATUS_SUCCESS;
+        }
+        else
+        {
+            Status = STATUS_INVALID_HANDLE;
+        }
+    }
+
+    if (!VEA_SUCCESS(Status)) return Status;
+
+    if ((PreviousMode) != KernelMode && (Process == PtSystemProcess))
+    {
+        ObDereferenceObject(Process);
+        return STATUS_INVALID_HANDLE; 
+    }
+
+    //
+    // Create the Thread Object, and then Initialize them. Set Exit Status to PENDING
+    // cause we wait for the Thread to exit and then give us the Real Status. Initialize
+    // CID alias Client Id for tracking Thread ID. Make sure ID given or if not, just 
+    // return
+    //
+
+    Status = ObCreateObject(
+        PreviousMode,
+        PtEthreadType,
+        ObjAttr,
+        PreviousMode,
+        NULL,
+        sizeof(ETHREAD),
+        0,
+        0,
+        (PVOID*)&Thread
+    );
+
+    if (!VEA_SUCCESS(Status))
+    {
+        ObDereferenceObject(Process);
+        return Status;
+    }
+
+    RtlZeroMemory(Thread, sizeof(*Thread));
+
+    // TODO:
+    // ReactOS has Rundown Protection and then initialized here
+
+    Thread->ExitStatus = STATUS_PENDING;
+    Thread->ThreadProcess = Process;
+    Thread->Cid.UniqueProcess = Process->UniqueProcessId;
+
+    CidEntry.Object = Thread;
+    CidEntry.GrantedAccess = 0;
+    Thread->Cid.UniqueThread = UlCreateHandle(PtpCidTable, &CidEntry);
+    if (!Thread->Cid.UniqueThread)
+    {
+        ObDereferenceObject(Thread);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    // FIXME:
+    // Thread->ReadClusterSize is 0 in ReactOS. no need to implement them.
+
+    KsInitializeSemaphore(&Thread->KpcReplySemaphore, 0, 1);
+    InitializeListHead(&Thread->IrpList);
+    InitializeListHead(&Thread->PostBlockList);
+    InitializeListHead(&Thread->ActiveTimerListHead);
+    KsInitializeSpinlock(&Thread->ActiveTimerListLock);
+
+    // TODO:
+    // Implement Acquire Rundown Protection
+
+    //
+    // Now all ETHREAD struct has ready and now we can adding Context for the TCB block
+    // alias KTHREAD itself. Initializing TEB context for the Thread itself. I dont know
+    // how it's work but somehow Thread marked as DeleteThread and we need to end it 
+    // anyway. But make sense if the Process->Settings.DeleteProcess was turned on because
+    // the Process is gonna deleted but at some condition a race happened
+    //
+
+    if (ThreadContext)
+    {
+        Status = MmCreateTeb(Process, &Thread->Cid, InitialTeb, &TebBase);
+        if (!VEA_SUCCESS(Status))
+        {
+            // TODO:
+            // UlReleaseRundownPrtotection()
+            ObDereferenceObject(Thread);
+            return Status;
+        }
+
+        _VEA_TRY
+        {
+            Thread->StartAddress = (PVOID)ThreadContext->Eip;
+            Thread->VEAStartAddres = (PVOID)ThreadContext->Eax;
+        }
+        _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = GetExceptionCode();
+        }
+        _VEA_END;
+
+        if (VEA_SUCCESS(Status))
+        {
+            Status = PtpInitThread(
+                &Thread->Tcb,
+                NULL,
+                PtpUserThreadStartup,
+                NULL,
+                Thread->StartAddress,
+                ThreadContext,
+                TebBase,
+                &Process->Pcb
+            );
+        }
+    }
+    else
+    {
+        Thread->StartAddress = StartRoutine;
+
+        // TODO:
+        // PtpSetCrossThreadFlag(Thread, CT_SYSTEM_THREAD_BIT);
+
+        Status = PtpInitThread(
+            &Thread->Tcb,
+            NULL,
+            PtpSystemThreadStartup,
+            StartRoutine,
+            StartContext,
+            NULL,
+            NULL,
+            &Process->Pcb
+        );
+    }
+
+    if (!VEA_SUCCESS(Status))
+    {
+        if (TebBase) MmDeleteTeb(Process, TebBase);
+
+        // TODO:
+        // ExReleaseRundownProtection()
+        
+        ObDereferenceObject(Thread);
+        return Status;
+    }
+
+    KsEnterCriticalRegion();
+
+    if (Process->Settings.ProcessDelete) goto QuickWayHereBro;
+
+    if ((Thread->Settings.ThreadDelete) &&
+        (ThreadContext) && 
+        (Thread->ThreadProcess == Process))
+    {
+        goto QuickWayHereBro;
+    }
+
+    //
+    // Now it's all safe. APC must not be interrupting or delivering and then we can insert 
+    // out thread to Process List Entry. And then Thread can be started from here
+    //
+
+    InsertTailList(&Process->ThreadListHead, &Thread->ThreadListEntry);
+    Process->ActiveThreads++;
+
+    PtpStartThread(&Thread->Tcb);
+
+    KsLeaveCriticalRegion();
+
+    // TODO:
+    // Call Pt Routine Callback
+
+    ObReferenceObject(Thread);
+    ObReferenceObject(Thread);
+
+    if (CreateSuspended)
+    {
+        Thread->Tcb.SuspendCount = 1;
+        Thread->Tcb.State = Waiting; // Atau buat State khusus 'Suspended' jika ada
+    }
+    else
+    {
+        Thread->Tcb.SuspendCount = 0;
+        PtpReadyThread(&Thread->Tcb);
+    }
+
+    // TODO:
+    // Implement this
+    Status = SfCreateAccessStateEx(NULL,
+                                   ThreadContext ?
+                                   (PEPROCESS)PtGetCurrentProcess() : Process,
+                                   &LocalAccessState,
+                                   &AuxData,
+                                   DesiredAccess,
+                                   &PtEthreadType->GenericMapping);
+    if (!VEA_SUCCESS(Status))
+    {
+        ObDereferenceObject(Thread);
+        return Status;
+    }
+
+    //
+    // Can the Thread actually inserted with ObInsertObject although it doesn't have name?
+    //
+
+    Status = ObInsertObject(
+        Thread,
+        AccessState,
+        DesiredAccess,
+        0,
+        NULL,
+        &hThread
+    );
+
+    SfDeleteAccessState(&LocalAccessState);
+
+    if (VEA_SUCCESS(Status))
+    {
+        _VEA_TRY
+        {
+            if (ClientId) *ClientId = Thread->Cid;
+            *ThreadHandle = hThread;
+        }
+        _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
+        {
+            // TODO:
+            // Implement this
+            /*
+             * 
+             *
+            PspSetCrossThreadFlag(Thread, CT_DEAD_THREAD_BIT);
+
+            if (CreateSuspended) KeResumeThread(&Thread->Tcb);
+
+            KeReadyThread(&Thread->Tcb);
+
+            ObDereferenceObject(Thread);
+
+            ObCloseHandle(hThread, PreviousMode);
+             */
+
+            _VEA_YIELD(return GetExceptionCode());
+        }
+        _VEA_END;
+    }
+    else
+    {
+        // TODO:
+        // Implement this
+        /*
+         *  PspSetCrossThreadFlag(Thread, CT_DEAD_THREAD_BIT);
+         *  if (CreateSuspended) KeResumeThread(&Thread->Tcb);
+         */
+    }
+
+    Thread->CreateTime.QuadPart = KsQuerySystemTime();
+
+    //SObDereferenceObject(Thread);
+
+    return Status;
+
+QuickWayHereBro:
+    KsLeaveCriticalRegion();
+
+    PtUninitThread(&Thread->Tcb);
+
+    if (TebBase) MmDeleteTeb(Process, TebBase);
+
+    ObDereferenceObject(Thread);
+    return STATUS_PROCESS_IS_TERMINATING;
+}
+
+VEASTATUS
+VEAPI
+VeaCreateThread(
+    OUT PHANDLE ThreadHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+    IN HANDLE ProcessHandle,
+    OUT PCLIENT_ID ClientId OPTIONAL,
+    IN PKTRAP_FRAME ThreadContext, // Direct KTRAP_FRAME
+    IN PINITIAL_TEB InitialTeb,
+    IN BOOLEAN CreateSuspended
+)
+{
+    VEASTATUS Status = STATUS_SUCCESS;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    HANDLE LocalThreadHandle = NULL;
+    CLIENT_ID LocalClientId;
+    OBJECT_ATTRIBUTES LocalObjectAttributes;
+    POBJECT_ATTRIBUTES CapturedObjectAttributes = NULL;
+    KTRAP_FRAME LocalTrapFrame;
+    INITIAL_TEB LocalInitialTeb;
+
+    RtlZeroMemory(&LocalClientId, sizeof(CLIENT_ID));
+    RtlZeroMemory(&LocalTrapFrame, sizeof(KTRAP_FRAME));
+    RtlZeroMemory(&LocalInitialTeb, sizeof(INITIAL_TEB));
+
+    //
+    // 1. VALIDASI POINTER & CAPTURE DATA USER MODE VIA SEH
+    //
+    if (PreviousMode == UserMode)
+    {
+        // Validasi Alamat Pointer Wajib (< 0x80000000)
+        if (!ThreadHandle || (ULONG_PTR)ThreadHandle >= 0x80000000)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+
+        if (!ThreadContext || (ULONG_PTR)ThreadContext >= 0x80000000)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+
+        if (!InitialTeb || (ULONG_PTR)InitialTeb >= 0x80000000)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+
+        _VEA_TRY
+        {
+            // Probe Write Access untuk ThreadHandle
+            *(volatile HANDLE*)ThreadHandle = *(volatile HANDLE*)ThreadHandle;
+
+            // Probe ClientId jika disuplai
+            if (ClientId)
+            {
+                if ((ULONG_PTR)ClientId >= 0x80000000)
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                *(volatile CLIENT_ID*)ClientId = *(volatile CLIENT_ID*)ClientId;
+            }
+
+            // Capture ObjectAttributes
+            if (ObjectAttributes)
+            {
+                if ((ULONG_PTR)ObjectAttributes >= 0x80000000)
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                RtlCopyMemory(&LocalObjectAttributes, ObjectAttributes, sizeof(OBJECT_ATTRIBUTES));
+                CapturedObjectAttributes = &LocalObjectAttributes;
+            }
+
+            // Direct Copy KTRAP_FRAME dari User Space ke Kernel Stack
+            RtlCopyMemory(&LocalTrapFrame, ThreadContext, sizeof(KTRAP_FRAME));
+
+            // Sanitasi Selector Segment Ring 3 (Pastikan RPL = 3 agar tidak GPF)
+            if (LocalTrapFrame.SegCs == 0) LocalTrapFrame.SegCs = KGDT32_R3_CODE;
+            LocalTrapFrame.SegCs |= 3;
+
+            if (LocalTrapFrame.HardwareSegSs == 0) LocalTrapFrame.HardwareSegSs = KGDT32_R3_DATA;
+            LocalTrapFrame.HardwareSegSs |= 3;
+
+            if (LocalTrapFrame.SegDs == 0) LocalTrapFrame.SegDs = KGDT32_R3_DATA;
+            LocalTrapFrame.SegDs |= 3;
+
+            if (LocalTrapFrame.SegEs == 0) LocalTrapFrame.SegEs = KGDT32_R3_DATA;
+            LocalTrapFrame.SegEs |= 3;
+
+            // Pastikan Interrupt Flag (IF=1) ON di EFlags
+            LocalTrapFrame.EFlags |= 0x200;
+
+            // Capture InitialTeb (StackBase & StackLimit User Stack)
+            RtlCopyMemory(&LocalInitialTeb, InitialTeb, sizeof(INITIAL_TEB));
+        }
+        _VEA_EXCEPT(1)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+        _VEA_END
+    }
+    else
+    {
+        // Panggilan dari Kernel Mode (Direct Access)
+        CapturedObjectAttributes = ObjectAttributes;
+
+        if (ThreadContext)
+        {
+            RtlCopyMemory(&LocalTrapFrame, ThreadContext, sizeof(KTRAP_FRAME));
+            LocalTrapFrame.SegCs |= 3;
+            LocalTrapFrame.HardwareSegSs |= 3;
+            LocalTrapFrame.EFlags |= 0x200;
+        }
+
+        if (InitialTeb)
+        {
+            LocalInitialTeb = *InitialTeb;
+        }
+    }
+
+    //
+    // 2. EKSEKUSI ENGINE UTAMA (PtpCreateThread)
+    //
+    Status = PtpCreateThread(
+        &LocalThreadHandle,
+        DesiredAccess,
+        CapturedObjectAttributes,
+        ProcessHandle,
+        NULL,                                      // TargetProcess (Resolved via ProcessHandle)
+        &LocalClientId,
+        ThreadContext ? &LocalTrapFrame : NULL,    // Pass Direct KTRAP_FRAME Pointer
+        InitialTeb ? &LocalInitialTeb : NULL,      // INITIAL_TEB
+        CreateSuspended,
+        NULL,                                      // StartRoutine NULL untuk User Thread
+        NULL                                       // StartContext NULL
+    );
+
+    //
+    // 3. TULIS KEMBALI RESULT (ThreadHandle & ClientId) KE USER SPACE
+    //
+    if (VEA_SUCCESS(Status))
+    {
+        if (PreviousMode == UserMode)
+        {
+            _VEA_TRY
+            {
+                *ThreadHandle = LocalThreadHandle;
+                if (ClientId)
+                {
+                    *ClientId = LocalClientId;
+                }
+            }
+            _VEA_EXCEPT(1)
+            {
+                // Proteksi Kebocoran Handle (Rollback Cleanup)
+                ObCloseHandle(LocalThreadHandle, UserMode);
+                Status = STATUS_ACCESS_VIOLATION;
+            }
+            _VEA_END
+        }
+        else
+        {
+            *ThreadHandle = LocalThreadHandle;
+            if (ClientId)
+            {
+                *ClientId = LocalClientId;
+            }
+        }
+    }
+
+    return Status;
+}
+
+ULONG
+VEAPI
+PtResumeThread(
+    IN PKTHREAD Thread,
+    OUT PULONG PreviousSuspendCount OPTIONAL
+)
+{
+    ULONG PreviousCount;
+    ULONG_PTR Flags;
+
+    if (!Thread) return 0;
+
+    Flags = PtpSaveAndDisableInterrupts();
+
+    PreviousCount = Thread->SuspendCount;
+
+    if (Thread->SuspendCount > 0)
+    {
+        Thread->SuspendCount--;
+
+        /* Jika SuspendCount menyentuh angka 0, langsung masukkan thread ke CFS RunQueue! */
+        if (Thread->SuspendCount == 0)
+        {
+            PtpReadyThread(Thread);
+        }
+    }
+
+    PtpRestoreInterrupts(Flags);
+
+    if (PreviousSuspendCount)
+    {
+        *PreviousSuspendCount = PreviousCount;
+    }
+
+    return PreviousCount;
+}
+
+VEASTATUS
+VEAPI
+VeaResumeThread(
+    IN HANDLE ThreadHandle,
+    OUT PULONG PreviousSuspendCount OPTIONAL
+)
+{
+    VEASTATUS Status;
+    PETHREAD Thread;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    ULONG LocalPreviousCount = 0;
+
+    Status = ObReferenceObjectByHandle(
+        ThreadHandle,
+        THREAD_SUSPEND_RESUME,
+        PtEthreadType,
+        PreviousMode,
+        (PVOID*)&Thread
+    );
+
+    if (!VEA_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    LocalPreviousCount = PtResumeThread(&Thread->Tcb, NULL);
+
+    if (PreviousSuspendCount)
+    {
+        if (PreviousMode == UserMode)
+        {
+            _VEA_TRY
+            {
+                *PreviousSuspendCount = LocalPreviousCount;
+            }
+            _VEA_EXCEPT(1)
+            {
+                Status = STATUS_ACCESS_VIOLATION;
+            }
+            _VEA_END
+        }
+        else
+        {
+            *PreviousSuspendCount = LocalPreviousCount;
+        }
+    }
+
+    ObDereferenceObject(Thread);
+    return Status;
 }
 
 /* EOF */

@@ -59,8 +59,8 @@ VEA_EXPORT VOID VEAPI ObioFreeMdl( IN PMDL Mdl );
 #define OBJECT_TO_OBJECT_HEADER(Object) (((POBJECT_HEADER)(Object)) - 1)
 #define ObioGetNextOipStackLocation(Oip) ((POIP_STACK)(Oip->CurrentStackLocation - 1))
 VEA_EXPORT VOID VEAPI ObioFreeOip( POIP Oip );
-VEA_EXPORT VOID VEAPI KsBugCheck( ULONG BugCheckCode );
-VEA_EXPORT VOID VEAPI KsBugCheckEx( ULONG BugCheckCode, ULONG_PTR BugCheckParameter1, ULONG_PTR BugCheckParameter2, ULONG_PTR BugCheckParameter3, ULONG_PTR BugCheckParameter4 );
+VEA_EXPORT NORET VOID VEAPI KsBugCheck( ULONG BugCheckCode );
+VEA_EXPORT NORET VOID VEAPI KsBugCheckEx( ULONG BugCheckCode, ULONG_PTR BugCheckParameter1, ULONG_PTR BugCheckParameter2, ULONG_PTR BugCheckParameter3, ULONG_PTR BugCheckParameter4 );
 VEA_EXPORT VOID VEAPI KsStallExecutionProcessor( IN ULONG Microseconds );
 VEA_EXPORT VOID ObioCopyCurrentOipStackLocationToNext( IN OUT POIP Oip );
 VEA_EXPORT VOID ObioSkipCurrentOipStackLocation( IN OUT POIP Oip );
@@ -103,6 +103,34 @@ VEA_EXPORT VOID VEAPI ObioStartTimer(IN PDEVICE_OBJECT DeviceObject);
 VEA_EXPORT VEASTATUS VEAPI ObioInitializeIoTimer( IN PDEVICE_OBJECT DeviceObject, IN PIO_TIMER_ROUTINE TimerRoutine, IN PVOID Context );
 VEA_EXPORT VOID RtlZeroMemory( PVOID Destination, SIZE_T Length );
 VEA_EXPORT VOID VEAPI UlFreePool(PVOID P);
+VEA_EXPORT VEASTATUS VEAPI ObioGetDeviceObjectPointer( IN PANSI_STRING ObjectName, IN ACCESS_MASK DesiredAccess, OUT PFILE_OBJECT *FileObject, OUT PDEVICE_OBJECT *DeviceObject );
+VEA_EXPORT SIZE_T RtlCompareMemory( const PVOID Source1, const PVOID Source2, SIZE_T Length );
+VEA_EXPORT ULONG RtlStringCbPrintfA( char *Dest, unsigned int cbDest, const char* Format, ... );
+VEA_EXPORT BOOLEAN VEAPI RmAddSystemServiceTable( IN PULONG_PTR Base, IN PULONG Count OPTIONAL, IN ULONG Limit, IN PUCHAR Number, IN ULONG Index );
+VEA_EXPORT NORET VOID VEAPI RiSyscallDispatcherHandler( IN PKTRAP_FRAME TrapFrame, IN PVOID Context );
+VEA_EXPORT VEASTATUS VEAPI PtCreateSystemThread( OUT PHANDLE ThreadHandle, IN ACCESS_MASK DesiredAccess, IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL, IN HANDLE ProcessHandle OPTIONAL, OUT PCLIENT_ID ClientId OPTIONAL, IN PKSTART_ROUTINE StartRoutine, IN PVOID StartContext OPTIONAL );
+VEA_EXPORT VOID VEAPI KsInitializeEvent( IN OUT PKEVENT Event, IN EVENT_TYPE Type, IN BOOLEAN State );
+VEA_EXPORT extern void * memcpy( void *dest, const void *src, SIZE_T count ); 
+VEA_EXPORT VEASTATUS VEAPI KsWaitForSingleObject( IN PVOID Object );
+VEA_EXPORT VOID RtlCopyMemory(PVOID Dest, PVOID Src, SIZE_T N);
+VEA_EXPORT int __attribute__((regparm(1), returns_twice)) VeaSehRegister(volatile VEA_SEH_FRAME *Frame);
+VEA_EXPORT VEASTATUS VEAPI KsUserModeCallback( IN ULONG RoutineIndex, IN PVOID Argument, IN ULONG ArgumentLength, OUT PVOID *Result, OUT PULONG ResultLength );
+VEA_EXPORT VEASTATUS VEAPI BvGetVideoInfo( OUT PVOID *FrameBufferBase, OUT PULONG Width, OUT PULONG Height, OUT PULONG Pitch, OUT PULONG BitsPerPixel, OUT PSIZE_T FrameBufferSize OPTIONAL );
+VEA_EXPORT VEASTATUS VEAPI ObioReportDetectedDevice( IN PDRIVER_OBJECT DriverObject, IN PCSTR DeviceId OPTIONAL, IN PCSTR ServiceName OPTIONAL, IN POBIO_RESOURCE_LIST ResourceList OPTIONAL, IN OUT PDEVICE_OBJECT *DeviceObject );
+VEA_EXPORT VOID VEAPI PtEstablishVeapiCallouts( IN PVEAPI_CALLOUTS_FPNS CalloutData );
+VEA_EXPORT BOOLEAN VEAPI RtlEqualString(const ANSI_STRING *String1, const ANSI_STRING *String2, BOOLEAN CaseInSensitive);
+// WARNING: Prototype/Macro for 'UlWindowStationObjectType' was not found in kernel headers!
+// WARNING: Prototype/Macro for 'UlDesktopObjectType' was not found in kernel headers!
+VEA_EXPORT VEASTATUS VEAPI ObCreateObject( IN KPROCESSOR_MODE ProcessorMode, IN POBJECT_TYPE ObjectType, IN POBJECT_ATTRIBUTES ObjectAttributes, IN KPROCESSOR_MODE OwnershipMode, IN OUT PVOID ParseContext OPTIONAL, IN ULONG ObjectSize, IN ULONG PagedPoolCharge, IN ULONG NonPagedPoolCharge, OUT PVOID *ReturnedObject );
+VEA_EXPORT VEASTATUS VEAPI ObInsertObject( PVOID Object, IN PACCESS_STATE AccessState, IN ACCESS_MASK DesiredAccess, IN ULONG ObjectPointerBias, OUT PVOID *NewObject OPTIONAL, OUT PHANDLE Handle );
+VEA_EXPORT LONG VEAPI RtlRawStringCompare( IN PCSTR String1, IN PCSTR String2 );
+VEA_EXPORT VOID VEAPI MmUnlockPages( PMDL Mdl );
+VEA_EXPORT VOID VEAPI MmProbeAndLockPages( PMDL Mdl, KPROCESSOR_MODE AccessMode, LOCK_OPERATION Operation );
+VEA_EXPORT LONGLONG __divdi3( IN LONGLONG Dividend, IN LONGLONG Divisor );
+VEA_EXPORT VOID RtlMoveMemory( VOID *Destination, const VOID *Source, SIZE_T Length);
+VEA_EXPORT VOID RtlFillMemory( PVOID Destination, SIZE_T Length, UCHAR Fill );
+VEA_EXPORT void *memset(void *ptr, int x, size_t n);
+VEA_EXPORT BOOLEAN VEAPI RtlRawStringEqual( IN PCHAR S1, IN PCHAR S2 );
 
 #ifdef __cplusplus
 }

@@ -52,9 +52,11 @@ VEAPI
 LdrError(IN ULONG ErrorCode)
 {
     CHAR String[16];
+    
+    SrlSendMsg("Error happened: 0x%x\n", ErrorCode);
+
     cmemset(String, 0, sizeof(String));
     chextoascii(ErrorCode, String);
-
     if(InTextMode)
     {
         bios_print_string("ERROR: ");

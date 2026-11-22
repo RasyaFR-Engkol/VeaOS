@@ -31,6 +31,8 @@ KEVENT MmFreePageEvent;
 RTL_BITMAP MiPipBitmap;
 PFN_NUMBER MmHighestPhysicalPage;
 
+extern KSPIN_LOCK MmpTempMapLock;
+
 /* PRIVATE */
 
 static VOID
@@ -44,6 +46,27 @@ MmpInsertZeroedPageHead(IN ULONG Index)
     }
 
     MmFirstZeroedPip = Index;
+}
+
+static
+VOID
+MmpUnlinkZeroedPage(IN ULONG Index)
+{
+    ULONG Flink = MmPipDatabase[Index].Flink.NextPip;
+    ULONG Blink = MmPipDatabase[Index].Blink.PrevPip;
+
+    if (Blink != 0xFFFFFFFF) {
+        MmPipDatabase[Blink].Flink.NextPip = Flink;
+    } else {
+        MmFirstZeroedPip = Flink;
+    }
+
+    if (Flink != 0xFFFFFFFF) {
+        MmPipDatabase[Flink].Blink.PrevPip = Blink;
+    }
+
+    MmPipDatabase[Index].Flink.NextPip = 0xFFFFFFFF;
+    MmPipDatabase[Index].Blink.PrevPip = 0xFFFFFFFF;
 }
 
 static
@@ -127,6 +150,7 @@ MmInitializePip(PBLOCK_BOOT_2 BlockBoot)
 {
     /* Initialize SpinLock */
     KsInitializeSpinlock(&MmPipFreeListLock);
+    KsInitializeSpinlock(&MmpTempMapLock);
 
     /* Initialize Event */
     KsInitializeEvent(&MmFreePageEvent, SynchronizationEvent, FALSE);
@@ -211,7 +235,7 @@ MmInitializePip(PBLOCK_BOOT_2 BlockBoot)
             ULONG page_table_pages = 0;
 
             for (ULONG pde_index = first_pde; pde_index <= last_pde; pde_index++) {
-                if (!MM_GET_PD()[pde_index].bits.present) {
+                if (!MM_GET_PD()[pde_index].Hard.Valid) {
                     page_table_pages++;
                 }
             }
@@ -320,10 +344,10 @@ MmMapPip(VOID)
 
     for (ULONG va = VirtualStart, phys = PhysicalStart; va < VirtualEnd; va += 4096, phys += 4096) 
     {
-        PAGE_ENTRY *pde = MM_GET_PDE(va);
+        PMMPDE pde = MM_GET_PDE(va);
         
         // JIKA PAGE TABLE BELUM ADA: Kita harus bikin!
-        if (!pde->bits.present) {
+        if (!pde->Hard.Valid) {
             if (MmPipPageTableNextPhys >= MmPipPageTableEndPhys) {
                 kdp_print("MM ERROR: PIP page-table reserve exhausted!\n\r");
                 return FALSE;
@@ -334,15 +358,15 @@ MmMapPip(VOID)
 
             DPRINT("MM: PIP page-table backing phys=%08X for va=%08X\n", new_pt_phys, va);
 
-            MMI_WRITE_PDE_VALID(pde, new_pt_phys >> 12);
+            MI_WRITE_PDE_VALID(pde, new_pt_phys >> 12);
 
             PVOID pt_virtual_addr = (PVOID)((ULONG)MM_GET_PTE(va) & 0xFFFFF000);
             MMI_INVALIDATE_TLB((ULONG)pt_virtual_addr);
             RtlZeroMemory(pt_virtual_addr, 4096);
         }
 
-        PAGE_ENTRY *pte = MM_GET_PTE(va);
-        MMI_WRITE_PTE_VALID(pte, phys >> 12);
+        PMMPTE Pte = MM_GET_PTE(va);
+        MMI_WRITE_PTE_VALID(Pte, phys >> 12);
         MMI_INVALIDATE_TLB(va);
     }
 
@@ -357,33 +381,41 @@ VEAPI
 MmAllocatePhysicalPage(VOID)
 {
     KIRQL OldIrql;
+    ULONG AllocatedIndex = 0xFFFFFFFF;
 
     KsAcquireSpinLock(&MmPipFreeListLock, &OldIrql);
-    if (MmFirstFreePip == 0xFFFFFFFF) {
+
+    /* 1. Utamakan ambil dari Zeroed Page List (Lebih cepat & memori sudah bersih) */
+    if (MmFirstZeroedPip != 0xFFFFFFFF) {
+        AllocatedIndex = MmFirstZeroedPip;
+        MmpUnlinkZeroedPage(AllocatedIndex);
+    }
+    /* 2. Jika Zeroed List kosong, ambil dari Free List biasa */
+    else if (MmFirstFreePip != 0xFFFFFFFF) {
+        AllocatedIndex = MmFirstFreePip;
+        MmpUnlinkFreePage(AllocatedIndex);
+    }
+    else {
         KsReleaseSpinLock(&MmPipFreeListLock, OldIrql);
         DPRINT("MM FATAL: Out of Physical Memory!\n\r");
-        return 0; // Return 0 tandanya gagal (OOM)
+        return 0xFFFFFFFF; // Gunakan 0xFFFFFFFF sebagai indikator Out-Of-Memory (bukan 0)
     }
 
-    ULONG AllocatedIndex = MmFirstFreePip;
-    if (AllocatedIndex >= MmTotalPages ||
-        MmPipDatabase[AllocatedIndex].State != PIP_STATE_FREE)
+    if (AllocatedIndex >= MmTotalPages)
     {
         KsReleaseSpinLock(&MmPipFreeListLock, OldIrql);
-        KsBugCheckEx(BAD_POOL_HEADER, 15, AllocatedIndex,
-                     MmTotalPages, 0);
-        return 0;
+        KsBugCheckEx(MEMORY_MANAGEMENT_ERROR, 15, AllocatedIndex, MmTotalPages, 0);
+        return 0xFFFFFFFF;
     }
 
-    MmpUnlinkFreePage(AllocatedIndex);
-
+    /* Ubah status halaman menjadi ACTIVE */
     MmPipDatabase[AllocatedIndex].State = PIP_STATE_ACTIVE;
     MmPipDatabase[AllocatedIndex].ReferenceCount = 1;
     MmPipDatabase[AllocatedIndex].ShareCount = 1;
     MmPipDatabase[AllocatedIndex].PteAddress = 0;
 
     KsReleaseSpinLock(&MmPipFreeListLock, OldIrql);
-    return (AllocatedIndex * 4096);
+    return (AllocatedIndex * PAGE_SIZE);
 }
 
 VOID 
@@ -394,21 +426,23 @@ MmFreePhysicalPage(ULONG PhysicalAddress)
     BOOLEAN PageFreed = FALSE;
 
     if (PhysicalAddress % 4096 != 0) {
-        kdp_print("MM WARNING: Tried to free unaligned physical address!\n\r");
+        DPRINT("MM WARNING: Tried to free unaligned physical address 0x%08X!\n\r", PhysicalAddress);
         return;
     }
 
     ULONG Index = PhysicalAddress / 4096;
 
     if (Index >= MmTotalPages) {
-        kdp_print("MM WARNING: Tried to free invalid physical address!\n\r");
+        DPRINT("MM WARNING: Tried to free invalid physical address 0x%08X!\n\r", PhysicalAddress);
         return;
     }
 
     KsAcquireSpinLock(&MmPipFreeListLock, &OldIrql);
     if (MmPipDatabase[Index].State != PIP_STATE_ACTIVE) {
+        ULONG CurrentState = MmPipDatabase[Index].State;
         KsReleaseSpinLock(&MmPipFreeListLock, OldIrql);
-        kdp_print("MM WARNING: Tried to free a non-active physical page!\n\r");
+        DPRINT("MM WARNING: Tried to free non-active physical page PFN %u (Addr: 0x%08X, State: %u)!\n\r",
+                  Index, PhysicalAddress, CurrentState);
         return;
     }
 
@@ -506,7 +540,7 @@ MmZeroPageThreadRoutine(PVOID Context)
     KIRQL OldIrql;
     ULONG PageIndex;
     ULONG PhysAddress;
-    PAGE_ENTRY *Pte = MM_GET_PTE(MmZeroScratchVa);
+    PMMPTE Pte = MM_GET_PTE(MmZeroScratchVa);
 
     while (TRUE) {
         KsAcquireSpinLock(&MmPipFreeListLock, &OldIrql);
@@ -546,7 +580,7 @@ VEAPI
 MmInitializeZeroPageThreadEvent(VOID)
 {
     VEASTATUS Status;
-    PETHREAD Ethread;
+    HANDLE ThreadHandle;
 
     MmZeroScratchVa = MmAllocateVirtualRange(1);
     if (!MmZeroScratchVa)
@@ -555,17 +589,25 @@ MmInitializeZeroPageThreadEvent(VOID)
         return;
     }
 
-    Ethread = PtCreateSystemThread(
-        (PEPROCESS)PtGetCurrentProcess(),
-        MmZeroPageThreadRoutine,
+    Status = PtCreateSystemThread(
+        &ThreadHandle,
+        THREAD_ALL_ACCESS,
         NULL,
-        NonPagedPool
+        NULL,                                       // ProcessHandle NULL -> default ke PtSystemProcess
+        NULL,                                       // ClientId
+        (PKSTART_ROUTINE)MmZeroPageThreadRoutine,   // Start Routine
+        NULL                                        // Start Context
     );
-    if (!Ethread)
+
+    if (!VEA_SUCCESS(Status))
     {
-        DPRINT("MM: Failed to create Zero Page Event\n");
+        DPRINT("MM: Failed to create Zero Page Event (Status: 0x%X)\n", Status);
         return;
     }
+
+    // Zero Page Thread jalan sebagai worker background permanen, 
+    // jadi handle-nya bisa langsung ditutup
+    VeaClose(ThreadHandle);
 }
 
 BOOLEAN

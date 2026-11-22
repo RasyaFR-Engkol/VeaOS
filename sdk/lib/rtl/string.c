@@ -1,6 +1,7 @@
 #include <rtl.h>
 #include "rtlp.h"
 #include <tag.h>
+#include <teb.h>
 
 static
 VOID
@@ -279,6 +280,19 @@ RtlStringCbPrintfA(
     va_end(args);
 
     return Written;
+}
+
+ULONG
+RtlStringCbVPrintfA(
+    char *Dest, unsigned int cbDest, const char* Format, va_list Args
+)
+{
+    return RtlStringCbPrintfAImpl(
+        Dest,
+        cbDest,
+        Format,
+        Args
+    );
 }
 
 VOID 
@@ -791,6 +805,25 @@ RtlRawStringString(
     return NULL;
 }
 
+BOOLEAN
+VEAPI
+RtlRawStringEqual(
+    IN PCHAR S1,
+    IN PCHAR S2
+)
+{
+    PCHAR c1 = S1;
+    PCHAR c2 = S2;
+
+    while (*c1 && *c2)
+    {
+        if (*c1 != *c2) return FALSE;
+        c1++;
+        c2++;
+    }
+    return (*c1 == *c2);
+}
+
 //
 // Boot Arg
 //
@@ -1092,3 +1125,25 @@ VEASTATUS VEAPI RtlDuplicateAnsiString(
 
     return STATUS_SUCCESS;
 }
+
+LONG
+VEAPI
+RtlRawStringCompare(
+    IN PCSTR String1,
+    IN PCSTR String2
+)
+{
+    if (!String1 && !String2) return 0;
+    if (!String1) return -1;
+    if (!String2) return 1;
+
+    while (*String1 && (*String1 == *String2))
+    {
+        String1++;
+        String2++;
+    }
+
+    return (LONG)((UCHAR)*String1 - (UCHAR)*String2);
+}
+
+/* EOF */

@@ -131,7 +131,7 @@ typedef struct _AHCI_PORT_CONTEXT {
     PDEVICE_OBJECT DiskPdo;
     LIST_ENTRY ChildListEntry;
     KSPIN_LOCK PortLock;
-    PKEVENT CompletionEvent;
+    PKEVENT SyncEvents[AHCI_MAX_COMMAND_SLOTS];
     KDPC CompletionDpc;
     ULONG LastPortIs;
     ANSI_STRING SymbolicLinkName;

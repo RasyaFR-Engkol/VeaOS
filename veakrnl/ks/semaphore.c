@@ -73,7 +73,7 @@ KsReleaseSemaphore(
 
     Semaphore->Header.SignalState = State;
 
-    if (!(InitialState) && !(IsListEmpty(&Semaphore->Header.WaitListHead)))
+    if (!IsListEmpty(&Semaphore->Header.WaitListHead))
     {
         KsWaitTest(&Semaphore->Header);
     }

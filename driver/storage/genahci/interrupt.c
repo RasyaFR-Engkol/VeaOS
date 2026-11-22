@@ -39,6 +39,7 @@ AhciDpcRoutine(
     PortIs = PortCtx->LastPortIs;
     PxSerr = PortRegs->Serr;
     PxTfd  = PortRegs->Tfd;
+    PortCtx->LastPortIs = 0;
 
     if ((PxTfd & AHCI_PxTFD_STS_ERR) || 
         (PortIs & (AHCI_PxIS_TFES | AHCI_PxIS_HBFS | AHCI_PxIS_HBDS | AHCI_PxIS_IFS)))
@@ -46,91 +47,116 @@ AhciDpcRoutine(
         IsFatalError = TRUE;
     }
 
-    if (PortCtx->CompletionEvent)
-    {
-        // Bangunin thread synchronous internal (Identify / Flush)
-        KsSetEvent(PortCtx->CompletionEvent, FALSE);
-    }
-
-    ActiveSlots = (PortCtx->DevExt->HbaRegisters->Cap & AHCI_CAP_SNCQ) ? PortRegs->Sact : PortRegs->Ci;
+    ActiveSlots = PortRegs->Ci;
 
     for (ULONG Slot = 0; Slot < 32; Slot++)
     {
-        // Jika slot dialokasikan di software TAPI bit hardware-nya sudah CLEAR (Selesai)
+        KIRQL OldIrql;
+        POIP Oip = NULL;
+        PKEVENT SyncEvent = NULL;
+        BOOLEAN SlotCompleted = FALSE;
+
+        KsAcquireSpinLock(&PortCtx->PortLock, &OldIrql);
+
+        ActiveSlots = PortRegs->Ci;
         if ((PortCtx->SlotAllocBitmap & (1 << Slot)) && !(ActiveSlots & (1 << Slot)))
         {
-            POIP Oip = (POIP)PortCtx->PendingOip[Slot];
-            PortCtx->PendingOip[Slot] = NULL;
-
-            if (Oip)
+            if (PortCtx->PendingOip[Slot] != NULL)
             {
-                POIP_STACK Stack = ObioGetCurrentOipStackLocation(Oip);
-                PAHCI_IO_CHUNK_CONTEXT Chunk = &PortCtx->ChunkContext[Slot];
+                Oip = (POIP)PortCtx->PendingOip[Slot];
+                PortCtx->PendingOip[Slot] = NULL;
+                SlotCompleted = TRUE;
+            }
+            else if (PortCtx->SyncEvents[Slot] != NULL)
+            {
+                SyncEvent = PortCtx->SyncEvents[Slot];
+                PortCtx->SyncEvents[Slot] = NULL;
+                SlotCompleted = TRUE;
+            }
+            /* Jika keduanya NULL: slot baru di-allocate tapi belum di-issue ke PxCI, biarkan! */
+        }
 
-                if (IsFatalError)
-                {
-                    UCHAR AtaStatus = (UCHAR)(PxTfd & 0xFF);
-                    UCHAR AtaError  = (UCHAR)((PxTfd >> 8) & 0xFF);
+        KsReleaseSpinLock(&PortCtx->PortLock, OldIrql);
 
-                    DPRINT("====================================================\n");
-                    DPRINT("AHCI FATAL ERROR ON PORT %u (SLOT %u)\n", PortCtx->PortNumber, Slot);
-                    DPRINT("  -> PxIS   : 0x%08X\n", PortIs);
-                    DPRINT("  -> PxSERR : 0x%08X\n", PxSerr);
-                    DPRINT("  -> PxTFD  : 0x%08X (Status: 0x%02X, Error: 0x%02X)\n",
-                           PxTfd, AtaStatus, AtaError);
-                    DPRINT("====================================================\n");
+        if (!SlotCompleted)
+        {
+            continue;
+        }
 
-                    Oip->StatusInformation.Status = STATUS_IO_DEVICE_ERROR;
-                    Oip->StatusInformation.Information = 0;
-                }
-                else
-                {
-                    ULONG MaxChunkSize = AHCI_COMMAND_TABLE_PRDT_COUNT * 4096;
-                    ULONG JustTransferred = (Chunk->RemainingBytes >MaxChunkSize) ? MaxChunkSize : Chunk->RemainingBytes;
+        if (Oip)
+        {
+            PAHCI_IO_CHUNK_CONTEXT Chunk = &PortCtx->ChunkContext[Slot];
 
-                    if (!Chunk->IsWrite && Chunk->UsesBounceBuffer && PortCtx->BounceBufferVirtual)
-                    {
-                        PVOID UserCurrentBuffer = NULL;
-                        PMDL Mdl = Oip->MdlAddress;
+            if (IsFatalError)
+            {
+                UCHAR AtaStatus = (UCHAR)(PxTfd & 0xFF);
+                UCHAR AtaError  = (UCHAR)((PxTfd >> 8) & 0xFF);
 
-                        if (Mdl)
-                        {
-                            UserCurrentBuffer = (PVOID)((ULONG_PTR)Mdl->MappedSystemVa + Chunk->BufferByteOffset);
-                        }
-                        else if (Oip->UserBuffer)
-                        {
-                            UserCurrentBuffer = (PVOID)((ULONG_PTR)Oip->UserBuffer + Chunk->BufferByteOffset);
-                        }
+                DPRINT("====================================================\n");
+                DPRINT("AHCI FATAL ERROR ON PORT %u (SLOT %u)\n", PortCtx->PortNumber, Slot);
+                DPRINT("  -> PxIS   : 0x%08X\n", PortIs);
+                DPRINT("  -> PxSERR : 0x%08X\n", PxSerr);
+                DPRINT("  -> PxTFD  : 0x%08X (Status: 0x%02X, Error: 0x%02X)\n",
+                       PxTfd, AtaStatus, AtaError);
+                DPRINT("====================================================\n");
 
-                        if (UserCurrentBuffer)
-                        {
-                            RtlCopyMemory(UserCurrentBuffer, PortCtx->BounceBufferVirtual, JustTransferred);
-                        }
-                    }
+                Oip->StatusInformation.Status = STATUS_IO_DEVICE_ERROR;
+                Oip->StatusInformation.Information = 0;
 
-                    Chunk->TransferredBytes += JustTransferred;
-                    Chunk->RemainingBytes -= JustTransferred;
-
-                    if (Chunk->RemainingBytes > 0)
-                    {
-                        Chunk->CurrentStartLba  += (JustTransferred / PortCtx->SectorSize);
-                        Chunk->BufferByteOffset += JustTransferred;
-
-                        AhciDispatchSubChunk(PortCtx, Slot);
-                        continue;
-                    }
-
-                    Oip->StatusInformation.Status = STATUS_SUCCESS;
-                    Oip->StatusInformation.Information = Chunk->TransferredBytes;
-
-                    ObioCompleteRequest(Oip);
-                    AhciFreeCommandSlot(PortCtx, Slot);
-                }
+                ObioCompleteRequest(Oip);
+                AhciFreeCommandSlot(PortCtx, Slot);
             }
             else
             {
+                ULONG MaxChunkSize = AHCI_COMMAND_TABLE_PRDT_COUNT * 4096;
+                ULONG JustTransferred = (Chunk->RemainingBytes > MaxChunkSize) ? MaxChunkSize : Chunk->RemainingBytes;
+
+                if (!Chunk->IsWrite && Chunk->UsesBounceBuffer && PortCtx->BounceBufferVirtual)
+                {
+                    PVOID UserCurrentBuffer = NULL;
+                    PMDL Mdl = Oip->MdlAddress;
+
+                    if (Mdl)
+                    {
+                        UserCurrentBuffer = (PVOID)((ULONG_PTR)Mdl->MappedSystemVa + Chunk->BufferByteOffset);
+                    }
+                    else if ((Oip->Flags & OIP_BUFFERED_IO) && Oip->AssociatedOip.SystemBuffer)
+                    {
+                        UserCurrentBuffer = (PVOID)((ULONG_PTR)Oip->AssociatedOip.SystemBuffer + Chunk->BufferByteOffset);
+                    }
+                    else if (Oip->UserBuffer)
+                    {
+                        UserCurrentBuffer = (PVOID)((ULONG_PTR)Oip->UserBuffer + Chunk->BufferByteOffset);
+                    }
+
+                    if (UserCurrentBuffer)
+                    {
+                        RtlCopyMemory(UserCurrentBuffer, PortCtx->BounceBufferVirtual, JustTransferred);
+                    }
+                }
+
+                Chunk->TransferredBytes += JustTransferred;
+                Chunk->RemainingBytes -= JustTransferred;
+
+                if (Chunk->RemainingBytes > 0)
+                {
+                    Chunk->CurrentStartLba  += (JustTransferred / PortCtx->SectorSize);
+                    Chunk->BufferByteOffset += JustTransferred;
+
+                    AhciDispatchSubChunk(PortCtx, Slot);
+                    continue;
+                }
+
+                Oip->StatusInformation.Status = STATUS_SUCCESS;
+                Oip->StatusInformation.Information = Chunk->TransferredBytes;
+
+                ObioCompleteRequest(Oip);
                 AhciFreeCommandSlot(PortCtx, Slot);
             }
+        }
+        else if (SyncEvent)
+        {
+            KsSetEvent(SyncEvent, FALSE);
         }
     }
 }
@@ -172,7 +198,7 @@ AhciIsrRoutine(
             PortRegs->Is = PortIs;
             PortRegs->Serr = PortRegs->Serr;
 
-            PortCtx->LastPortIs = PortIs;
+            PortCtx->LastPortIs |= PortIs;
 
             KsInsertQueueDpc(&PortCtx->CompletionDpc, NULL, NULL);
 
@@ -316,9 +342,15 @@ AhciPortTimerRoutine(
                     ObioCompleteRequest(Oip);
                 }
 
-                if (PortCtx->CompletionEvent) KsSetEvent(PortCtx->CompletionEvent, FALSE);
-
-                AhciFreeCommandSlot(PortCtx, Slot);
+                if (PortCtx->SyncEvents[Slot])
+                {
+                    KsSetEvent(PortCtx->SyncEvents[Slot], FALSE);
+                }
+                else
+                {
+                    AhciFreeCommandSlot(PortCtx, Slot);
+                }
+                
                 PortCtx->SlotTimeoutCount[Slot] = 0;
             }
         }

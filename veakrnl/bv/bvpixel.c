@@ -37,6 +37,15 @@ static ULONG BvLogCursorY = 0;
 ULONG COLOR_BG = 0;
 ULONG COLOR_TEXT = 0;
 
+typedef enum _BV_STATE
+{
+    BV_LOGO_UNINIT,
+    BV_LOGO_OK,
+    BV_LOGO_FINISHED
+} BV_STATE;
+
+BV_STATE BvLogoState;
+
 //
 // Font extern
 //
@@ -185,6 +194,8 @@ BvLogoFadeThreadRoutine(IN PVOID Context)
     LARGE_INTEGER DelayInterval;
     DelayInterval.QuadPart = -((LONGLONG)BvFadeIntervalMs * 10000LL);
 
+    BvLogoState = BV_LOGO_OK;
+
     for (ULONG Step = 0; Step <= BvFadeTotalSteps; Step++)
     {
         if (!BvDoWeHaveOwnership() || !BvFadeActive) {
@@ -198,7 +209,12 @@ BvLogoFadeThreadRoutine(IN PVOID Context)
         KsDelayExecutionThread(KernelMode, FALSE, &DelayInterval);
     }
 
-    while (TRUE)
+    while (BvLogoState != BV_LOGO_FINISHED)
+    {
+        __YieldProcessor();
+    }
+
+    while (1)
     {
         __YieldProcessor();
     }
@@ -209,14 +225,28 @@ VOID
 VEAPI
 BvStartLogoFade(VOID)
 {
-    PKTHREAD Thread;
+    HANDLE ThreadHandle;
+    VEASTATUS Status;
 
-    Thread = (PKTHREAD)PtCreateSystemThread(
-        (PEPROCESS)PtGetCurrentProcess(),
-        BvLogoFadeThreadRoutine,
+    Status = PtCreateSystemThread(
+        &ThreadHandle,
+        THREAD_ALL_ACCESS,
         NULL,
-        NonPagedPool
+        NULL,                                      // ProcessHandle NULL -> default ke PtSystemProcess
+        NULL,                                      // ClientId (opsional)
+        (PKSTART_ROUTINE)BvLogoFadeThreadRoutine,  // Start Routine
+        NULL                                       // Context
     );
+
+    if (VEA_SUCCESS(Status))
+    {
+        // Tutup handle karena thread animasi logo jalan di background dan tidak dipantau lagi
+        VeaClose(ThreadHandle);
+    }
+    else
+    {
+        DPRINT("[BV] Gagal membuat thread Logo Fade: 0x%X\n", Status);
+    }
 }
 
 //
@@ -578,3 +608,13 @@ BvDisplayBootLogoFadeIn(VOID)
     BvStartLogoFade();
 }
 
+VOID
+VEAPI
+BvFinalizeBootLogo(VOID)
+{
+    if (!BvDoWeHaveOwnership()) return;
+
+    BvLogoState = BV_LOGO_FINISHED;
+
+    BvClearScreen();
+}

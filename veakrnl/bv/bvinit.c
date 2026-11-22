@@ -18,6 +18,7 @@
 
 /* State */
 VIDEO_BOOT BvInfoBlock;
+BOOLEAN BvVideoDriverInstalled;
 
 VOID
 VEAPI
@@ -42,4 +43,51 @@ BvInitializeDriver(IN PBLOCK_BOOT_2 BlockBoot2)
     /* Setting our BG Color (Default) */
     COLOR_BG = 0xFF000000; // AARRGGBB
     COLOR_TEXT = 0xFF808080; 
+
+    BvVideoDriverInstalled = TRUE;
 }
+
+VEASTATUS
+VEAPI
+BvGetVideoInfo(
+    OUT PVOID *FrameBufferBase,
+    OUT PULONG Width,
+    OUT PULONG Height,
+    OUT PULONG Pitch,
+    OUT PULONG BitsPerPixel,
+    OUT PSIZE_T FrameBufferSize OPTIONAL
+)
+{
+    ULONG ScanlinePitch;
+
+    if (!BvVideoDriverInstalled || !BvInfoBlock.VideoBootAddress)
+    {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    if (!FrameBufferBase || !Width || !Height || !Pitch || !BitsPerPixel)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ScanlinePitch = (ULONG)(ULONG_PTR)BvInfoBlock.AdditionalInformation[0];
+    if (ScanlinePitch == 0)
+    {
+        ScanlinePitch = BvInfoBlock.W * 4;
+    }
+
+    *FrameBufferBase = BvInfoBlock.VideoBootAddress;
+    *Width           = BvInfoBlock.W;
+    *Height          = BvInfoBlock.H;
+    *Pitch           = ScanlinePitch;
+    *BitsPerPixel    = 32;
+
+    if (FrameBufferSize)
+    {
+        *FrameBufferSize = (SIZE_T)(ScanlinePitch * BvInfoBlock.H);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/* EOF */

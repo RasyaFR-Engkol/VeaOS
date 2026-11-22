@@ -71,3 +71,10 @@ KdpDebugBreak(DEBUGSTATUS Reason);
 BOOLEAN
 VEAPI
 KdpSubsystemDump(PCHAR String);
+
+VEASTATUS
+VEAPI
+VeaKdPrint(
+    IN PCHAR Message
+);
+

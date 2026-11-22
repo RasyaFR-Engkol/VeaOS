@@ -1,5 +1,7 @@
 #include <veakrnl.h>
 
+KSPIN_LOCK MmpTempMapLock;
+
 PHYSICAL_ADDRESS
 VEAPI
 MmGetPhysicalAddress(
@@ -7,38 +9,39 @@ MmGetPhysicalAddress(
 )
 {
     PHYSICAL_ADDRESS PhysicalAddress;
-    ULONG VirtualAddress;
-    PAGE_ENTRY *Pde;
-    PAGE_ENTRY *Pte;
-
+    ULONG VirtualAddress = (ULONG)BaseAddress;
+    PMMPDE Pde;
+    PMMPTE Pte;
+ 
     PhysicalAddress.QuadPart = 0;
-    VirtualAddress = (ULONG)BaseAddress;
-    Pde = MM_GET_PDE(VirtualAddress);
-
-    if (!Pde->bits.present)
+ 
+    Pde = MiAddressToPde(VirtualAddress);
+    if (!Pde->Hard.Valid)
     {
         return PhysicalAddress;
     }
-
-    if (Pde->bits.ps_or_pat)
+ 
+    /* Halaman 4MB: frame ada di PDE */
+    if (Pde->Hard.LargePage)
     {
         PhysicalAddress.QuadPart =
-            ((ULONGLONG)(*(ULONG *)Pde & 0xFFC00000)) |
+            ((ULONGLONG)(Pde->Long & 0xFFC00000)) |
             (VirtualAddress & 0x003FFFFF);
         return PhysicalAddress;
     }
-
-    Pte = MM_GET_PTE(VirtualAddress);
-    if (!Pte->bits.present)
+ 
+    Pte = MiAddressToPte(VirtualAddress);
+    if (!Pte->Hard.Valid)
     {
         return PhysicalAddress;
     }
-
+ 
     PhysicalAddress.QuadPart =
-        ((ULONGLONG)(*(ULONG *)Pte & 0xFFFFF000)) |
-        (VirtualAddress & 0x00000FFF);
+        ((ULONGLONG)Pte->Hard.PageFrameNumber << PAGE_SHIFT) |
+        (VirtualAddress & (PAGE_SIZE - 1));
     return PhysicalAddress;
 }
+
 
 PVOID
 VEAPI
@@ -48,77 +51,100 @@ MmMapIoSpace(
     MEMORY_CACHING_TYPE CacheType
 )
 {
-    ULONG Offset = PhysicalAddress & 4095;
-    ULONG AlignedPhys = PhysicalAddress & ~4095;
-    ULONG PageCount = (NumberOfBytes + Offset + 4095) / 4096;
-
-    ULONG BaseVa = MmAllocateVirtualRange(PageCount);
+    ULONG Offset = PhysicalAddress & (PAGE_SIZE - 1);
+    ULONG AlignedPhys = PhysicalAddress & ~(PAGE_SIZE - 1);
+    ULONG PageCount;
+    ULONG BaseVa;
+    ULONG CurrentVa;
+    ULONG CurrentPhys;
+ 
+    if (NumberOfBytes == 0) return NULL;
+ 
+    PageCount = (NumberOfBytes + Offset + (PAGE_SIZE - 1)) / PAGE_SIZE;
+ 
+    BaseVa = MmAllocateVirtualRange(PageCount);
     if (BaseVa == 0) {
         kdp_print("MM: MmMapIoSpace failed to allocate virtual range!\n\r");
         return NULL;
     }
-
-    ULONG CurrentVa = BaseVa;
-    ULONG CurrentPhys = AlignedPhys;
-
+ 
+    CurrentVa = BaseVa;
+    CurrentPhys = AlignedPhys;
+ 
     for (ULONG i = 0; i < PageCount; i++) {
-        
-        PAGE_ENTRY *pde = MM_GET_PDE(CurrentVa);
-        
-        if (!pde->bits.present) {
-            ULONG NewPtPhys = MmAllocatePhysicalPage(); 
+        PMMPDE Pde = MiAddressToPde(CurrentVa);
+ 
+        if (!Pde->Hard.Valid) {
+            ULONG NewPtPhys = MmAllocatePhysicalPage();
             if (NewPtPhys == 0) {
                 kdp_print("MM: MmMapIoSpace OOM creating Page Table!\n\r");
-                MmUnmapIoSpace((PVOID)BaseVa, i * 4096);
+ 
+                /*
+                 * i == 0: belum ada PTE yang dipasang, cukup lepas VAD-nya.
+                 * MmUnmapIoSpace dengan 0 byte langsung return dan akan
+                 * membocorkan VAD.
+                 * i > 0: PTE yang sudah dipasang harus dihapus lewat
+                 * MmUnmapIoSpace (bukan MmFreeVirtualRange langsung), supaya
+                 * frame IO tidak dimasukkan ke free list fisik.
+                 */
+                if (i != 0) {
+                    MmUnmapIoSpace((PVOID)BaseVa, i * PAGE_SIZE);
+                } else {
+                    MmFreeVirtualRange(BaseVa);
+                }
                 return NULL;
             }
-            
-            MMI_WRITE_PDE_VALID(pde, NewPtPhys >> 12);
-
-            PVOID PtVirtualAddr = (PVOID)((ULONG)MM_GET_PTE(CurrentVa) & 0xFFFFF000);
-            MMI_INVALIDATE_TLB((ULONG)PtVirtualAddr);
-            RtlZeroMemory(PtVirtualAddr, 4096);
+ 
+            MI_WRITE_PDE_VALID(Pde, NewPtPhys >> 12);   /* VA kernel: user=0 */
+ 
+            PVOID PtVirtualAddr = (PVOID)((ULONG)MiAddressToPte(CurrentVa) & 0xFFFFF000);
+            MMI_INVALIDATE_TLB(PtVirtualAddr);
+            RtlZeroMemory(PtVirtualAddr, PAGE_SIZE);
         }
-
-        PAGE_ENTRY *pte = MM_GET_PTE(CurrentVa);
-        if (pte->bits.present)
+ 
+        PMMPTE Pte = MiAddressToPte(CurrentVa);
+        if (Pte->Hard.Valid)
         {
             KsBugCheckEx(
                 MEMORY_MANAGEMENT_ERROR,
                 MM_BUGCHECK_PTE_CORRUPTED,
                 CurrentVa,
-                pte->raw,
+                Pte->Long,
                 CurrentPhys
             );
         }
-
-        MMI_WRITE_PTE_VALID(pte, CurrentPhys >> 12);
-
+ 
+        /* Bangun PTE lengkap dengan atribut cache, lalu tulis sekali */
+        MMPTE TempPte;
+        MI_MAKE_VALID_PTE(TempPte, CurrentPhys >> 12, 0, 1);
+ 
         switch (CacheType)
         {
             case MmNonCached:
             case MmNonCachedUnordered:
-                pte->bits.cache_disable = 1;
-                pte->bits.write_through = 1;
+                TempPte.Hard.CacheDisable = 1;
+                TempPte.Hard.WriteThrough = 1;
                 break;
-
+ 
             case MmWriteCombined:
-                // TODO: PAT need to be programmed. Fallback to unchached.
-                pte->bits.cache_disable = 1;
-                pte->bits.write_through = 1;
+                // TODO: PAT need to be programmed. Fallback to uncached.
+                TempPte.Hard.CacheDisable = 1;
+                TempPte.Hard.WriteThrough = 1;
                 break;
-
+ 
             default:
                 break;
         }
-        
+ 
+        MI_WRITE_VALID_PTE(Pte, TempPte);
+ 
         // Refresh TLB CPU
         MMI_INVALIDATE_TLB(CurrentVa);
-
-        CurrentVa += 4096;
-        CurrentPhys += 4096;
+ 
+        CurrentVa += PAGE_SIZE;
+        CurrentPhys += PAGE_SIZE;
     }
-
+ 
     return (PVOID)(BaseVa + Offset);
 }
 
@@ -130,29 +156,31 @@ MmUnmapIoSpace(
 )
 {
     if (BaseAddress == NULL || NumberOfBytes == 0) return;
-
-    ULONG BaseVa = (ULONG)BaseAddress & ~4095;
-    ULONG Offset = (ULONG)BaseAddress & 4095;
-    ULONG PageCount = (NumberOfBytes + Offset + 4095) / 4096;
-
+ 
+    ULONG BaseVa = (ULONG)BaseAddress & ~(PAGE_SIZE - 1);
+    ULONG Offset = (ULONG)BaseAddress & (PAGE_SIZE - 1);
+    ULONG PageCount = (NumberOfBytes + Offset + (PAGE_SIZE - 1)) / PAGE_SIZE;
+ 
     ULONG CurrentVa = BaseVa;
-
+ 
     // 1. Bersihkan PTE tanpa menyentuh PMM/PipDatabase
-    for (ULONG i = 0; i < PageCount; i++) {
-        PAGE_ENTRY *pte = MM_GET_PTE(CurrentVa);
-        
-        if (pte->bits.present) {
-            MI_WRITE_INVALID_PTE(pte); // Hapus mapping murni
+    for (ULONG i = 0; i < PageCount; i++, CurrentVa += PAGE_SIZE) {
+        if (!MiAddressToPde(CurrentVa)->Hard.Valid) {
+            continue;
+        }
+ 
+        PMMPTE Pte = MiAddressToPte(CurrentVa);
+        if (Pte->Hard.Valid) {
+            MI_ERASE_PTE(Pte); // Hapus mapping murni
             MMI_INVALIDATE_TLB(CurrentVa);
         }
-        CurrentVa += 4096;
     }
-
-    // 2. Cari node VAD di AVL Tree untuk dicabut kodenya
-    // Karena kita tidak mau memicu pembebasan page fisik ganda, kita langsung hapus nodenya saja.
-    // Triknya: Panggil MmFreeVirtualRange setelah PTE-nya sudah di-wipe (karena bits.present sudah 0, dia tidak akan memanggil MmFreePhysicalPage)
+ 
+    // 2. Lepas VAD-nya. Karena PTE sudah dihapus (Hard.Valid == 0),
+    // MmFreeVirtualRange tidak akan memanggil MmFreePhysicalPage untuk frame IO.
     MmFreeVirtualRange(BaseVa);
 }
+
 
 PVOID
 VEAPI
@@ -175,55 +203,69 @@ MmProbeAndLockPages(
     ULONG PageCount;
     ULONG CurrentVa;
     ULONG i;
-    PAGE_ENTRY *Pte;
+    PMMPDE Pde;
+    PMMPTE Pte;
 
-    /* Can't lock MDL again */
     if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
     {
         KsBugCheckEx(MEMORY_MANAGEMENT_ERROR, 0x1111, (ULONG_PTR)Mdl, 0, 0);
     }
 
-    PageCount = (Mdl->ByteCount + Mdl->ByteOffset + 4095) / 4096;
+    PageCount = (Mdl->ByteCount + Mdl->ByteOffset + (PAGE_SIZE - 1)) / PAGE_SIZE;
     CurrentVa = (ULONG)Mdl->StartVa;
 
     for (i = 0; i < PageCount; i++)
     {
+        /* Cegah user-mode menyentuh ruang alamat kernel */
+        if (AccessMode != KernelMode && CurrentVa >= 0x80000000UL)
+        {
+            KsBugCheckEx(MEMORY_MANAGEMENT_ERROR, 0x1112, CurrentVa, 0, 0);
+        }
+
         volatile UCHAR *TouchVa = (volatile UCHAR *)CurrentVa;
 
 RetryFault:
-        /* Cek apakah Page Directory atau Page Table belum ada */
-        if (!MM_GET_PDE(CurrentVa)->bits.present || 
-            !MM_GET_PTE(CurrentVa)->bits.present)
+        Pde = MiAddressToPde(CurrentVa);
+        if (!Pde->Hard.Valid)
         {
             if (Operation != IoReadAccess) {
-                // Paksa Write Fault (Membaca lalu menulis ulang hal yang sama)
                 *TouchVa = *TouchVa;
             } else {
-                // Paksa Read Fault (Cukup baca 1 byte)
                 (void)*TouchVa;
             }
-            
-            // Setelah hardware #PF tertangani oleh ISR kamu, cek PTE lagi!
             goto RetryFault;
         }
 
-        Pte = MM_GET_PTE(CurrentVa);
+        /* Halaman 4MB kernel: tidak punya PTE terpisah, PFN langsung dari PDE */
+        if (Pde->Hard.LargePage)
+        {
+            Mdl->PfnArray[i] = ((Pde->Long & 0xFFC00000UL) |
+                                (CurrentVa & 0x003FF000UL)) >> PAGE_SHIFT;
+            CurrentVa += PAGE_SIZE;
+            continue;
+        }
+
+        Pte = MiAddressToPte(CurrentVa);
+        if (!Pte->Hard.Valid)
+        {
+            if (Operation != IoReadAccess) {
+                *TouchVa = *TouchVa;
+            } else {
+                (void)*TouchVa;
+            }
+            goto RetryFault;
+        }
 
         /* Cek apakah butuh Write tapi page masih Read-Only (CoW scenario) */
-        if (Operation != IoReadAccess && !Pte->bits.rw) {
-            
-            // Paksa Write Fault untuk memicu Copy-On-Write
+        if (Operation != IoReadAccess && !Pte->Hard.Write)
+        {
             *TouchVa = *TouchVa;
-            
             goto RetryFault;
         }
 
-        /* Kalau sudah lolos semua, berarti halaman fisik SIAP dan VALID */
-        ULONG PhysAddress = Pte->bits.frame << 12;
-
-        MmReferencePhysicalPage(PhysAddress);
-
-        Mdl->PfnArray[i] = Pte->bits.frame;
+        ULONG Pfn = Pte->Hard.PageFrameNumber;
+        MmReferencePhysicalPage(Pfn << PAGE_SHIFT);
+        Mdl->PfnArray[i] = Pfn;
 
         CurrentVa += PAGE_SIZE;
     }
@@ -231,63 +273,142 @@ RetryFault:
     Mdl->MdlFlags |= MDL_PAGES_LOCKED;
 }
 
-VOID
+NO_THREAD_SAFETY_ANALYSIS
+PVOID
 VEAPI
-MmUnlockPages(
-    IN PMDL Mdl
+MiMapTempPhysicalPage(
+    IN ULONG PhysAddr,
+    OUT PKIRQL OldIrql
 )
 {
-    ULONG PageCount;
-    ULONG i;
+    PMMPDE TempPde = MiAddressToPde(MI_TEMP_ZERO_VA);
+    PMMPTE TempPte = MiAddressToPte(MI_TEMP_ZERO_VA);
+    MMPTE NewEntry;
 
-    if ((Mdl->MdlFlags & MDL_PAGES_LOCKED) == 0) {
-        DPRINT("MM FATAL: Tried to unlock an MDL that is not locked!\n\r");
-        KsBugCheckEx(MEMORY_MANAGEMENT_ERROR, 0x4444, (ULONG_PTR)Mdl, 0, 0);
-        return;
-    }
+    KsAcquireSpinLock(&MmpTempMapLock, OldIrql);
 
-    if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
+    /* Pastikan Page Table untuk MI_TEMP_ZERO_VA (0xDFC00000) sudah ada di CR3 aktif */
+    if (!TempPde->Hard.Valid)
     {
-        KsBugCheckEx(MEMORY_MANAGEMENT_ERROR, 0x5555, (ULONG_PTR)Mdl, 0, 0);
+        ULONG PtPhys = MmAllocatePhysicalPage();
+        if (PtPhys == 0)
+        {
+            KsReleaseSpinLock(&MmpTempMapLock, *OldIrql);
+            return NULL;
+        }
+
+        MI_MAKE_VALID_PTE(NewEntry, PtPhys >> 12, 0, 1); // KernelMode, ReadWrite
+        TempPde->Long = NewEntry.Long;
+
+        /* Invalidate halaman recursive PT (0xfff7f000) lalu nol-kan isinya */
+        PVOID PtVirtualPage = (PVOID)((ULONG_PTR)TempPte & ~(PAGE_SIZE - 1));
+        MMI_INVALIDATE_TLB(PtVirtualPage);
+        RtlZeroMemory(PtVirtualPage, PAGE_SIZE);
     }
 
-    PageCount = (Mdl->ByteCount + Mdl->ByteOffset + (PAGE_SIZE - 1)) / PAGE_SIZE;
+    /* Map halaman fisik target ke MI_TEMP_ZERO_VA */
+    MI_MAKE_VALID_PTE(NewEntry, PhysAddr >> 12, 0, 1);
+    TempPte->Long = NewEntry.Long;
 
-    for (i = 0; i < PageCount; i++) {
-        ULONG PhysAddress = Mdl->PfnArray[i] << 12;
-
-        MmDereferencePhysicalPage(PhysAddress);
-    }
-
-    Mdl->MdlFlags &= ~MDL_PAGES_LOCKED;
+    MMI_INVALIDATE_TLB(MI_TEMP_ZERO_VA);
+    return (PVOID)MI_TEMP_ZERO_VA;
 }
 
+NO_THREAD_SAFETY_ANALYSIS
+VOID
+VEAPI
+MiUnmapTempPhysicalPage(
+    IN KIRQL OldIrql
+)
+{
+    PMMPTE TempPte = MiAddressToPte(MI_TEMP_ZERO_VA);
+
+    TempPte->Long = 0;
+    MMI_INVALIDATE_TLB(MI_TEMP_ZERO_VA);
+
+    KsReleaseSpinLock(&MmpTempMapLock, OldIrql);
+}
+ 
 BOOLEAN
 VEAPI
 MmpEnsurePageTable(ULONG VirtualAddress)
 {
-    PAGE_ENTRY *pde = MM_GET_PDE(VirtualAddress);
+    PMMPDE Pde = MiAddressToPde(VirtualAddress);
+    MMPTE TempPde;
+    ULONG NewPtPhys;
+    KIRQL OldIrql;
 
-    if (pde->bits.present)
+    if (Pde->Hard.Valid)
     {
         return TRUE;
     }
 
-    ULONG NewPtPhys = MmAllocatePhysicalPage();
+    NewPtPhys = MmAllocatePhysicalPage();
     if (NewPtPhys == 0)
     {
         DPRINT("[PDE TRACE] FAIL: MmAllocatePhysicalPage for PT returned 0!\n\r");
         return FALSE;
     }
 
-    PVOID DirectPtVa = (PVOID)(NewPtPhys + 0xC0000000);
-    RtlZeroMemory(DirectPtVa, PAGE_SIZE);
+    /* Nol-kan lewat Temp/Hyperspace PTE SEBELUM PDE dipublikasikan */
+    PVOID TempPtVa = MiMapTempPhysicalPage(NewPtPhys, &OldIrql);
+    RtlZeroMemory(TempPtVa, PAGE_SIZE);
+    MiUnmapTempPhysicalPage(OldIrql);
 
-    MMI_WRITE_PDE_VALID(pde, NewPtPhys >> 12);
+    /* VA user wajib dapat PDE dengan Owner (user) = 1, VA kernel = 0 */
+    MI_MAKE_VALID_PTE(TempPde, NewPtPhys >> 12,
+                      MI_IS_USER_ADDRESS(VirtualAddress), 1);
 
-    PVOID PtVirtualAddr = (PVOID)MM_GET_PTE(VirtualAddress);
-    MMI_INVALIDATE_TLB((ULONG)PtVirtualAddr);
+    /* Publikasikan PDE secara atomik */
+    if (!__sync_bool_compare_and_swap((volatile ULONG *)&Pde->Long, 0, TempPde.Long))
+    {
+        MmFreePhysicalPage(NewPtPhys);
+        return Pde->Hard.Valid ? TRUE : FALSE;
+    }
+
+    MMI_INVALIDATE_TLB(MiAddressToPte(VirtualAddress));
     MMI_INVALIDATE_TLB(VirtualAddress);
 
     return TRUE;
 }
+
+VOID
+VEAPI
+MmUnlockPages(
+    PMDL Mdl
+)
+{
+    ULONG PageCount;
+    ULONG CurrentVa;
+    ULONG i;
+
+    if (!Mdl || !(Mdl->MdlFlags & MDL_PAGES_LOCKED))
+    {
+        return;
+    }
+
+    PageCount = (Mdl->ByteCount + Mdl->ByteOffset + (PAGE_SIZE - 1)) / PAGE_SIZE;
+    CurrentVa = (ULONG)Mdl->StartVa;
+
+    for (i = 0; i < PageCount; i++)
+    {
+        if (Mdl->PfnArray[i] != 0)
+        {
+            BOOLEAN IsLargeKernelPage = (CurrentVa >= 0x80000000UL) &&
+                                        MiAddressToPde(CurrentVa)->Hard.Valid &&
+                                        MiAddressToPde(CurrentVa)->Hard.LargePage;
+
+            if (!IsLargeKernelPage)
+            {
+                MmDereferencePhysicalPage(Mdl->PfnArray[i] << PAGE_SHIFT);
+            }
+        }
+
+        Mdl->PfnArray[i] = 0;
+        CurrentVa += PAGE_SIZE;
+    }
+
+    Mdl->MdlFlags &= ~MDL_PAGES_LOCKED;
+}
+
+/* EOF */

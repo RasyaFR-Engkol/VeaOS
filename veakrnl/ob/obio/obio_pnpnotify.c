@@ -212,8 +212,6 @@ ObioRegisterPlugPlayNotification(
             return STATUS_NOT_SUPPORTED;
     }
 
-    DPRINT("%s returns NotificationEntry %p\n", __FUNCTION__, Entry);
-
     *NotificationEntry = Entry;
 
     return STATUS_SUCCESS;

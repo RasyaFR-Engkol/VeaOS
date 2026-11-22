@@ -24,6 +24,8 @@ PmPartitionInt(
     IN PPM_DEVICE_EXTENSION DeviceExtension
 )
 {
+    VEASTATUS Status;
+
     switch (OipStack->MajorFunction)
     {
         case OIP_MJ_READ:
@@ -56,7 +58,8 @@ PmPartitionInt(
         case OIP_MJ_DEVICE_CONTROL:
         {
             DPRINT("Device Control\n");
-            return PmDeviceControl(Oip, OipStack, DeviceExtension);
+            Status = PmDeviceControl(Oip, OipStack, DeviceExtension);
+            goto CompleteRequest;
         }
 
         case OIP_MJ_PNP:
@@ -65,11 +68,17 @@ PmPartitionInt(
             break;
         }
 
-        ObioSkipCurrentOipStackLocation(Oip);
-        return ObioGoInterruptObject(DeviceExtension->LowerDeviceObject, Oip);
+        default:
+            ObioSkipCurrentOipStackLocation(Oip);
+            return ObioGoInterruptObject(DeviceExtension->LowerDeviceObject, Oip);
     }
 
     DPRINT("Invalid device request: 0x%x Minor 0x%x\n", OipStack->MajorFunction, OipStack->MinorFunction);
     Oip->StatusInformation.Status = STATUS_INVALID_DEVICE_REQUEST;
     return STATUS_INVALID_DEVICE_REQUEST;
+
+CompleteRequest:
+    Oip->StatusInformation.Status = Status;
+    ObioCompleteRequest(Oip);
+    return Status;
 }

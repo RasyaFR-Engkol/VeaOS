@@ -641,4 +641,25 @@ I16 __INTRIN__ __InterlockedExchangeAdd16(volatile I16* Addend, I16 Value)
     return Value;
 }
 
+PVOID __INTRIN__ __InterlockedCompareExchangePointer(volatile void** Target, void* Exchange, void* Comperand)
+{
+    PVOID old_value;
+#if defined(__x86_64__) || defined(_M_X64)
+    __asm__ __volatile__(
+        "lock cmpxchgq %2, %1"
+        : "=a"(old_value), "+m"(*Target)
+        : "r"(Exchange), "0"(Comperand)
+        : "memory", "cc"
+    );
+#else
+    __asm__ __volatile__(
+        "lock cmpxchgl %2, %1"
+        : "=a"(old_value), "+m"(*Target)
+        : "r"(Exchange), "0"(Comperand)
+        : "memory", "cc"
+    );
+#endif
+    return old_value;
+}
+
 /* EOF */

@@ -155,6 +155,7 @@ LdrInitializeGdtTss(IN OUT BLOCK_BOOT_2 *BlockBoot2)
         5. GDT_DATA16
         6. GDT_RESERVED
         7. GDT_PCR
+        8. GDT_TEB
 
         KERNEL GDT Segment:
         1. GDT_NULL
@@ -164,6 +165,7 @@ LdrInitializeGdtTss(IN OUT BLOCK_BOOT_2 *BlockBoot2)
         5. GDT_DATA_R3
         6. GDT_TSS
         7. GDT_PCR
+        8. GDT_TEB
     */
 
     PKGDTENTRY32 GdtHigherHalf;
@@ -254,7 +256,7 @@ LdrInitializeGdtTss(IN OUT BLOCK_BOOT_2 *BlockBoot2)
         TRUE
     );
     
-    // Index 6: KGDT32_DF_TSS (0x38) 
+    // Index 7: KGDT32_DF_TSS (0x38) 
     LdrpSetGdtEntry(
         &GdtHigherHalf[7], 
         (ULONG_PTR)DfTssObject, 
@@ -264,6 +266,18 @@ LdrInitializeGdtTss(IN OUT BLOCK_BOOT_2 *BlockBoot2)
         FALSE, // System Descriptor (0)
         FALSE, // Byte Granularity
         FALSE
+    );
+
+    // Index 8: KGDT32_R3_TEB
+    LdrpSetGdtEntry(
+        &GdtHigherHalf[8], 
+        0x7FFDE000, // Base default TEB thread pertama
+        0xFFF,      // Limit 4095 bytes (1 halaman 4KB)
+        0x3,        // Read/Write Data
+        3,          // WAJIB DPL 3 (Ring 3)
+        TRUE,       // Code/Data Descriptor (S=1)
+        FALSE,      // Byte Granularity (G=0)
+        TRUE        // 32-bit (D/B=1)
     );
 
     Gdtr.Limit = (sizeof(KGDTENTRY32) * GDT_ENTRY_COUNT) - 1;

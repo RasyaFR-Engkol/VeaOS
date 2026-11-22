@@ -1,6 +1,7 @@
 #pragma once
 
 #include "procbind.h"
+#include <mmtype2.h>
 #include "rtl.h"
 
 /* PIP Flags */
@@ -21,8 +22,8 @@ typedef struct _PIP {
     ULONG WsIndex;
 } __attribute__((packed)) PIP, *PPIP;
 
-
 /* PAGE_ENTRY */
+#if 0
 #pragma pack(push, 1)
 typedef union _PAGE_ENTRY {
     ULONG raw; // Buat ngisi nol atau math kasar
@@ -45,15 +46,180 @@ typedef union _PAGE_ENTRY {
 
 typedef PAGE_ENTRY MMPTE, *PMMPTE;
 
+#endif
+
+#pragma pack (push, 1)
+
+typedef struct _HARDWARE_PTE_X86
+{
+    ULONG Valid:1;
+    ULONG Write:1;
+    ULONG Owner:1;
+    ULONG WriteThrough:1;
+    ULONG CacheDisable:1;
+    ULONG Accessed:1;
+    ULONG Dirty:1;
+    ULONG LargePage:1;
+    ULONG Global:1;
+    ULONG CopyOnWrite:1;
+    ULONG Prototype: 1;
+    ULONG reserved: 1;
+    ULONG PageFrameNumber:20;
+} HARDWARE_PTE_X86, *PHARDWARE_PTE_X86;
+
+typedef struct _MMPTE_SOFTWARE
+{
+    ULONG Valid:1;
+    ULONG PageFileLow:4;
+    ULONG Protection:5;
+    ULONG Prototype:1;
+    ULONG Transition:1;
+    ULONG PageFileHigh:20;
+} MMPTE_SOFTWARE;
+
+typedef struct _MMPTE_TRANSITION
+{
+    ULONG Valid:1;
+    ULONG Write:1;
+    ULONG Owner:1;
+    ULONG WriteThrough:1;
+    ULONG CacheDisable:1;
+    ULONG Protection:5;
+    ULONG Prototype:1;
+    ULONG Transition:1;
+    ULONG PageFrameNumber:20;
+} MMPTE_TRANSITION;
+
+typedef struct _MMPTE_PROTOTYPE
+{
+    ULONG Valid:1;
+    ULONG ProtoAddressLow:7;
+    ULONG ReadOnly:1;
+    ULONG WhichPool:1;
+    ULONG Prototype:1;
+    ULONG ProtoAddressHigh:21;
+} MMPTE_PROTOTYPE;
+
+typedef struct _MMPTE_SUBSECTION
+{
+    ULONG Valid:1;
+    ULONG SubsectionAddressLow:4;
+    ULONG Protection:5;
+    ULONG Prototype:1;
+    ULONG SubsectionAddressHigh:20;
+    ULONG WhichPool:1;
+} MMPTE_SUBSECTION;
+
+typedef struct _MMPTE_LIST
+{
+    ULONG Valid:1;
+    ULONG OneEntry:1;
+    ULONG filler0:8;
+    ULONG Prototype:1;
+    ULONG filler1:1;
+    ULONG NextEntry:20;
+} MMPTE_LIST;
+
+typedef struct _MMPTE_HARDWARE
+{
+    ULONG Valid:1;
+#ifndef CONFIG_SMP
+    ULONG Write:1;
+#else
+    ULONG Writable:1;
+#endif
+    ULONG Owner:1;
+    ULONG WriteThrough:1;
+    ULONG CacheDisable:1;
+    ULONG Accessed:1;
+    ULONG Dirty:1;
+    ULONG LargePage:1;
+    ULONG Global:1;
+    ULONG CopyOnWrite:1;
+    ULONG Prototype:1;
+#ifndef CONFIG_SMP
+    ULONG reserved:1;
+#else
+    ULONG Write:1;
+#endif
+    ULONG PageFrameNumber:20;
+} MMPTE_HARDWARE, *PMMPTE_HARDWARE;
+
+typedef struct _MMPTE
+{
+    union
+    {
+#if !defined(_X86PAE_)
+        ULONG Long;
+#else
+        ULONGLONG Long;
+        struct
+        {
+            ULONG LowPart;
+            ULONG HighPart;
+        } HighLow;
+#endif
+        HARDWARE_PTE_X86 Flush;
+        MMPTE_HARDWARE Hard;
+        MMPTE_PROTOTYPE Proto;
+        MMPTE_SOFTWARE Soft;
+        MMPTE_TRANSITION Trans;
+        MMPTE_SUBSECTION Subsect;
+        MMPTE_LIST List;
+    };
+} MMPTE, *PMMPTE,
+  MMPDE, *PMMPDE;
+
+#pragma pack (pop)
+
 struct _CONTROL_AREA;
 
+typedef struct _MMVAD_FLAGS
+{
+#ifdef _WIN64
+    ULONG_PTR CommitCharge:51;
+#else
+    ULONG_PTR CommitCharge:19;
+#endif
+    ULONG_PTR NoChange:1;
+    ULONG_PTR VadType:3;
+    ULONG_PTR MemCommit:1;
+    ULONG_PTR Protection:5;
+    ULONG_PTR Spare:2;
+    ULONG_PTR PrivateMemory:1;
+} MMVAD_FLAGS, *PMMVAD_FLAGS;
+
+typedef struct _MMVAD_FLAGS2
+{
+    ULONG FileOffset:24;
+    ULONG SecNoChange:1;
+    ULONG OneSecured:1;
+    ULONG MultipleSecured:1;
+    ULONG ReadOnly:1;
+    ULONG LongVad:1;
+    ULONG ExtendableFile:1;
+    ULONG Inherit:1;
+    ULONG CopyOnWrite:1;
+} MMVAD_FLAGS2, *PMMVAD_FLAGS2;
+
+
 typedef struct _MM_VAD {
-    RTL_BALANCED_NODE CoreNode; // WAJIB ditaruh di paling atas
+    struct _RTL_BALANCED_NODE CoreNode; // WAJIB ditaruh di paling atas
     ULONG StartingVpn;
     ULONG EndingVpn;
+    union
+    {
+        ULONG_PTR LongFlags;
+        MMVAD_FLAGS VadFlags;
+    } u;
     struct _CONTROL_AREA *ControlArea;
-    ULONG Protection;
-    ULONG ViewOffset;
+    PMMPTE FirstPrototypePte;
+    PMMPTE LastContiguousPte;
+    union
+    {
+        ULONG LongFlags2;
+        MMVAD_FLAGS2 VadFlags2;
+    } u2;
 } MM_VAD, *PMM_VAD;
 
 /* FOR ULPOOL */
@@ -228,7 +394,7 @@ typedef struct _MMWSLENTRY
 typedef struct _MMWSLE_FREE_ENTRY
 {
     ULONG MustBeZero:1;
-#ifdef _WIN64
+#ifdef _VEA64B_
     ULONG PreviousFree: 31;
     LONG NextFree;
 #define MMWSLE_PREVIOUS_FREE_MASK 0x7FFFFFFF
@@ -545,43 +711,18 @@ typedef struct _MM_SECTION_SEGMENT
 #define MM_SEGMENT_INCREATE                 (0x8)
 #define MM_IMAGE_SECTION_FLUSH_DELETE       (0x10)
 
-typedef struct _SECTION_IMAGE_INFORMATION
+typedef enum _SECTION_INFORMATION_CLASS
 {
-    PVOID TransferAddress;
-    ULONG ZeroBits;
-    SIZE_T MaximumStackSize;
-    SIZE_T CommittedStackSize;
-    ULONG SubSystemType;
-    union
-    {
-        struct
-        {
-            USHORT SubSystemMinorVersion;
-            USHORT SubSystemMajorVersion;
-        };
-        ULONG SubSystemVersion;
-    };
-    ULONG GpValue;
-    USHORT ImageCharacteristics;
-    USHORT DllCharacteristics;
-    USHORT Machine;
-    BOOLEAN ImageContainsCode;
-    union
-    {
-        struct
-        {
-            UCHAR ComPlusNativeReady:1;
-            UCHAR ComPlusILOnly:1;
-            UCHAR ImageDynamicallyRelocated:1;
-            UCHAR ImageMappedFlat:1;
-            UCHAR Reserved:4;
-        };
-        UCHAR ImageFlags;
-    };
-    ULONG LoaderFlags;
-    ULONG ImageFileSize;
-    ULONG CheckSum;
-} SECTION_IMAGE_INFORMATION, *PSECTION_IMAGE_INFORMATION;
+    SectionBasicInformation,
+    SectionImageInformation
+} SECTION_INFORMATION_CLASS;
+
+typedef struct _SECTION_BASIC_INFORMATION
+{
+    PVOID BaseAddress;
+    ULONG Attributes;
+    LARGE_INTEGER Size;
+} SECTION_BASIC_INFORMATION, *PSECTION_BASIC_INFORMATION;
 
 typedef struct _MM_IMAGE_SECTION_OBJECT
 {
@@ -636,5 +777,21 @@ typedef ULONG PFN_COUNT;
 #define SEC_BASED 0x00200000
 
 #define MI_USER_PROBE_ADDRESS   (PVOID)0xBFFFFFFF /* Before Kernel Higher Half */
+
+#define MEM_COMMIT           0x1000
+#define MEM_RESERVE          0x2000
+#define MEM_DECOMMIT         0x4000
+#define MEM_RELEASE          0x8000
+#define MEM_FREE            0x10000
+#define MEM_PRIVATE         0x20000
+#define MEM_MAPPED          0x40000
+#define MEM_RESET           0x80000
+#define MEM_TOP_DOWN       0x100000
+#define MEM_LARGE_PAGES  0x20000000
+#define MEM_4MB_PAGES    0x80000000
+
+#define MM_PEB_BASE_ADDRESS 0x7FFDF000
+
+#define MI_TEMP_ZERO_VA   0xDFFFE000
 
 /* EOF */

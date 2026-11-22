@@ -17,26 +17,28 @@ ObioGetPageFrame(
     OUT PFN_NUMBER *PageFrame
 )
 {
-    PAGE_ENTRY *Pde = MM_GET_PDE(VirtualAddress);
-
-    if (!Pde->bits.present) {
+    PMMPDE Pde = MiAddressToPde(VirtualAddress);
+ 
+    if (!Pde->Hard.Valid) {
         return FALSE;
     }
-
-    if (Pde->bits.ps_or_pat) {
-        *PageFrame = ((*(ULONG *)Pde & 0xFFC00000) |
+ 
+    /* Halaman 4MB: frame ada di PDE */
+    if (Pde->Hard.LargePage) {
+        *PageFrame = ((Pde->Long & 0xFFC00000) |
                       (VirtualAddress & 0x003FF000)) >> PAGE_SHIFT;
         return TRUE;
     }
-
-    PAGE_ENTRY *Pte = MM_GET_PTE(VirtualAddress);
-    if (!Pte->bits.present) {
+ 
+    PMMPTE Pte = MiAddressToPte(VirtualAddress);
+    if (!Pte->Hard.Valid) {
         return FALSE;
     }
-
-    *PageFrame = Pte->bits.frame;
+ 
+    *PageFrame = Pte->Hard.PageFrameNumber;
     return TRUE;
 }
+
 
 PMDL
 VEAPI
@@ -83,12 +85,19 @@ ObioAllocateMdl(
     Mdl->ByteCount = Length;
     Mdl->StartVa = PAGE_ALIGN(VirtualAddress);
 
-    /* VeaOS currently has no page-locking primitive; record resident PFNs only. */
     ULONG PageAddress = (ULONG)(ULONG_PTR)Mdl->StartVa;
     for (ULONG Index = 0; Index < PageCount; Index++) {
         if (!ObioGetPageFrame(PageAddress, &Mdl->PfnArray[Index])) {
-            UlFreePoolWithTag(Mdl, OBIO_MDL_TAG);
-            return NULL;
+            /* Jika halaman user-space belum resident (demand-paged), sentuh dulu agar #PF memetakannya */
+            if (PageAddress < 0x80000000UL) {
+                volatile UCHAR *Touch = (volatile UCHAR *)(ULONG_PTR)PageAddress;
+                (VOID)*Touch;
+            }
+
+            if (!ObioGetPageFrame(PageAddress, &Mdl->PfnArray[Index])) {
+                UlFreePoolWithTag(Mdl, OBIO_MDL_TAG);
+                return NULL;
+            }
         }
 
         PageAddress += PAGE_SIZE;
@@ -180,6 +189,10 @@ ObioFreeMdl(
 )
 {
     if (Mdl != NULL) {
+        if (Mdl->MdlFlags & MDL_PAGES_LOCKED) {
+            MmUnlockPages(Mdl);
+        }
+
         UlFreePoolWithTag(Mdl, OBIO_MDL_TAG);
     }
 }

@@ -35,16 +35,15 @@ UlCreateHandleTable(
 HANDLE
 VEAPI
 UlCreateHandle(
-    PHANDLE_TABLE Table,
-    PVOID Object,
-    ULONG GrantedAccess
+    IN PHANDLE_TABLE Table,
+    IN PHANDLE_TABLE_ENTRY HandleTableEntry
 )
 {
     KIRQL OldIrql;
-    PVOID  Owner;
-    ULONG  CountNow;
+    PVOID Owner;
+    ULONG CountNow;
 
-    if (!Table || !Object) return NULL;
+    if (!Table || !HandleTableEntry) return NULL;
 
     KsAcquireSpinLock(&Table->Lock, &OldIrql);
 
@@ -61,25 +60,25 @@ UlCreateHandle(
     // Geser kepala Free List ke entry kosong berikutnya
     Table->FirstFreeIndex = Entry->NextFreeIndex;
 
-    // Isi data objek ke entry tersebut
-    Entry->Object = Object;
+    // Salin seluruh isi HandleTableEntry yang dikirim caller (Object & GrantedAccess)
+    *Entry = *HandleTableEntry;
+
+    // Set metadata owner dan reset link free list entry aktif
     Entry->OwnerThread = PtGetCurrentThread();
-    Owner    = Entry->OwnerThread;
-    Entry->GrantedAccess = GrantedAccess;
-    Entry->NextFreeIndex = 0; 
+    Owner = Entry->OwnerThread;
+    Entry->NextFreeIndex = 0;
 
     Table->HandleCount++;
     CountNow = Table->HandleCount;
 
     KsReleaseSpinLock(&Table->Lock, OldIrql);
 
-    /* Build the public handle value after the table entry is committed. */
+    /* Buat public handle value dari index (INDEX_TO_HANDLE) */
     HANDLE NewHandle = INDEX_TO_HANDLE(NewIndex);
 
-    /* Report that a new handle now owns a reference to the object. */
-    ObpReportLifecycle(NewHandle, CountNow, TRUE, TRUE, Owner, Object);
+    /* Laporkan pembaruan siklus hidup objek ke subsystem */
+    ObpReportLifecycle(NewHandle, CountNow, TRUE, TRUE, Owner, Entry->Object);
 
-    /* Return the handle with its index shifted two bits like NT handles. */
     return NewHandle;
 }
 
@@ -149,3 +148,107 @@ UlDestroyHandle(
 
     return STATUS_SUCCESS;
 }
+
+PHANDLE_TABLE
+VEAPI
+UlDupHandleTable(
+    IN PEPROCESS TargetProcess,
+    IN PHANDLE_TABLE SourceTable
+)
+{
+    PHANDLE_TABLE TargetTable;
+    KIRQL OldIrql;
+    ULONG MaxEntries;
+    ULONG LastFreeIndex = 0;
+
+    UNREFERENCED_PARAMETER(TargetProcess);
+
+    if (!SourceTable) return NULL;
+
+    // Ambil kapasitas maksimal tabel sumber
+    KsAcquireSpinLock(&SourceTable->Lock, &OldIrql);
+    MaxEntries = SourceTable->MaxEntries;
+    KsReleaseSpinLock(&SourceTable->Lock, OldIrql);
+
+    if (MaxEntries < 2) return NULL;
+
+    // 1. Alokasikan struktur HANDLE_TABLE baru
+    TargetTable = UlAllocatePoolZero(NonPagedPool, sizeof(HANDLE_TABLE), 'TbHn');
+    if (!TargetTable) return NULL;
+
+    TargetTable->Entries = UlAllocatePoolZero(
+        NonPagedPool,
+        sizeof(HANDLE_TABLE_ENTRY) * MaxEntries,
+        'EnHn'
+    );
+    if (!TargetTable->Entries)
+    {
+        UlFreePoolWithTag(TargetTable, 'TbHn');
+        return NULL;
+    }
+
+    TargetTable->MaxEntries = MaxEntries;
+    TargetTable->HandleCount = 0;
+    TargetTable->FirstFreeIndex = 0;
+    KsInitializeSpinlock(&TargetTable->Lock);
+
+    // Lock tabel sumber selama proses pengkopian entry
+    KsAcquireSpinLock(&SourceTable->Lock, &OldIrql);
+
+    // 2. Iterasi seluruh entry (Index 1 sampai MaxEntries - 1)
+    for (ULONG i = 1; i < MaxEntries; i++)
+    {
+        PHANDLE_TABLE_ENTRY SrcEntry = &SourceTable->Entries[i];
+        PHANDLE_TABLE_ENTRY DstEntry = &TargetTable->Entries[i];
+
+        // Cek apakah slot di Parent terisi DAN memiliki flag OBJ_INHERIT
+        if (SrcEntry->Object != NULL && (SrcEntry->GrantedAccess & OBJ_INHERIT))
+        {
+            // Salin detail entry dan pertahankan Index yang sama
+            DstEntry->Object = SrcEntry->Object;
+            DstEntry->GrantedAccess = SrcEntry->GrantedAccess;
+            DstEntry->OwnerThread = PtGetCurrentThread();
+            DstEntry->NextFreeIndex = 0;
+
+            // Naikkan Reference Count objek agar tidak ter-free jika Parent menutup handle
+            ObReferenceObject(SrcEntry->Object);
+
+            TargetTable->HandleCount++;
+
+            /* Laporkan pembaruan lifecycle handle untuk child process */
+            HANDLE HandleVal = INDEX_TO_HANDLE(i);
+            ObpReportLifecycle(
+                HandleVal,
+                TargetTable->HandleCount,
+                TRUE,
+                TRUE,
+                DstEntry->OwnerThread,
+                DstEntry->Object
+            );
+        }
+        else
+        {
+            // Slot ini kosong atau TIDAK diwariskan -> Sambungkan ke Free List TargetTable
+            DstEntry->Object = NULL;
+            DstEntry->OwnerThread = NULL;
+            DstEntry->GrantedAccess = 0;
+            DstEntry->NextFreeIndex = 0;
+
+            if (TargetTable->FirstFreeIndex == 0)
+            {
+                TargetTable->FirstFreeIndex = i;
+            }
+            else
+            {
+                TargetTable->Entries[LastFreeIndex].NextFreeIndex = i;
+            }
+            LastFreeIndex = i;
+        }
+    }
+
+    KsReleaseSpinLock(&SourceTable->Lock, OldIrql);
+
+    return TargetTable;
+}
+
+/* EOF */

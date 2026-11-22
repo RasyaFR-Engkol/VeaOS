@@ -25,3 +25,4 @@
 #define TAG_IO_TIMER 'IoTm'
 #define TAG_MM_SECTION_SEGMENT 'MmSm'
 #define TAG_MODULE_OBJECT 'ObMd'
+#define TAG_KPC_MESSAGE 'kMSG'

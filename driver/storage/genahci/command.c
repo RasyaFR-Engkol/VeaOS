@@ -75,10 +75,17 @@ AhciExecutePassThroughCommand(
     PAHCI_COMMAND_HEADER CmdHeader;
     PAHCI_COMMAND_TABLE CmdTable;
     PFIS_REG_H2D Fis;
+    ULONG Slot;
     PVOID DmaBufferVirtual = NULL;
     PHYSICAL_ADDRESS DmaBufferPhysical, MaxPhysicalAddress;
     BOOLEAN IsWrite = (AtaPt->AtaFlags & ATA_FLAGS_DATA_OUT) != 0;
     VEASTATUS Status;
+
+    Slot = AhciAllocateCommandSlot(PortCtx);
+    if (Slot == 0xFFFFFFFF)
+    {
+        return STATUS_DEVICE_BUSY;
+    }
 
     MaxPhysicalAddress.QuadPart = DevExt->Supports64BitDma ? 0xFFFFFFFFFFFFFFFFULL : 0xFFFFFFFFULL;
 
@@ -87,6 +94,7 @@ AhciExecutePassThroughCommand(
         DmaBufferVirtual = MmAllocateContiguousMemory(AtaPt->DataTransferLength, MaxPhysicalAddress);
         if (!DmaBufferVirtual)
         {
+            AhciFreeCommandSlot(PortCtx, Slot);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
@@ -98,10 +106,7 @@ AhciExecutePassThroughCommand(
         DmaBufferPhysical = MmGetPhysicalAddress(DmaBufferVirtual);
     }
 
-    /* 
-     * Inisialisasi Slot 0, Command Header, Table, dan Base FIS via Helper
-     */
-    AhciPrepareH2dCommand(PortCtx, 0, IsWrite, DmaBufferVirtual ? 1 : 0, &CmdHeader, &CmdTable, &Fis);
+    AhciPrepareH2dCommand(PortCtx, Slot, IsWrite, DmaBufferVirtual ? 1 : 0, &CmdHeader, &CmdTable, &Fis);
 
     if (DmaBufferVirtual)
     {
@@ -127,7 +132,7 @@ AhciExecutePassThroughCommand(
         Fis->LbaHighExp      = AtaPt->PreviousTaskFile[4];
     }
 
-    Status = AhciExecuteSyncCommand(PortCtx, 0);
+    Status = AhciExecuteSyncCommand(PortCtx, Slot);
 
     if (VEA_SUCCESS(Status) && DmaBufferVirtual && !IsWrite)
     {
@@ -139,6 +144,7 @@ AhciExecutePassThroughCommand(
         MmFreeContiguousMemory(DmaBufferVirtual);
     }
 
+    AhciFreeCommandSlot(PortCtx, Slot);
     return Status;
 }
 
@@ -152,19 +158,26 @@ AhciSendFlushCache(
     PAHCI_COMMAND_HEADER CmdHeader;
     PAHCI_COMMAND_TABLE CmdTable;
     PFIS_REG_H2D Fis;
+    ULONG Slot;
 
-    // Slot 0 dipasang untuk internal flush
-    AhciPrepareH2dCommand(PortCtx, 0, FALSE, 0, &CmdHeader, &CmdTable, &Fis);
+    Slot = AhciAllocateCommandSlot(PortCtx);
+    if (Slot == 0xFFFFFFFF)
+    {
+        return STATUS_DEVICE_BUSY;
+    }
+
+    AhciPrepareH2dCommand(PortCtx, Slot, FALSE, 0, &CmdHeader, &CmdTable, &Fis);
 
     Fis->Command = (PortCtx->TotalSectors > 0) ? ATA_CMD_FLUSH_CACHE_EX : ATA_CMD_FLUSH_CACHE;
 
-    VEASTATUS Status = AhciExecuteSyncCommand(PortCtx, 0);
+    VEASTATUS Status = AhciExecuteSyncCommand(PortCtx, Slot);
 
     if (!VEA_SUCCESS(Status))
     {
         DPRINT("AHCI: Port %u - FLUSH CACHE Failed (Status: 0x%x)\n", PortCtx->PortNumber, Status);
     }
 
+    AhciFreeCommandSlot(PortCtx, Slot);
     return Status;
 }
 

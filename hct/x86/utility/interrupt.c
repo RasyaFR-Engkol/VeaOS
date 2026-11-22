@@ -21,9 +21,9 @@ KIDTDESCRIPTOR32 KiIdt[256];
 KIDTR32 KsIdt32;
 UCHAR HctIsrBitmap[32];
 static HCT_INTERRUPT_INTERNAL HctInternalTable[0x1A];
-static HCT_INTERRUPT_EXTERNAL HctExternalTable[256 - 0x20];
+static HCT_INTERRUPT_EXTERNAL HctExternalTable[256 - HCT_EXTERNAL_BASE];
 extern ULONG_PTR HctTrapStubs[0x1A];
-extern ULONG_PTR HctIrqStubs[256 - 0x20];
+extern ULONG_PTR HctIrqStubs[256 - HCT_EXTERNAL_BASE];
 static UCHAR DfStackBuffer[4096] __attribute__((aligned(16)));
 
 /* FUNCTION */
@@ -53,6 +53,7 @@ VOID
 VEAPI
 HctpInterruptHandler(IN PKTRAP_FRAME Frame, IN ULONG IsrVector)
 {
+    // 1. Handling CPU Exception (0x00 - 0x19)
     if (IsrVector <= 0x19)
     {
         PHCT_INTERRUPT_INTERNAL Internal;
@@ -60,7 +61,7 @@ HctpInterruptHandler(IN PKTRAP_FRAME Frame, IN ULONG IsrVector)
         Internal = &HctInternalTable[IsrVector];
         if (Internal->Used && Internal->HandlerRoutine)
         {
-            Internal->HandlerRoutine(Frame, IsrVector); // Pass trapframe jika ada
+            Internal->HandlerRoutine(Frame, IsrVector);
             return;
         }
         
@@ -68,15 +69,15 @@ HctpInterruptHandler(IN PKTRAP_FRAME Frame, IN ULONG IsrVector)
         return;
     }
 
-    // 2. Handling External / IRQ Interrupt (0x20 - 0xFF)
-    if (IsrVector >= 0x20 && IsrVector <= 0xFF)
+    // 2. Handling External / Software / IRQ Interrupt (0x1F - 0xFF)
+    if (IsrVector >= HCT_EXTERNAL_BASE && IsrVector <= 0xFF)
     {
         PHCT_INTERRUPT_EXTERNAL External;
         ULONG Index;
         KIRQL OldIrql;
         KIRQL InterruptIrql;
 
-        Index = IsrVector - 0x20;
+        Index = IsrVector - HCT_EXTERNAL_BASE;
         External = &HctExternalTable[Index];
 
         if (External->Used)
@@ -157,9 +158,9 @@ HctInitializeIsr(VOID)
         HctpSetIdtGate((UCHAR)i, HctTrapStubs[i], KGDT32_R0_CODE, IDT_FLAGS_INTR_RING0);
     }
 
-    for (i = 0; i < (256 - 0x20); i++)
+    for (i = 0; i < (256 - HCT_EXTERNAL_BASE); i++)
     {
-        ULONG Vector = i + 0x20;
+        ULONG Vector = i + HCT_EXTERNAL_BASE;
 
         HctExternalTable[i].Vector = Vector;
         HctExternalTable[i].Used = FALSE;
@@ -254,7 +255,7 @@ HctConnectInterruptToIsr(
         return Status;
     }
 
-    ExternalIndex = IsrVector - 0x20;
+    ExternalIndex = IsrVector - HCT_EXTERNAL_BASE;
 
     HctExternalTable[ExternalIndex].Interrupt = Interrupt;
     HctExternalTable[ExternalIndex].Handler = NULL;
@@ -298,12 +299,12 @@ HctDisconnectInterruptFromIsr(IN PKINTERRUPT Interrupt)
     }
 
     IsrVector = Interrupt->Vector;
-    if (IsrVector < 0x20 || IsrVector > 0xFF)
+    if (IsrVector < HCT_EXTERNAL_BASE || IsrVector > 0xFF)
     {
         return STATUS_INVALID_PARAMETER;
     }
 
-    ExternalIndex = IsrVector - 0x20;
+    ExternalIndex = IsrVector - HCT_EXTERNAL_BASE;
     External = &HctExternalTable[ExternalIndex];
 
     if (!External->Used || External->IsSystemInterrupt ||
@@ -360,10 +361,11 @@ HctRegisterSystemIsr(
 )
 {
     ULONG ExternalIndex;
+    ULONG Vector = IsrVector;
 
-    if (IsrVector < 0x20 || IsrVector > 0xFF)
+    if (Vector < 0x20 && Vector != 0x1F)
     {
-        DPRINT("Invalid System ISR Vector: 0x%X\n", IsrVector);
+        DPRINT("Invalid System ISR Vector: 0x%X\n", Vector);
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -373,7 +375,7 @@ HctRegisterSystemIsr(
         return STATUS_KINTERRUPT_OCCUPIED;
     }
 
-    ExternalIndex = IsrVector - 0x20;
+    ExternalIndex = IsrVector - HCT_EXTERNAL_BASE;
 
     HctExternalTable[ExternalIndex].Vector = IsrVector;
     HctExternalTable[ExternalIndex].Handler = HandlerRoutine;
@@ -429,12 +431,12 @@ HctConnectMessageInterrupt(
         return STATUS_KINTERRUPT_OCCUPIED;
     }
 
-    HctExternalTable[Vector - 0x20].Interrupt = Interrupt;
-    HctExternalTable[Vector - 0x20].Handler = NULL;
-    HctExternalTable[Vector - 0x20].Vector = Vector;
-    HctExternalTable[Vector - 0x20].IsSystemInterrupt = FALSE;
-    HctExternalTable[Vector - 0x20].Irql = 0;
-    HctExternalTable[Vector - 0x20].Used = TRUE;
+    HctExternalTable[Vector - HCT_EXTERNAL_BASE].Interrupt = Interrupt;
+    HctExternalTable[Vector - HCT_EXTERNAL_BASE].Handler = NULL;
+    HctExternalTable[Vector - HCT_EXTERNAL_BASE].Vector = Vector;
+    HctExternalTable[Vector - HCT_EXTERNAL_BASE].IsSystemInterrupt = FALSE;
+    HctExternalTable[Vector - HCT_EXTERNAL_BASE].Irql = 0;
+    HctExternalTable[Vector - HCT_EXTERNAL_BASE].Used = TRUE;
 
     Destination = (ApicRead(APIC_REG_ID) >> 24) & 0xFF;
     Message->AddressLow = HCT_MSI_ADDRESS_BASE | (Destination << 12);

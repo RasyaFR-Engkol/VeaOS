@@ -240,9 +240,18 @@ AdvancedMode:
 
 void main(void)
 {
+    //
+    // Initialize Serial Debugging
+    //
+
+    SrlInit();
+
+    SrlSendMsg("Serial Initialize succeed\n");
+
     PAGE_ENTRY *Pde = LmInitSystem();
     if(!Pde)
     {
+        SrlSendMsg("Init Memory Failure\n");
         LdrError(STATUS_LOADER_MEMORY_FAILURE);
         while(1) asm("hlt");
     }

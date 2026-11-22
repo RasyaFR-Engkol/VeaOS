@@ -15,34 +15,34 @@ PAGE_ENTRY *make_cr3_higher_half(void)
 
     for (int i = 0; i < 1024; i++) {
         // Identity Map Table
-        page_table_idt[i].bits.present = 1;
-        page_table_idt[i].bits.rw = 1;         // Boleh dibaca tulis
-        page_table_idt[i].bits.user = 0;       // Khusus ring 0 (Kernel/Loader)
-        page_table_idt[i].bits.frame = i;      // Frame fisik 0, 1, 2... (Address >> 12)
+        page_table_idt[i].Hard.Valid = 1;
+        page_table_idt[i].Hard.Write = 1;         // Boleh dibaca tulis
+        page_table_idt[i].Hard.Owner = 0;       // Khusus ring 0 (Kernel/Loader)
+        page_table_idt[i].Hard.PageFrameNumber = i;      // Frame fisik 0, 1, 2... (Address >> 12)
 
         // Higher Half Map Table (Isinya sama persis, cuma ditaruh di tempat beda)
-        page_table_hhk[i].bits.present = 1;
-        page_table_hhk[i].bits.rw = 1;
-        page_table_hhk[i].bits.user = 0;
-        page_table_hhk[i].bits.frame = i; 
+        page_table_hhk[i].Hard.Valid = 1;
+        page_table_hhk[i].Hard.Write = 1;
+        page_table_hhk[i].Hard.Owner = 0;
+        page_table_hhk[i].Hard.PageFrameNumber = i; 
     }
 
-    page_directory[0].bits.present = 1;
-    page_directory[0].bits.rw = 1;
-    page_directory[0].bits.user = 0;
-    page_directory[0].bits.frame = PAGE_TABLE_IDT_ADDR >> 12;
+    page_directory[0].Hard.Valid = 1;
+    page_directory[0].Hard.Write = 1;
+    page_directory[0].Hard.Owner = 0;
+    page_directory[0].Hard.PageFrameNumber = PAGE_TABLE_IDT_ADDR >> 12;
 
     // Pasang Higher Half (Index 768 mewakili Virtual Address 0xC0000000 - 0xC03FFFFF)
     // Kenapa 768? Karena 0xC0000000 / 4 Megabyte = 768.
-    page_directory[768].bits.present = 1;
-    page_directory[768].bits.rw = 1;
-    page_directory[768].bits.user = 0;
-    page_directory[768].bits.frame = PAGE_TABLE_HHK_ADDR >> 12;
+    page_directory[768].Hard.Valid = 1;
+    page_directory[768].Hard.Write = 1;
+    page_directory[768].Hard.Owner = 0;
+    page_directory[768].Hard.PageFrameNumber = PAGE_TABLE_HHK_ADDR >> 12;
 
-    page_directory[1023].bits.present = 1;
-    page_directory[1023].bits.rw = 1;
-    page_directory[1023].bits.user = 0;
-    page_directory[1023].bits.frame = PAGE_DIR_ADDR >> 12;
+    page_directory[1023].Hard.Valid = 1;
+    page_directory[1023].Hard.Write = 1;
+    page_directory[1023].Hard.Owner = 0;
+    page_directory[1023].Hard.PageFrameNumber = PAGE_DIR_ADDR >> 12;
 
     return page_directory;
 }
@@ -57,18 +57,18 @@ BLOCK_BOOT_1 *relocate_block_boot_to_higher_half(BLOCK_BOOT_1 *boot_info, PAGE_E
     cmemset(lfb_pt, 0, 4096);
 
     for (uint32_t i = 0; i < num_pages; i++) {
-        lfb_pt[i].bits.present = 1;
-        lfb_pt[i].bits.rw = 1;
-        lfb_pt[i].bits.user = 0;
+        lfb_pt[i].Hard.Valid = 1;
+        lfb_pt[i].Hard.Write = 1;
+        lfb_pt[i].Hard.Owner = 0;
         // Alamat fisik digeser 12 bit kanan buat dapet Frame
-        lfb_pt[i].bits.frame = (lfb_phys / 4096) + i;
+        lfb_pt[i].Hard.PageFrameNumber = (lfb_phys / 4096) + i;
     }
 
     uint32_t pd_idx = LFB_VIRTUAL_ADDR >> 22;
-    pd[pd_idx].bits.present = 1;
-    pd[pd_idx].bits.rw = 1;
-    pd[pd_idx].bits.user = 0;
-    pd[pd_idx].bits.frame = PAGE_TABLE_LFB_ADDR >> 12;
+    pd[pd_idx].Hard.Valid = 1;
+    pd[pd_idx].Hard.Write = 1;
+    pd[pd_idx].Hard.Owner = 0;
+    pd[pd_idx].Hard.PageFrameNumber = PAGE_TABLE_LFB_ADDR >> 12;
 
     boot_info->VideoBoot.VideoBootAddress = (void*)LFB_VIRTUAL_ADDR;
     if (boot_info->AcpiTable != NULL) {

@@ -41,22 +41,24 @@ VOID
 VEAPI
 HctpDispatcherHandler(IN PKTRAP_FRAME Frame, IN ULONG Stubs)
 {
-    KIRQL OldIrql;
+    KIRQL OldIrql = KeGetCurrentIrql();
 
-    // EOI agar timer bisa masuk
+    // Naikkan IRQL & APIC TPR ke DISPATCH_LEVEL dulu sebelum EOI & sti!
+    KeSetCurrentIrql(DISPATCH_LEVEL);
     ApicEndSystemInterrupt();
 
     __Start();
     KsiDispatchInterrupt();
     __Stop();
+
+    // Turunkan TPR kembali ke OldIrql (PASSIVE_LEVEL) SAAT IF=0, tepat sebelum iretd!
+    KeSetCurrentIrql(OldIrql);
 }
 
 VOID
 VEAPI
 HctpApcHandler(IN PKTRAP_FRAME Frame, IN ULONG Stubs)
 {
-    ApicEndSystemInterrupt();
-
     __Start();
 
     KsDeliverApc(KernelMode, NULL, Frame);

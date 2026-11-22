@@ -68,81 +68,80 @@ SfAccessCheck(
     if (!GrantedAccess) return FALSE;
     *GrantedAccess = 0;
 
-    // Kernel mode caller tanpa token / bypass
-    if (!ClientToken) return FALSE;
-
-    // 1. Map Generic Access Mask ke Spesifik Access Mask
     SfMapGenericMask(&DesiredAccess, GenericMapping);
 
-    // Jika caller tidak minta hak apa-apa (0)
     if (DesiredAccess == 0)
     {
         return TRUE;
     }
 
-    // 2. NULL Security Descriptor atau NULL DACL = Grant Full Access! (Standard NT Behavior)
     if (!SecurityDescriptor || !SecurityDescriptor->Dacl)
     {
         *GrantedAccess = DesiredAccess;
         return TRUE;
     }
 
+    if (!ClientToken)
+    {
+        DPRINT("ClientToken: %p\n", ClientToken);
+        KdPrintf("[SF/DENY] ClientToken is NULL! DesiredAccess=0x%X\n", DesiredAccess);
+        return FALSE;
+    }
+
     PVEA_ACL Dacl = SecurityDescriptor->Dacl;
 
-    // Jika DACL kosong (AceCount == 0), tidak ada yang diizinkan
     if (Dacl->AceCount == 0)
     {
+        KdPrintf("[SF/DENY] DACL AceCount == 0! DesiredAccess=0x%X\n", DesiredAccess);
         return FALSE;
     }
 
     ULONG RemainingAccess = DesiredAccess;
     ULONG LocalGrantedAccess = 0;
-
-    // Pointer ke ACE pertama (persis setelah header VEA_ACL)
     PVEA_ACE CurrentAce = (PVEA_ACE)(Dacl + 1);
 
-    // 3. Iterasi seluruh ACE di dalam DACL
     for (USHORT i = 0; i < Dacl->AceCount; i++)
     {
-        // Cek apakah TargetSid pada ACE cocok dengan Token Pemanggil
         if (SfpMatchSidWithToken(ClientToken, &CurrentAce->TargetSid))
         {
             if (CurrentAce->AceType == DENY)
             {
-                // DENY ACE: Jika bit yang dilarang bertabrakan dengan bit yang diminta -> REJECT!
                 if (RemainingAccess & CurrentAce->AccessMask)
                 {
+                    KdPrintf("[SF/DENY] Hit DENY ACE[%u] Mask=0x%X\n", i, CurrentAce->AccessMask);
                     *GrantedAccess = 0;
-                    return FALSE; // Access Denied!
+                    return FALSE;
                 }
             }
             else if (CurrentAce->AceType == ALLOW)
             {
-                // ALLOW ACE: Ambil bit izin yang dicocokkan
                 ULONG MatchedAccess = (RemainingAccess & CurrentAce->AccessMask);
-                
                 LocalGrantedAccess |= MatchedAccess;
-                RemainingAccess &= ~MatchedAccess; // Hapus bit yang sudah didapatkan
+                RemainingAccess &= ~MatchedAccess;
 
-                // Jika seluruh hak akses yang diminta sudah terpenuhi!
                 if (RemainingAccess == 0)
                 {
                     *GrantedAccess = LocalGrantedAccess;
-                    return TRUE; // Access Granted!
+                    return TRUE;
                 }
             }
         }
 
-        // Pindah ke ACE berikutnya di memori
         CurrentAce = (PVEA_ACE)((PUCHAR)CurrentAce + CurrentAce->AceSize);
     }
 
-    // Jika loop selesai tapi masih ada hak akses yang belum terpenuhi
-    if (RemainingAccess == 0)
-    {
-        *GrantedAccess = LocalGrantedAccess;
-        return TRUE;
-    }
+    /* Dump lengkap jika loop selesai tapi akses masih kurang */
+    KdPrintf("[SF/DENY] No matching ALLOW ACE! Desired=0x%X, Remaining=0x%X\n",
+             DesiredAccess, RemainingAccess);
+    KdPrintf("  ClientToken->UserSid : Rev=%c Auth=%u Mach=0x%X User=0x%X\n",
+             ClientToken->UserSid.Revision, ClientToken->UserSid.Authority,
+             ClientToken->UserSid.MachineID, ClientToken->UserSid.UserID);
+
+    PVEA_ACE FirstAce = (PVEA_ACE)(Dacl + 1);
+    KdPrintf("  DACL ACE[0].TargetSid: Rev=%c Auth=%u Mach=0x%X User=0x%X (Mask=0x%X)\n",
+             FirstAce->TargetSid.Revision, FirstAce->TargetSid.Authority,
+             FirstAce->TargetSid.MachineID, FirstAce->TargetSid.UserID,
+             FirstAce->AccessMask);
 
     *GrantedAccess = 0;
     return FALSE;
@@ -220,3 +219,86 @@ SfTestSecuritySubsystem(VOID)
 
     KdPrintf("=====================================================\n\r\n\r");
 }
+
+VEASTATUS
+VEAPI
+SfCreateAccessStateEx(
+    IN PETHREAD Thread OPTIONAL,
+    IN PEPROCESS Process,
+    IN OUT PACCESS_STATE AccessState,
+    IN OUT PAUX_ACCESS_DATA AuxData,
+    IN ACCESS_MASK DesiredAccess,
+    IN PGENERIC_MAPPING GenericMapping OPTIONAL
+)
+{
+    PEPROCESS TargetProcess = Process;
+    PVEA_TOKEN CapturedToken = NULL;
+
+    if (!AccessState || !AuxData)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(AccessState, sizeof(ACCESS_STATE));
+    RtlZeroMemory(AuxData, sizeof(AUX_ACCESS_DATA));
+
+    if (!TargetProcess)
+    {
+        TargetProcess = Thread ? Thread->ThreadProcess : (PEPROCESS)PtGetCurrentProcess();
+    }
+
+    /* Nanti kalau ETHREAD sudah punya ImpersonationToken, cek Thread dulu di sini */
+    if (TargetProcess)
+    {
+        CapturedToken = TargetProcess->Token;
+    }
+
+    AccessState->OriginalDesiredAccess = DesiredAccess;
+
+    if (GenericMapping)
+    {
+        AuxData->GenericMapping = *GenericMapping;
+        SfMapGenericMask(&DesiredAccess, GenericMapping);
+    }
+
+    AccessState->Token                   = CapturedToken;
+    AccessState->RemainingDesiredAccess  = DesiredAccess;
+    AccessState->PreviouslyGrantedAccess = 0;
+    AccessState->AuxData                 = AuxData;
+
+    return STATUS_SUCCESS;
+}
+
+VEASTATUS
+VEAPI
+SfCreateAccessState(
+    IN OUT PACCESS_STATE AccessState,
+    IN OUT PAUX_ACCESS_DATA AuxData,
+    IN ACCESS_MASK DesiredAccess,
+    IN PGENERIC_MAPPING GenericMapping OPTIONAL
+)
+{
+    return SfCreateAccessStateEx(
+        (PETHREAD)PtGetCurrentThread(),
+        (PEPROCESS)PtGetCurrentProcess(),
+        AccessState,
+        AuxData,
+        DesiredAccess,
+        GenericMapping
+    );
+}
+
+VOID
+VEAPI
+SfDeleteAccessState(
+    IN PACCESS_STATE AccessState
+)
+{
+    if (!AccessState) return;
+
+    /* Kalau nanti Token pakai reference counting (ObReferenceObject), dereference di sini */
+    AccessState->Token = NULL;
+    AccessState->AuxData = NULL;
+}
+
+/* EOF */

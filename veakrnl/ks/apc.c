@@ -334,13 +334,79 @@ KsDeliverApc(
 
         if (NormalRoutine && TrapFrame)
         {
-            // TODO:
-            // Panggil fungsi penyiapan frame User APC 
-            // KiInitializeUserApc(TrapFrame, NormalRoutine, NormalContext, SystemArgument1, SystemArgument2);
+            KsiInitializeUserApc(TrapFrame, NormalRoutine, NormalContext, SystemArgument1, SystemArgument2);
         }
 
         return;
     }
 
     KsReleaseSpinLock(&Thread->ApcQueueLock, OldIrql);
+}
+
+VOID
+VEAPI
+KsiInitializeUserApc(
+    IN PKTRAP_FRAME TrapFrame,
+    IN PKNORMAL_ROUTINE NormalRoutine,
+    IN PVOID NormalContext,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2
+)
+{
+    ULONG_PTR UserEsp;
+    ULONG_PTR NewEsp;
+    ULONG FrameSize;
+    PKTRAP_FRAME UserTrapFrame;
+
+    if (!TrapFrame) return;
+
+    // Ambil stack pointer User Mode saat ini (align 4-byte)
+    UserEsp = TrapFrame->HardwareEsp & ~3;
+
+    // Hitung total alokasi di User Stack:
+    // 4 Argumen + 1 KTRAP_FRAME utuh
+    FrameSize = (4 * sizeof(ULONG_PTR)) + sizeof(KTRAP_FRAME);
+    NewEsp = (UserEsp - FrameSize) & ~3;
+
+    _VEA_TRY
+    {
+        // Probe & validasi batas alamat User Mode (< 0x80000000)
+        if (NewEsp >= 0x80000000 || (NewEsp + FrameSize) >= 0x80000000)
+        {
+            _VEA_LEAVE;
+        }
+
+        // Copy KTRAP_FRAME asli ke atas 4 argumen di User Stack
+        UserTrapFrame = (PKTRAP_FRAME)(NewEsp + 4 * sizeof(ULONG_PTR));
+        RtlCopyMemory(UserTrapFrame, TrapFrame, sizeof(KTRAP_FRAME));
+
+        // Jika NormalContext NULL (misal saat dipanggil untuk LdrpInit),
+        // teruskan UserTrapFrame sebagai argumen pertama (Context)
+        PVOID EffectiveContext = NormalContext ? NormalContext : (PVOID)UserTrapFrame;
+
+        // Simpan 4 parameter di dasar stack untuk KsUserApcDispatcher
+        *(PULONG_PTR)(NewEsp + 0 * sizeof(ULONG_PTR)) = (ULONG_PTR)NormalRoutine;
+        *(PULONG_PTR)(NewEsp + 1 * sizeof(ULONG_PTR)) = (ULONG_PTR)EffectiveContext;
+        *(PULONG_PTR)(NewEsp + 2 * sizeof(ULONG_PTR)) = (ULONG_PTR)SystemArgument1;
+        *(PULONG_PTR)(NewEsp + 3 * sizeof(ULONG_PTR)) = (ULONG_PTR)SystemArgument2;
+
+        // Arahkan EIP TrapFrame ke User APC Dispatcher (di veaso.so) & set ESP baru
+        TrapFrame->Eip = (ULONG_PTR)KsUserApcDispatcher;
+        TrapFrame->HardwareEsp = NewEsp;
+
+        // Sanitasi Segment Selectors Ring 3 (SEMUA wajib RPL=3 / DPL=3!) & EFlags (IF=1)
+        TrapFrame->SegCs = KGDT32_R3_CODE | 3;
+        TrapFrame->SegDs = KGDT32_R3_DATA | 3;
+        TrapFrame->SegEs = KGDT32_R3_DATA | 3;
+        TrapFrame->HardwareSegSs = KGDT32_R3_DATA | 3;
+        TrapFrame->SegFs = KGDT32_R3_TEB; 
+        TrapFrame->SegGs = 0;
+        TrapFrame->ErrCode = 0;
+        TrapFrame->EFlags |= 0x200; // Interrupt Flag ON
+    }
+    _VEA_EXCEPT(1)
+    {
+        DPRINT("[APC] Failed to initialize User APC on stack: 0x%08X\n", (ULONG)NewEsp);
+    }
+    _VEA_END;
 }

@@ -38,15 +38,19 @@ PmDeviceControl(
                 return STATUS_BUFFER_TOO_SMALL;
             }
 
-            if (Oip->UserBuffer == NULL)
+            PVOID TargetBuffer = Oip->AssociatedOip.SystemBuffer
+                               ? Oip->AssociatedOip.SystemBuffer
+                               : Oip->UserBuffer;
+
+            if (TargetBuffer == NULL)
             {
                 Oip->StatusInformation.Status = STATUS_INVALID_PARAMETER;
                 Oip->StatusInformation.Information = 0;
                 return STATUS_INVALID_PARAMETER;
             }
 
-            // Copy cached DISK_GEOMETRY ke UserBuffer milik caller (VeaFat)
-            RtlCopyMemory(Oip->UserBuffer, &DevExt->DiskGeometry, sizeof(DISK_GEOMETRY));
+            // Copy cached DISK_GEOMETRY ke SystemBuffer (atau UserBuffer jika non-buffered)
+            RtlCopyMemory(TargetBuffer, &DevExt->DiskGeometry, sizeof(DISK_GEOMETRY));
 
             Oip->StatusInformation.Status = STATUS_SUCCESS;
             Oip->StatusInformation.Information = sizeof(DISK_GEOMETRY);

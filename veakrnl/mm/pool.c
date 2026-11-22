@@ -8,14 +8,14 @@ MmAllocatePoolPages(POOL_TYPE PoolType, ULONG NumberOfPages)
     ULONG VirtualAddress;
     ULONG CurrentVa;
     ULONG MappedPages = 0;
-
+ 
     if (PoolType >= MaxPoolType ||
         NumberOfPages == 0 ||
         NumberOfPages == (ULONG)-1)
     {
         return NULL;
     }
-
+ 
     /* Keep one unmapped page after each pool allocation as an overrun guard. */
     ReservedPages = NumberOfPages + 1;
     VirtualAddress = MmAllocateVirtualRange(ReservedPages);
@@ -23,59 +23,58 @@ MmAllocatePoolPages(POOL_TYPE PoolType, ULONG NumberOfPages)
         kdp_print("MM FATAL: Failed to get Virtual Range for Pool!\n\r");
         return NULL;
     }
-
+ 
     CurrentVa = VirtualAddress;
-
+ 
     for (ULONG i = 0; i < NumberOfPages; i++) {
         ULONG PhysPage = MmAllocatePhysicalPage();
         if (PhysPage == 0) {
             kdp_print("MM: Out of physical memory during pool allocation.\n\r");
             goto Failure;
         }
-
-        PAGE_ENTRY *pde = MM_GET_PDE(CurrentVa);
-        if (!pde->bits.present) {
+ 
+        PMMPDE Pde = MiAddressToPde(CurrentVa);
+        if (!Pde->Hard.Valid) {
             ULONG NewPtPhys = MmAllocatePhysicalPage();
             if (NewPtPhys == 0) {
                 MmFreePhysicalPage(PhysPage);
                 goto Failure;
             }
-
-            MMI_WRITE_PDE_VALID(pde, NewPtPhys >> 12);
-
-            PVOID PtVirtualAddr = (PVOID)((ULONG)MM_GET_PTE(CurrentVa) & 0xFFFFF000);
-            MMI_INVALIDATE_TLB((ULONG)PtVirtualAddr);
-            RtlZeroMemory(PtVirtualAddr, 4096);
+ 
+            MI_WRITE_PDE_VALID(Pde, NewPtPhys >> 12); 
+ 
+            PVOID PtVirtualAddr = (PVOID)((ULONG)MiAddressToPte(CurrentVa) & 0xFFFFF000);
+            MMI_INVALIDATE_TLB(PtVirtualAddr);
+            RtlZeroMemory(PtVirtualAddr, PAGE_SIZE);
         }
-
-        PAGE_ENTRY *pte = MM_GET_PTE(CurrentVa);
-        if (pte->bits.present) {
+ 
+        PMMPTE Pte = MiAddressToPte(CurrentVa);
+        if (Pte->Hard.Valid) {
             MmFreePhysicalPage(PhysPage);
             goto Failure;
         }
-
-        MMI_WRITE_PTE_VALID(pte, PhysPage >> 12);
+ 
+        MMI_WRITE_PTE_VALID(Pte, PhysPage >> 12);
         MMI_INVALIDATE_TLB(CurrentVa);
-
+ 
         MappedPages++;
-        CurrentVa += 4096;
+        CurrentVa += PAGE_SIZE;
     }
-
+ 
     {
         ULONG GuardVa = VirtualAddress + NumberOfPages * PAGE_SIZE;
-        PAGE_ENTRY *GuardPde = MM_GET_PDE(GuardVa);
-
-        if (GuardPde->bits.present &&
-            MM_GET_PTE(GuardVa)->bits.present)
+ 
+        if (MiAddressToPde(GuardVa)->Hard.Valid &&
+            MiAddressToPte(GuardVa)->Hard.Valid)
         {
             KsBugCheckEx(BAD_POOL_HEADER, 14, GuardVa,
-                         MM_GET_PTE(GuardVa)->raw, NumberOfPages);
+                         MiAddressToPte(GuardVa)->Long, NumberOfPages);
             return NULL;
         }
     }
-
+ 
     return (PVOID)VirtualAddress;
-
+ 
 Failure:
     if (MappedPages != 0)
     {
@@ -87,6 +86,7 @@ Failure:
     }
     return NULL;
 }
+
 
 PVOID
 VEAPI
@@ -192,30 +192,33 @@ VEAPI
 MmFreePoolPages(PVOID BaseAddress, ULONG NumberOfPages)
 {
     if (BaseAddress == NULL || NumberOfPages == 0) return;
-
+ 
     ULONG CurrentVa = (ULONG)BaseAddress;
-
+ 
     // 1. Unmap Physical Pages satu per satu
-    for (ULONG i = 0; i < NumberOfPages; i++) {
-        PAGE_ENTRY *pte = MM_GET_PTE(CurrentVa);
-        
-        if (pte->bits.present) {
-            // Dapatkan alamat fisik murni (hilangkan 12 bit flag di bawah)
-            ULONG PhysPage = (*(ULONG*)pte) & 0xFFFFF000; 
-
+    for (ULONG i = 0; i < NumberOfPages; i++, CurrentVa += PAGE_SIZE) {
+        /* PDE harus valid dulu, kalau tidak membaca PTE lewat recursive mapping fault */
+        if (!MiAddressToPde(CurrentVa)->Hard.Valid) {
+            continue;
+        }
+ 
+        PMMPTE Pte = MiAddressToPte(CurrentVa);
+        if (Pte->Hard.Valid) {
+            ULONG PhysPage = Pte->Hard.PageFrameNumber << PAGE_SHIFT;
+ 
             // Hapus isi PTE sepenuhnya biar nggak ada sisa akses
-            MI_WRITE_INVALID_PTE(pte);
+            MI_ERASE_PTE(Pte);
             MMI_INVALIDATE_TLB(CurrentVa);
-
+ 
             // Do not recycle the frame until its old virtual mapping is gone.
             MmFreePhysicalPage(PhysPage);
         }
-        CurrentVa += 4096;
     }
-
-    // 2. Kembalikan rentang Virtual Address ke VAD/AVL lu
+ 
+    // 2. Kembalikan rentang Virtual Address ke VAD/AVL
     MmFreeVirtualRange((ULONG)BaseAddress);
 }
+
 
 VOID
 VEAPI

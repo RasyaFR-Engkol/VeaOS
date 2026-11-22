@@ -20,16 +20,21 @@ ObpCheckAccess(
     ACCESS_MASK     DesiredAccess,
     PACCESS_MASK    GrantedAccess)
 {
+    PEPROCESS CurProc = (PEPROCESS)PtGetCurrentProcess();
+    PVEA_TOKEN TokenLocal = Token;
+
     if (AccessMode != UserMode)
     {
         *GrantedAccess = DesiredAccess;
         return STATUS_SUCCESS;
     }
 
-    if (!Token)
-        Token = PtGetCurrentProcess()->Token;
+    if (!TokenLocal && CurProc)
+    {
+        TokenLocal = CurProc->Token;
+    }
 
-    if (!SfAccessCheck(Header->SecurityDescriptor, Token, DesiredAccess,
+    if (!SfAccessCheck(Header->SecurityDescriptor, TokenLocal, DesiredAccess,
                        &Header->Type->GenericMapping, GrantedAccess))
         return STATUS_ACCESS_DENIED;
 
@@ -561,6 +566,18 @@ ObReferenceObjectByHandle(
     }
 
     *Object = NULL;
+
+    if (Handle == NtCurrentProcess())
+    {
+        if (ExpectedType != NULL && ExpectedType != PtEprocessType)
+        {
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+
+        *Object = PtGetCurrentProcess();
+        ObReferenceObject(*Object);
+        return STATUS_SUCCESS;
+    }
 
     PHANDLE_TABLE Table = ObpGetHandleTable(&Handle, AccessMode);
     if (!Table) {

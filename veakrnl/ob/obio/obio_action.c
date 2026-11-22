@@ -104,6 +104,7 @@ ObioDeviceActionWorker(IN PVOID Context)
                     DPRINT("ERR: Attempt to start Uninitialized device: %p\n", DeviceNode);
                     Status = STATUS_UNSUCCESSFUL;
                 }
+                break;
             }
 
             case PiActionQueryState:

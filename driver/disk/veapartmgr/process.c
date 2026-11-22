@@ -151,6 +151,8 @@ PmHandleArrivalNotification(
     KsInitializeSpinlock(&DevExt->PartitionListLock);
     DevExt->PartitionCount = 0;
     FilterDevice->Flags |= DevExt->LowerDeviceObject->Flags & (DO_DIRECT_IO | DO_BUFFERED_IO);
+    FilterDevice->Flags &= ~DO_BUFFERED_IO;
+    FilterDevice->Flags |= DO_DIRECT_IO;
 
     ObDereferenceObject(TargetDevice);
 

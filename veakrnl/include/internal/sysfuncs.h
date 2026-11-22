@@ -1,10 +1,53 @@
-SVC_(CreateFile, 11)
-SVC_(OpenFile, 6)
-SVC_(LoadDriver, 1)
-SVC_(CreateDirectoryNamespace, 3)
-SVC_(Close, 1)
-SVC_(DumpKdPrint, 1)
-SVC_(OpenVeaKey, 3)
-SVC_(QueryKeyPath, 2)
-SVC_(QueryValueKey, 6)
-SVC_(SetValueKey, 6)
+SVC_(CreateFile, 11)                  /* SSN 0  */
+SVC_(OpenFile, 6)                     /* SSN 1  */
+SVC_(LoadDriver, 1)                   /* SSN 2  */
+SVC_(CreateDirectoryNamespace, 3)     /* SSN 3  */
+SVC_(Close, 1)                        /* SSN 4  */
+SVC_(DumpKdPrint, 1)                  /* SSN 5  (Padding/Kept for SSN alignment) */
+SVC_(OpenVeaKey, 3)                   /* SSN 6  */
+SVC_(QueryKeyPath, 2)                 /* SSN 7  */
+SVC_(QueryValueKey, 6)                /* SSN 8  */
+SVC_(SetValueKey, 6)                  /* SSN 9  */
+SVC_(AllocateVirtualMemory, 6)        /* SSN 10 */
+SVC_(ReadVirtualMemory, 5)            /* SSN 11 */
+SVC_(WriteVirtualMemory, 5)           /* SSN 12 */
+SVC_(FreeVirtualMemory, 4)            /* SSN 13 */
+SVC_(QuerySection, 5)                 /* SSN 14 */
+SVC_(MapViewOfSection, 10)            /* SSN 15 */
+SVC_(UnmapViewOfSection, 2)           /* SSN 16 */
+SVC_(ReadFile, 9)                     /* SSN 17 */
+SVC_(CreateSection, 7)                /* SSN 18 */
+SVC_(CreateProcess, 8)                /* SSN 19 */
+SVC_(QueryInformationProcess, 5)      /* SSN 20 */
+SVC_(DuplicateObject, 7)              /* SSN 21 */
+SVC_(QuerySystemInformation, 4)       /* SSN 22 */
+SVC_(CreateThread, 8)                 /* SSN 23 */
+SVC_(ResumeThread, 2)                 /* SSN 24 */
+SVC_(CreatePort, 5)                   /* SSN 25 */
+SVC_(RequestWaitReplyPort, 3)         /* SSN 26 */
+SVC_(ReplyWaitReceivePort, 4)         /* SSN 27 */
+SVC_(ConnectPort, 8)                  /* SSN 28 */
+SVC_(AcceptConnectPort, 6)            /* SSN 29 */
+SVC_(WriteRequestData, 6)             /* SSN 30 */
+SVC_(ReadRequestData, 6)              /* SSN 31 */
+SVC_(ReadPort, 4)                     /* SSN 32 */
+SVC_(Continue, 2)                     /* SSN 33 */
+SVC_(TerminateProcess, 2)             /* SSN 34 */
+SVC_(KdPrint, 1)                      /* SSN 35 */
+SVC_(YieldExecution, 0)               /* SSN 36 */
+SVC_(WriteFile, 9)                    /* SSN 37 */
+SVC_(WriteFileGather, 9)              /* SSN 38 */
+SVC_(ReadFileScatter, 9)              /* SSN 39 */
+SVC_(DeviceIoControlFile, 10)         /* SSN 40 */
+SVC_(FsControlFile, 10)               /* SSN 41 */
+SVC_(DeleteFile, 1)                   /* SSN 42 */
+SVC_(FlushBuffersFile, 2)             /* SSN 43 */
+SVC_(QueryInformationFile, 5)         /* SSN 44 */
+SVC_(SetInformationFile, 5)           /* SSN 45 */
+SVC_(QueryDirectoryFile, 11)          /* SSN 46 */
+SVC_(QueryVolumeInformationFile, 5)   /* SSN 47 */
+SVC_(CreateToken, 13)                 /* SSN 48 */
+SVC_(EnumerateKey, 7)                 /* SSN 49 */
+SVC_(EnumerateValueKey, 9)            /* SSN 50 */
+SVC_(SetSystemInformation, 3)         /* SSN 51 */
+SVC_(CallbackReturn, 3)               /* SSN 52 */

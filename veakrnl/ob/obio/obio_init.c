@@ -599,6 +599,106 @@ ObioCreateSystemRootLink(
     return Status;
 }
 
+VOID
+VEAPI
+ObioInitializeDrivePath(VOID)
+{
+    ULONG DiskIndex = 0;
+    ULONG PartIndex;
+    CHAR TargetBuffer[64];
+    CHAR LinkBuffer[32];
+    ANSI_STRING TargetName;
+    OBJECT_ATTRIBUTES ObjAttr;
+    HANDLE DeviceHandle;
+    VEASTATUS Status;
+
+    if (!ObpRootDirectoryObject)
+    {
+        DPRINT("[OBIO] ObpRootDirectoryObject is NULL!\n");
+        return;
+    }
+
+    DPRINT("[OBIO] Initializing D<n>P<n>: drive symlinks...\n");
+
+    while (TRUE)
+    {
+        PartIndex = 1;
+
+        while (TRUE)
+        {
+            /* Path target device di Object Manager (tanpa trailing slash) */
+            RtlStringCbPrintfA(
+                TargetBuffer,
+                sizeof(TargetBuffer),
+                "/Device/Harddisk%u/Partition%u",
+                DiskIndex,
+                PartIndex
+            );
+            RtlInitAnsiString(&TargetName, TargetBuffer);
+
+            InitializeObjectAttributes(
+                &ObjAttr,
+                &TargetName,
+                OBJ_CASE_INSENSITIVE,
+                NULL,
+                NULL
+            );
+
+            DeviceHandle = NULL;
+            Status = ObOpenObjectByName(
+                &ObjAttr,
+                ObpDeviceObjectType,
+                KernelMode,
+                0,
+                NULL,
+                &DeviceHandle
+            );
+
+            if (!VEA_SUCCESS(Status))
+            {
+                /* Partisi di disk ini sudah habis */
+                break;
+            }
+
+            VeaClose(DeviceHandle);
+
+            /* Tanpa '/' di depan karena langsung masuk ke ObpRootDirectoryObject */
+            RtlStringCbPrintfA(
+                LinkBuffer,
+                sizeof(LinkBuffer),
+                "D%uP%u:",
+                DiskIndex + 1,
+                PartIndex
+            );
+
+            Status = ObCreateSymbolicLink(
+                ObpRootDirectoryObject,
+                LinkBuffer,
+                TargetBuffer
+            );
+
+            if (VEA_SUCCESS(Status))
+            {
+                DPRINT("[OBIO] Symlink created: /%s -> %s\n", LinkBuffer, TargetBuffer);
+            }
+            else
+            {
+                DPRINT("[OBIO] Failed to create symlink /%s (0x%08X)\n", LinkBuffer, Status);
+            }
+
+            PartIndex++;
+        }
+
+        /* Kalau Partition1 saja tidak ada, berarti Harddisk<DiskIndex> tidak ada -> stop */
+        if (PartIndex == 1)
+        {
+            break;
+        }
+
+        DiskIndex++;
+    }
+}
+
 BOOLEAN
 VEAPI
 ObioInitSystem1(VOID)
@@ -684,6 +784,8 @@ ObioInitSystem1(VOID)
 
     ObioCreateBdiSymlink(KsLoaderBlock);
 
+    ObioInitializeDrivePath();
+
     if (!ObioMarkBootPartition(KsLoaderBlock))
     {
         DPRINT("ObioMarkBootPartition() failed\n");
@@ -707,7 +809,11 @@ ObioInitSystem1(VOID)
     //
 
     Status = ObioCreateSystemRootLink(KsLoaderBlock);
-    if (!VEA_SUCCESS(Status)) return FALSE;
+    if (!VEA_SUCCESS(Status))
+    {
+        ObDumpObjectTree();
+        return FALSE;
+    }
 
     ObioInitializeSystemDrivers();
 

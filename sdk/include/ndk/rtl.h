@@ -3,9 +3,17 @@
 #include <stdarg.h>
 #include "procbind.h"
 #include "veastatus.h"
+#include "objattr.h"
+#include "ultypes2.h"
 #include "../psdk/veaelf.h"
+#include <mmtype2.h>
+#include <sftypes.h>
 
 /* TYPES */
+
+#if !defined (BUILDING_VEAKRNL)
+    #include "../../lib/rtl/rtlp.h"
+#endif
 
 // AVL Specific
 typedef struct _RTL_BALANCED_NODE {
@@ -694,6 +702,332 @@ RtlIsAddressWithinSection(
     IN PVOID Address,
     IN PVOID SectionStart,
     IN PVOID SectionEnd
+);
+
+typedef PVOID HANDLE;
+
+typedef struct _CURDIR
+{
+    ANSI_STRING DosPath;
+    HANDLE Handle;
+} CURDIR, *PCURDIR;
+
+typedef struct _RTL_USER_PROCESS_PARAMETERS
+{
+    ULONG MaximumLength;
+    ULONG Length;
+    ULONG Flags;
+    ULONG DebugFlags;
+    HANDLE ConsoleHandle;
+    ULONG ConsoleFlags;
+    HANDLE StandardInput;
+    HANDLE StandardOutput;
+    HANDLE StandardError;
+    CURDIR CurrentDirectory;
+    ANSI_STRING DllPath;
+    ANSI_STRING ImagePathName;
+    ANSI_STRING CommandLine;
+    PSTR Environment;
+    ULONG StartingX;
+    ULONG StartingY;
+    ULONG CountX;
+    ULONG CountY;
+    ULONG CountCharsX;
+    ULONG CountCharsY;
+    ULONG FillAttribute;
+    ULONG WindowFlags;
+    ULONG ShowWindowFlags;
+    ANSI_STRING WindowTitle;
+    ANSI_STRING DesktopInfo;
+    ANSI_STRING ShellInfo;
+    ANSI_STRING RuntimeData;
+    // RTL_DRIVE_LETTER_CURDIR CurrentDirectories[RTL_MAX_DRIVE_LETTERS];
+    SIZE_T EnvironmentSize;
+    SIZE_T EnvironmentVersion;
+} RTL_USER_PROCESS_PARAMETERS, *PRTL_USER_PROCESS_PARAMETERS;
+
+#define RTL_USER_PROCESS_PARAMETERS_NORMALIZED              0x01
+#define RTL_USER_PROCESS_PARAMETERS_PROFILE_USER            0x02
+#define RTL_USER_PROCESS_PARAMETERS_PROFILE_KERNEL          0x04
+#define RTL_USER_PROCESS_PARAMETERS_PROFILE_SERVER          0x08
+#define RTL_USER_PROCESS_PARAMETERS_UNKNOWN                 0x10
+#define RTL_USER_PROCESS_PARAMETERS_RESERVE_1MB             0x20
+#define RTL_USER_PROCESS_PARAMETERS_RESERVE_16MB            0x40
+#define RTL_USER_PROCESS_PARAMETERS_CASE_SENSITIVE          0x80
+#define RTL_USER_PROCESS_PARAMETERS_DISABLE_HEAP_CHECKS     0x100
+#define RTL_USER_PROCESS_PARAMETERS_PROCESS_OR_1            0x200
+#define RTL_USER_PROCESS_PARAMETERS_PROCESS_OR_2            0x400
+#define RTL_USER_PROCESS_PARAMETERS_PRIVATE_DLL_PATH        0x1000
+#define RTL_USER_PROCESS_PARAMETERS_LOCAL_DLL_PATH          0x2000
+#define RTL_USER_PROCESS_PARAMETERS_IMAGE_KEY_MISSING       0x4000
+#define RTL_USER_PROCESS_PARAMETERS_NX                      0x20000
+
+typedef ULONG (VEAPI *PTHREAD_START_ROUTINE)(
+    PVOID Parameter
+);
+
+VEASTATUS
+VEAPI
+RtlCreateUserThread(
+    IN HANDLE ProcessHandle,
+    IN PVOID SecurityDesciptor,
+    IN BOOLEAN CreateSuspended,
+    IN ULONG StackZeroBits OPTIONAL,
+    IN SIZE_T StackReserve OPTIONAL,
+    IN SIZE_T StackCommit OPTIONAL,
+    IN PTHREAD_START_ROUTINE StartAddress,
+    IN PVOID Parameter OPTIONAL,
+    OUT HANDLE *ThreadHandle OPTIONAL,
+    OUT PCLIENT_ID ClientId OPTIONAL
+);
+
+ULONG_PTR
+VEAPI
+RtlGetElfSymbolAddress(
+    IN PELF32_EHDR Header,
+    IN ULONG_PTR ImageBase,
+    IN PCSTR SymbolName
+);
+
+typedef struct _RTL_USER_PROCESS_INFORMATION
+{
+    ULONG Size;
+    HANDLE ProcessHandle;
+    HANDLE ThreadHandle;
+    CLIENT_ID ClientId;
+    SECTION_IMAGE_INFORMATION ImageInformation;
+} RTL_USER_PROCESS_INFORMATION, *PRTL_USER_PROCESS_INFORMATION;
+
+VEASTATUS
+VEAPI
+RtlCreateUserProcess(
+    IN PANSI_STRING FileImageName,
+    IN ULONG Attributes,
+    IN OUT PRTL_USER_PROCESS_PARAMETERS ProcessParameters,
+    IN PVEA_SECURITY_DESCRIPTOR ProcessSecurityDescriptor OPTIONAL,
+    IN PVEA_SECURITY_DESCRIPTOR ThreadSecurityDescriptor OPTIONAL,
+    IN HANDLE ParentProcess OPTIONAL,
+    IN BOOLEAN InheritHandles,
+    IN HANDLE DebugPort OPTIONAL,
+    IN HANDLE ExceptionPort OPTIONAL,
+    OUT PRTL_USER_PROCESS_INFORMATION ProcessInfo
+);
+
+ULONG
+RtlStringCbVPrintfA(
+    char *Dest, unsigned int cbDest, const char* Format, va_list Args
+);
+
+#if defined (BUILD_USER)
+
+#include <teb.h>
+
+VEASTATUS
+VEAPI
+RtlCreateProcessParameters(
+    OUT PRTL_USER_PROCESS_PARAMETERS *ProcessParameters,
+    IN PANSI_STRING ImagePathName,
+    IN PANSI_STRING DllPath OPTIONAL,
+    IN PANSI_STRING CurrentDirectory OPTIONAL,
+    IN PANSI_STRING CommandLine OPTIONAL,
+    IN PVOID Environment OPTIONAL,
+    IN PANSI_STRING WindowTitle OPTIONAL,
+    IN PANSI_STRING DesktopInfo OPTIONAL,
+    IN PANSI_STRING ShellInfo OPTIONAL,
+    IN PANSI_STRING RuntimeData OPTIONAL
+);
+
+PRTL_USER_PROCESS_PARAMETERS
+VEAPI
+RtlNormalizeProcessParams(
+    IN OUT PRTL_USER_PROCESS_PARAMETERS Params
+);
+
+VOID
+VEAPI
+RtlDestroyProcessParameters(
+    IN PRTL_USER_PROCESS_PARAMETERS ProcessParameters
+);
+
+#endif
+
+VOID
+VEAPI
+RtlRaiseStatus(VEASTATUS Status);
+
+PRTL_USER_PROCESS_PARAMETERS
+VEAPI
+RtlDeNormalizeProcessParams(
+    IN OUT PRTL_USER_PROCESS_PARAMETERS Params
+);
+
+/* SECURITY */
+
+BOOLEAN
+VEAPI
+RtlEqualLuid(
+    IN PLUID Luid1,
+    IN PLUID Luid2
+);
+
+LUID
+VEAPI
+RtlConvertUlongToLuid(
+    IN ULONG UlongValue
+);
+
+VEASTATUS
+VEAPI
+RtlCopySid(
+    IN ULONG DestinationSidLength,
+    OUT PVEA_SID DestinationSid,
+    IN PVEA_SID SourceSid
+);
+
+BOOLEAN
+VEAPI
+RtlEqualSid(
+    IN PVEA_SID Sid1,
+    IN PVEA_SID Sid2
+);
+
+ULONG
+VEAPI
+RtlLengthSid(
+    IN PVEA_SID Sid
+);
+
+BOOLEAN
+VEAPI
+RtlValidSid(
+    IN PVEA_SID Sid
+);
+
+VEASTATUS
+VEAPI
+RtlInitializeSid(
+    OUT PVEA_SID Sid,
+    IN UCHAR Authority,
+    IN ULONG MachineID,
+    IN ULONG UserID
+);
+
+BOOLEAN
+VEAPI
+RtlValidAcl(
+    IN PVEA_ACL Acl
+);
+
+LUID
+VEAPI
+RtlConvertUlongToLuid(
+    IN ULONG UlongValue
+);
+
+BOOLEAN
+VEAPI
+RtlEqualLuid(
+    IN PLUID Luid1,
+    IN PLUID Luid2
+);
+
+VOID
+RtlMoveMemory(
+    VOID *Destination,
+    const VOID *Source,
+    SIZE_T Length);
+
+
+VEASTATUS
+VEAPI
+RtlCreateSecurityDescriptor(
+    OUT PVEA_SECURITY_DESCRIPTOR SecurityDescriptor,
+    IN ULONG Revision
+);
+
+VEASTATUS
+VEAPI
+RtlSetDaclSecurityDescriptor(
+    IN OUT PVEA_SECURITY_DESCRIPTOR SecurityDescriptor,
+    IN BOOLEAN DaclPresent,
+    IN PVEA_ACL Dacl OPTIONAL,
+    IN BOOLEAN DaclDefaulted
+);
+
+VEASTATUS
+VEAPI
+RtlGetDaclSecurityDescriptor(
+    IN PVEA_SECURITY_DESCRIPTOR SecurityDescriptor,
+    OUT PBOOLEAN DaclPresent,
+    OUT PVEA_ACL *Dacl,
+    OUT PBOOLEAN DaclDefaulted
+);
+
+VEASTATUS
+VEAPI
+RtlSetOwnerSecurityDescriptor(
+    IN OUT PVEA_SECURITY_DESCRIPTOR SecurityDescriptor,
+    IN PVEA_SID Owner OPTIONAL,
+    IN BOOLEAN OwnerDefaulted
+);
+
+VEASTATUS
+VEAPI
+RtlSetGroupSecurityDescriptor(
+    IN OUT PVEA_SECURITY_DESCRIPTOR SecurityDescriptor,
+    IN PVEA_SID Group OPTIONAL,
+    IN BOOLEAN GroupDefaulted
+);
+
+BOOLEAN
+VEAPI
+RtlValidSecurityDescriptor(
+    IN PVEA_SECURITY_DESCRIPTOR SecurityDescriptor
+);
+
+ULONG
+VEAPI
+RtlLengthSecurityDescriptor(
+    IN PVEA_SECURITY_DESCRIPTOR SecurityDescriptor
+);
+
+VEASTATUS
+VEAPI
+RtlCreateAcl(
+    OUT PVEA_ACL Acl,
+    IN ULONG AclSize,
+    IN ULONG AclRevision
+);
+
+VEASTATUS
+VEAPI
+RtlAddAccessAllowedAce(
+    IN OUT PVEA_ACL Acl,
+    IN ULONG AceRevision,
+    IN ACCESS_MASK AccessMask,
+    IN PVEA_SID Sid
+);
+
+LONG
+VEAPI
+RtlRawStringCompare(
+    IN PCSTR String1,
+    IN PCSTR String2
+);
+
+LONGLONG
+__divdi3(
+    IN LONGLONG Dividend,
+    IN LONGLONG Divisor
+);
+
+void *memset(void *ptr, int x, size_t n);
+
+BOOLEAN
+VEAPI
+RtlRawStringEqual(
+    IN PCHAR S1,
+    IN PCHAR S2
 );
 
 /* EOF */

@@ -27,48 +27,44 @@ FatObIntHandler(
     switch (Stack->MajorFunction)
     {
         case OIP_MJ_READ:
-            return FatMjRead(
-                (PDEVICE_OBJECT)Object,
-                Oip,
-                Stack
-            );
-        case OIP_MJ_WRITE:
-            break;
+            return FatMjRead((PDEVICE_OBJECT)Object, Oip, Stack);
 
         case OIP_MJ_FILE_SYSTEM_CONTROL:
             return FatMjFsCtl((PDEVICE_OBJECT)Object, Oip, Stack);
 
         case OIP_MJ_CREATE:
             return FatMjCreate((PDEVICE_OBJECT)Object, Oip, Stack);
-            break;
-
-        case OIP_MJ_CLOSE:
-            break;
 
         case OIP_MJ_CLEANUP:
-            break;
+            return FatMjCleanup((PDEVICE_OBJECT)Object, Oip, Stack);
 
+        case OIP_MJ_CLOSE:
+            return FatMjClose((PDEVICE_OBJECT)Object, Oip, Stack);
+
+        case OIP_MJ_WRITE:
+            return FatMjWrite((PDEVICE_OBJECT)Object, Oip, Stack);
+
+        case OIP_MJ_QUERY_INFORMATION:
+            return FatMjQueryInformation((PDEVICE_OBJECT)Object, Oip, Stack);
+
+        case OIP_MJ_SET_INFORMATION:
+            return FatMjSetInformation((PDEVICE_OBJECT)Object, Oip, Stack);
+
+        case OIP_MJ_DIRECTORY_CONTROL:
+            return FatMjDirectoryControl((PDEVICE_OBJECT)Object, Oip, Stack);
+
+        case OIP_MJ_FLUSH_BUFFERS:
+            FatpFlushFsInfo(EXTENSION_FROM_DEVOBJ(((PDEVICE_OBJECT)Object)));
+            goto GoToLowerDevice;
+        
         case OIP_MJ_DEVICE_CONTROL:
         case OIP_MJ_INTERNAL_DEVICE_CTL:
             goto GoToLowerDevice;
-        
-        case OIP_MJ_FLUSH_BUFFERS:
-            break;
 
         case OIP_MJ_PNP:
-            break;
-
-        case OIP_MJ_QUERY_INFORMATION:
-            break;
-
-        case OIP_MJ_SET_INFORMATION:
-            break;
-
         case OIP_MJ_SHUTDOWN:
-            break;
-
-        case OIP_MJ_DIRECTORY_CONTROL:
-            break;
+        default:
+            goto Unimplemented;
     }
 GoToLowerDevice:
     ObioSkipCurrentOipStackLocation(Oip);

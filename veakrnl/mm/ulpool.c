@@ -38,8 +38,8 @@ UlpIsValidListPointer(
     if (Address < 0xC1000000 || Address >= 0xFFC00000 ||
         (Address & (POOL_PAGE_SIZE - 1)) >
             POOL_PAGE_SIZE - sizeof(LIST_ENTRY) ||
-        !MM_GET_PDE(Address)->bits.present ||
-        !MM_GET_PTE(Address)->bits.present)
+        !MM_GET_PDE(Address)->Hard.Valid ||
+        !MM_GET_PTE(Address)->Hard.Valid)
     {
         return FALSE;
     }
@@ -59,8 +59,8 @@ UlpIsValidPoolBlockHeader(
 
     if (Address < 0xC1000000 || Address >= 0xFFC00000 ||
         (Address & ((1UL << POOL_BLOCK_SHIFT) - 1)) != 0 ||
-        !MM_GET_PDE(Address)->bits.present ||
-        !MM_GET_PTE(Address)->bits.present)
+        !MM_GET_PDE(Address)->Hard.Valid ||
+        !MM_GET_PTE(Address)->Hard.Valid)
     {
         return FALSE;
     }

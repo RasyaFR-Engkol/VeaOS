@@ -150,6 +150,14 @@ typedef struct _ELF32_SYM {
     USHORT st_shndx;// Section Index (0 = SHN_UNDEF)
 } ELF32_SYM, *PELF32_SYM;
 
+typedef struct _ELF32_DYN {
+    LONG d_tag;
+    union {
+        ULONG d_val;
+        ULONG d_ptr;
+    } d_un;
+} ELF32_DYN, *PELF32_DYN;
+
 #pragma pack(pop)
 
 #define ELF32_R_SYM(i)    ((i) >> 8)
@@ -163,6 +171,56 @@ typedef struct _ELF32_SYM {
 #endif
 #ifndef SHN_ABS
 #define SHN_ABS 0xFFF1
+#endif
+
+/* Fallback definisi relokasi i386 Userland/Dynamic jika belum ada di header ELF */
+#ifndef R_386_NONE
+#define R_386_NONE      0
+#endif
+#ifndef R_386_32
+#define R_386_32        1
+#endif
+#ifndef R_386_PC32
+#define R_386_PC32      2
+#endif
+#ifndef R_386_COPY
+#define R_386_COPY      5
+#endif
+#ifndef R_386_GLOB_DAT
+#define R_386_GLOB_DAT  6
+#endif
+#ifndef R_386_JMP_SLOT
+#define R_386_JMP_SLOT  7
+#endif
+#ifndef R_386_RELATIVE
+#define R_386_RELATIVE  8
+#endif
+
+/* Fallback definisi PT_DYNAMIC & DT_* jika belum ada di elf.h */
+#ifndef PT_DYNAMIC
+#define PT_DYNAMIC      2
+#endif
+
+#ifndef DT_NULL
+#define DT_NULL         0
+#define DT_NEEDED       1
+#define DT_PLTRELSZ     2
+#define DT_HASH         4
+#define DT_STRTAB       5
+#define DT_SYMTAB       6
+#define DT_STRSZ        10
+#define DT_SYMENT       11
+#define DT_INIT         12
+#define DT_FINI         13
+#define DT_REL          17
+#define DT_RELSZ        18
+#define DT_RELENT       19
+#define DT_PLTREL       20
+#define DT_JMPREL       23
+#define DT_INIT_ARRAY   25
+#define DT_FINI_ARRAY   26
+#define DT_INIT_ARRAYSZ 27
+#define DT_FINI_ARRAYSZ 28
 #endif
 
 typedef ULONG_PTR (VEAPI *PKERNEL_SYMBOL_RESOLVER)(IN PCSTR SymbolName);

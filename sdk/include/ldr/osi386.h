@@ -237,7 +237,7 @@ typedef struct _ACPI_HEADER
 #pragma pack(pop)
 
 // baca disk
-void _LBA_READ(unsigned long drive_id, DiskAddressPacket *DAP);
+extern uint8_t _LBA_READ(uint8_t drive, void* dap);
 
 // stropertaion
 
@@ -269,7 +269,7 @@ int cstricmp(const char *s1, const char *s2);
 char* chextoascii(unsigned int num, char *str);
 char* cinttoascii(int num, char *str);
 
-void LBA_READ_TO_BUFFER(uint32_t lba, void* buffer, uint32_t size);
+uint8_t LBA_READ_TO_BUFFER(uint32_t lba, void* buffer, uint32_t size);
 extern MBR_PartitionEntry mbr_part_entry[4];
 
 extern uint32_t __attribute__((cdecl)) _INT10_CALL(uint32_t eax_in, uint32_t ebx_in);
@@ -358,6 +358,10 @@ void extract_memory_map(BLOCK_BOOT_2 *block_boot);
 //
 // page entry
 //
+
+/* OSI386 Compatibility */
+typedef MMPTE PAGE_ENTRY;
+
 #pragma pack(push, 1)
 
 #pragma pack(pop)
@@ -489,9 +493,9 @@ LmAllocatePool(BOOT_POOL_TYPE PoolType, ULONG ByteSize);
 #define KGDT32_R3_DATA   0x23   // Index 4 (Offset 0x20 | 3) -> User Data
 #define KGDT32_TSS       0x28   // Index 5 (Offset 0x28), RPL 0 -> Task State Segment
 #define KGDT32_R0_PCR    0x30   // Index 6 (Offset 0x30), RPL 0 -> KPCR (FS Register)
-#define KGDT32_DF_TSS    0x38
+#define KGDT32_DF_TSS    0x38  
 
-#define GDT_ENTRY_COUNT 8
+#define GDT_ENTRY_COUNT 9
 #define TSS_SIZE_32     104
 
 // Lock
@@ -828,5 +832,12 @@ LdrInsertToModuleListEntry(
     IN PVOID EntryPoint,
     IN ULONG Flags
 );
+
+VOID
+VEAPI
+SrlInit(VOID);
+
+ULONG
+SrlSendMsg(IN PCHAR Format, ...);
 
 /* EOF */

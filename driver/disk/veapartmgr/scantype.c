@@ -93,6 +93,8 @@ PmpCreatePartitionDevice(
     KsReleaseSpinLock(&DiskDevExt->PartitionListLock, OldIrql);
 
     PartDevice->Flags |= DiskDevExt->LowerDeviceObject->Flags & (DO_DIRECT_IO | DO_BUFFERED_IO);
+    PartDevice->Flags &= ~DO_BUFFERED_IO;
+    PartDevice->Flags |= DO_DIRECT_IO;
     PartDevice->Flags &= ~DO_DEVICE_INITIALIZING;
 
     PM_INFO("Berhasil bikin partisi: %s (Offset: 0x%08X%08X, Length: 0x%08X%08X)\n",

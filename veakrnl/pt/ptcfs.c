@@ -41,6 +41,8 @@ PtCfsCompareRoutine(
         return 1;  // NodeA lebih besar, taruh di kanan
     }
 
+    if ((ULONG_PTR)ThreadA < (ULONG_PTR)ThreadB) return -1;
+    if ((ULONG_PTR)ThreadA > (ULONG_PTR)ThreadB) return 1;
     return 0;
 }
 

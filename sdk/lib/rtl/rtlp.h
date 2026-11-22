@@ -35,7 +35,13 @@
     #define DPRINT(fmt, ...)
 
 #else
-    /* Di Userland (ntdll/veadll): Gunakan Process Heap */
+    //
+    // Rtl Userland may need this
+    //
+
+    #include "heap.h"
+    #include "dbg.h"
+    
     #define RtlpAllocateStringMemory(Bytes, Tag) RtlAllocateHeap(RtlGetProcessHeap(), 0, (Bytes))
     #define RtlpFreeStringMemory(Ptr, Tag)       RtlFreeHeap(RtlGetProcessHeap(), 0, (Ptr))
 #endif

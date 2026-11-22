@@ -1,0 +1,9 @@
+// RI FUNCTION DEFINITION 
+#pragma once
+
+NORET
+VOID
+VEAPI
+RiServiceExit(IN PKTRAP_FRAME TrapFrame);
+
+// EOF

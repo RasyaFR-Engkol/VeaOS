@@ -161,6 +161,12 @@ MiSimpleReadFile(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
+    Oip->RequestorThread = (PETHREAD)PtGetCurrentThread();
+    if (Oip->RequestorThread)
+    {
+        ObReferenceObject(Oip->RequestorThread);
+    }
+    
     Oip->UserEvent = &Event;
     POIP_STACK Stack = ObioGetNextOipStackLocation(Oip);
     Stack->FileObject = FileObject;
@@ -193,7 +199,6 @@ MiSimpleReadFile(
 
     return Status;
 }
-
 
 ULONG
 VEAPI
@@ -268,7 +273,7 @@ MiMakeProtectionMask(IN ULONG Protect)
         if (ProtectMask == MM_NOACCESS) return MM_INVALID_PROTECTION;
 
         /* This actually turns on write-combine in this scenario! */
-        ProtectMask |= MM_NOACCESS;
+        ProtectMask |= MM_WRITECOMBINE;
     }
 
     /* Return the final MM PTE protection mask */
@@ -597,7 +602,7 @@ MiCreatePagingFileMap(
     if (SectionSize == 0) return STATUS_INVALID_PARAMETER;
 
     TotalPages = (ULONG)((SectionSize + PAGE_SIZE - 1) >> PAGE_SHIFT);
-    SegmentSize = sizeof(SEGMENT) + (TotalPages * sizeof(PAGE_ENTRY));
+    SegmentSize = sizeof(SEGMENT) + (TotalPages * sizeof(MMPTE));
 
     // Alokasi Segment + Prototype PTEs
     Segment = (PSEGMENT)UlAllocatePoolWithTag(NonPagedPool, SegmentSize, 'SgMm');
@@ -673,15 +678,19 @@ MiCreateDataFileMap(
     {
         ControlArea = File->SectionObjectPointer->DataSectionObject;
     }
-    else
+
+    if (!ControlArea)
     {
         UlFreePool(Segment);
         return STATUS_INVALID_PARAMETER;
     }
     
+    ObReferenceObject(File);
+    
     ControlArea->Segment = Segment;
     ControlArea->FilePointer = File;
     ControlArea->u.Flags.File = 1;
+    ControlArea->NumberOfSectionReferences = 1;
 
     Segment->ControlArea = ControlArea;
     Segment->TotalNumberOfPtes = TotalPages;
@@ -817,9 +826,6 @@ ElfFmtCreateImageSection(
         return STATUS_INVALID_IMAGE_FORMAT;
     }
 
-    DPRINT("[ELF/FMT] Header Validated: Type=0x%04X, Entry=0x%08X, ShNum=%u, PhNum=%u\n",
-            ElfHeader.e_type, ElfHeader.e_entry, ElfHeader.e_shnum, ElfHeader.e_phnum);
-
     /* -------------------------------------------------------------------
      * KASUS A: Relocatable Object Driver (.ko) -> Section Headers
      * ------------------------------------------------------------------- */
@@ -841,19 +847,23 @@ ElfFmtCreateImageSection(
         }
 
         ULONG MaxSectionEndOffset = 0;
+        ULONG BssTotalSize = 0;
 
         for (ULONG i = 0; i < ElfHeader.e_shnum; i++)
         {
-            if (ShdrTable[i].sh_flags & SHF_ALLOC) NrSegments++;
+            if (ShdrTable[i].sh_flags & SHF_ALLOC)
+            {
+                NrSegments++;
+                if (ShdrTable[i].sh_type == SHT_NOBITS)
+                {
+                    ULONG Align = ShdrTable[i].sh_addralign ? ShdrTable[i].sh_addralign : 16;
+                    BssTotalSize = ALIGN_UP_BY(BssTotalSize, Align) + ShdrTable[i].sh_size;
+                }
+            }
 
-            /* ABAIKAN SHT_NULL dan SHT_NOBITS (.bss) karena tidak punya wujud di file fisik */
             if (ShdrTable[i].sh_type != SHT_NULL && ShdrTable[i].sh_type != SHT_NOBITS)
             {
                 ULONG SecEnd = ShdrTable[i].sh_offset + ShdrTable[i].sh_size;
-                
-                /* SANITY CHECK: Filter nilai sampah (garbage). 
-                 * Sebuah kernel object (.ko) normal tidak mungkin melebihi 16 MB.
-                 */
                 if (SecEnd > MaxSectionEndOffset && SecEnd < (16 * 1024 * 1024))
                 {
                     MaxSectionEndOffset = SecEnd;
@@ -868,8 +878,7 @@ ElfFmtCreateImageSection(
             MaxSectionEndOffset = ShdrEnd;
         }
 
-        DPRINT("[ELF/FMT] Found %u allocatable sections in ET_REL. MaxFileOffset = %u bytes\n", 
-                NrSegments, MaxSectionEndOffset);
+        ULONG BssBaseOffset = ALIGN_UP_BY(MaxSectionEndOffset, 16);
 
         if (NrSegments > 0)
         {
@@ -886,29 +895,40 @@ ElfFmtCreateImageSection(
             RtlZeroMemory(ImageSectionObject->Segments, sizeof(MM_SECTION_SEGMENT) * NrSegments);
 
             ULONG SegIdx = 0;
+            ULONG BssCursor = BssBaseOffset;
+
             for (ULONG i = 0; i < ElfHeader.e_shnum; i++)
             {
                 if (ShdrTable[i].sh_flags & SHF_ALLOC)
                 {
                     PMM_SECTION_SEGMENT Seg = &ImageSectionObject->Segments[SegIdx++];
                     
-                    /* Untuk ET_REL, tempatkan VirtualAddress sesuai sh_offset file */
-                    Seg->Image.VirtualAddress = ShdrTable[i].sh_offset;
-                    Seg->Image.FileOffset = ShdrTable[i].sh_offset;
+                    if (ShdrTable[i].sh_type == SHT_NOBITS)
+                    {
+                        ULONG Align = ShdrTable[i].sh_addralign ? ShdrTable[i].sh_addralign : 16;
+                        BssCursor = ALIGN_UP_BY(BssCursor, Align);
+
+                        Seg->Image.VirtualAddress = BssCursor;
+                        Seg->Image.FileOffset = 0;
+                        BssCursor += ShdrTable[i].sh_size;
+                    }
+                    else
+                    {
+                        Seg->Image.VirtualAddress = ShdrTable[i].sh_offset;
+                        Seg->Image.FileOffset = ShdrTable[i].sh_offset;
+                    }
+
                     Seg->Length.QuadPart = ALIGN_UP_BY(ShdrTable[i].sh_size, PAGE_SIZE);
                     Seg->RawLength.QuadPart = (ShdrTable[i].sh_type != SHT_NOBITS) ? ShdrTable[i].sh_size : 0;
                     Seg->Protection = RtlElfShFlagsToVeaProtection(ShdrTable[i].sh_flags);
                     Seg->FileObject = FileObject;
-
-                    DPRINT("[ELF/FMT] Seg[%u]: VA=0x%08X, FileOff=0x%08X, Size=%u, Prot=0x%X\n",
-                            SegIdx - 1, (ULONG)Seg->Image.VirtualAddress, (ULONG)Seg->Image.FileOffset,
-                            (ULONG)Seg->Length.QuadPart, Seg->Protection);
                 }
             }
 
-            /* ImageSize WAJIB mencakup seluruh panjang file agar metadata ELF di ekor file ikut ter-map */
-            ImageSize = MaxSectionEndOffset;
+            /* ImageSize wajib mencakup file fisik + seluruh area .bss di ekornya */
+            ImageSize = (BssTotalSize > 0) ? (BssBaseOffset + BssTotalSize) : MaxSectionEndOffset;
             ImageSectionObject->NrSegments = NrSegments;
+            ImageSectionObject->SegFlags |= MM_IMAGE_ELF_REL_OBJECT;
         }
 
         UlFreePool(ShdrTable);
@@ -932,13 +952,55 @@ ElfFmtCreateImageSection(
             return STATUS_INVALID_IMAGE_FORMAT;
         }
 
-        for (ULONG i = 0; i < ElfHeader.e_phnum; i++)
+        /* 1. Pass pertama: cari MinVa, MaxVa, jumlah PT_LOAD, dan MaxFileOffset */
+        ULONG_PTR MinVa = (ULONG_PTR)-1;
+        ULONG_PTR MaxVa = 0;
+
+        ULONG MaxFileOffset = ElfHeader.e_phoff + PhdrTableSize;
+        if (ElfHeader.e_shoff != 0)
         {
-            if (PhdrTable[i].p_type == PT_LOAD) NrSegments++;
+            ULONG ShdrEnd = ElfHeader.e_shoff + (ElfHeader.e_shnum * sizeof(ELF32_SHDR));
+            if (ShdrEnd > MaxFileOffset)
+            {
+                MaxFileOffset = ShdrEnd;
+            }
         }
 
-        if (NrSegments > 0)
+        for (ULONG i = 0; i < ElfHeader.e_phnum; i++)
         {
+            if (PhdrTable[i].p_type == PT_LOAD)
+            {
+                if (PhdrTable[i].p_memsz == 0) continue;
+
+                NrSegments++;
+
+                if (PhdrTable[i].p_vaddr < MinVa)
+                {
+                    MinVa = PhdrTable[i].p_vaddr;
+                }
+
+                ULONG_PTR SegEnd = PhdrTable[i].p_vaddr + PhdrTable[i].p_memsz;
+                if (SegEnd > MaxVa)
+                {
+                    MaxVa = SegEnd;
+                }
+
+                ULONG FileEnd = PhdrTable[i].p_offset + PhdrTable[i].p_filesz;
+                if (FileEnd > MaxFileOffset)
+                {
+                    MaxFileOffset = FileEnd;
+                }
+            }
+        }
+
+        if (NrSegments > 0 && MinVa < MaxVa)
+        {
+            ULONG_PTR AlignedMinVa = PAGE_ALIGN_DOWN(MinVa);
+            ULONG_PTR AlignedMaxVa = PAGE_ALIGN_UP(MaxVa);
+
+            /* Simpan preferred base address (0x7C920000 untuk veaso.so, 0x00400000 untuk .elf) */
+            ImageSectionObject->BasedAddress = (PVOID)AlignedMinVa;
+
             ImageSectionObject->Segments = (PMM_SECTION_SEGMENT)UlAllocatePoolWithTag(
                 NonPagedPool, sizeof(MM_SECTION_SEGMENT) * NrSegments, 'gSmM'
             );
@@ -956,8 +1018,12 @@ ElfFmtCreateImageSection(
             {
                 if (PhdrTable[i].p_type == PT_LOAD)
                 {
+                    if (PhdrTable[i].p_memsz == 0) continue;
+
                     PMM_SECTION_SEGMENT Seg = &ImageSectionObject->Segments[SegIdx++];
-                    Seg->Image.VirtualAddress = PhdrTable[i].p_vaddr;
+
+                    /* WAJIB relatif terhadap AlignedMinVa (bukan p_vaddr mentah!) */
+                    Seg->Image.VirtualAddress = PhdrTable[i].p_vaddr - AlignedMinVa;
                     Seg->Image.FileOffset = PhdrTable[i].p_offset;
                     Seg->Length.QuadPart = ALIGN_UP_BY(PhdrTable[i].p_memsz, PAGE_SIZE);
                     Seg->RawLength.QuadPart = PhdrTable[i].p_filesz;
@@ -967,12 +1033,13 @@ ElfFmtCreateImageSection(
                     if (PhdrTable[i].p_flags & PF_X) Flags |= SHF_EXECINSTR;
                     if (PhdrTable[i].p_flags & PF_W) Flags |= SHF_WRITE;
                     Seg->Protection = RtlElfShFlagsToVeaProtection(Flags);
-
-                    ULONG EndVa = PhdrTable[i].p_vaddr + PhdrTable[i].p_memsz;
-                    if (EndVa > ImageSize) ImageSize = EndVa;
                 }
             }
             ImageSectionObject->NrSegments = NrSegments;
+            ImageSectionObject->SegFlags |= MM_IMAGE_ELF_PROGRAM_HDR;
+
+            /* ImageSize adalah bentang virtual (AlignedMaxVa - AlignedMinVa), bukan MaxVa mentah */
+            ImageSize = (ULONG)(AlignedMaxVa - AlignedMinVa);
         }
 
         UlFreePool(PhdrTable);
@@ -992,9 +1059,6 @@ ElfFmtCreateImageSection(
     ImageSectionObject->ImageInformation.Machine = ElfHeader.e_machine;
     ImageSectionObject->ImageInformation.ImageContainsCode = TRUE;
     ImageSectionObject->FileObject = FileObject;
-
-    DPRINT("[ELF/FMT] SUCCESS: Total ImageSize = %u bytes (%u pages)\n", 
-            ImageSize, ImageSize >> PAGE_SHIFT);
 
     return STATUS_SUCCESS;
 }
@@ -1038,7 +1102,7 @@ MmCreateImageSection(
 
     /* 3. Hitung Kebutuhan PTE dan Alokasi SEGMENT ASLI */
     TotalPages = (ImageSectionObject->ImageInformation.ImageFileSize + PAGE_SIZE - 1) >> PAGE_SHIFT;
-    SegmentSize = sizeof(SEGMENT) + (TotalPages * sizeof(PAGE_ENTRY));
+    SegmentSize = sizeof(SEGMENT) + (TotalPages * sizeof(MMPTE));
 
     Segment = (PSEGMENT)UlAllocatePoolWithTag(NonPagedPool, SegmentSize, 'SgMm');
     if (!Segment)
@@ -1070,10 +1134,9 @@ MmCreateImageSection(
     ControlArea->NumberOfSectionReferences = 1; // Dihitung dari Section Utama
 
     Segment->ControlArea = ControlArea;
+    Segment->BasedAddress = ImageSectionObject->BasedAddress;
     Segment->SizeOfSegment = ImageSectionObject->ImageInformation.ImageFileSize;
     Segment->TotalNumberOfPtes = TotalPages;
-    
-    /* MAGIC NT: Tautkan Image Information TANPA cast berbahaya! */
     Segment->u2.ImageInformation = &ImageSectionObject->ImageInformation;
 
     /* Tambah Reference Count pada FileObject agar aman dari Use-After-Free */
@@ -1126,10 +1189,11 @@ MmCreateArm3Section(
     VEASTATUS Status;
     PCONTROL_AREA ControlArea;
     ULONG ProtectionMask, ControlAreaSize, Size, NonPagedCharge, PagedCharge;
-    KPROCESSOR_MODE PreviousMode = KernelMode; // TODO: UlGetPreviousMode();
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
     BOOLEAN FileLock = FALSE, KernelCall = FALSE;
     KIRQL OldIrql;
     PFILE_OBJECT File = FileObject;
+    BOOLEAN DerefFile = FALSE;
     BOOLEAN UserRefIncremented = FALSE;
     PVOID PreviousSectionPointer;
 
@@ -1161,6 +1225,7 @@ MmCreateArm3Section(
                 (PVOID*)&File
             );
             if (!VEA_SUCCESS(Status)) return Status;
+            DerefFile = FALSE;
         }
 
         if (AllocationAttributes & SEC_IMAGE)
@@ -1175,7 +1240,7 @@ MmCreateArm3Section(
                 File
             );
 
-            if (FileHandle && File)
+            if (DerefFile && File)
             {
                 ObDereferenceObject(File);
             }
@@ -1188,7 +1253,7 @@ MmCreateArm3Section(
         ControlArea = (PCONTROL_AREA)UlAllocatePoolWithTag(NonPagedPool, ControlAreaSize, 'aCmM');
         if (!ControlArea)
         {
-            if (FileHandle) ObDereferenceObject(File);
+            if (DerefFile && File) ObDereferenceObject(File);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
@@ -1202,7 +1267,6 @@ MmCreateArm3Section(
 
         /* Lock PFN/Section Database */
         OldIrql = MiAcquirePfnLock();
-
         ControlArea->u.Flags.BeingCreated = TRUE;
         PreviousSectionPointer = File->SectionObjectPointer;
         
@@ -1223,13 +1287,19 @@ MmCreateArm3Section(
             KernelCall
         );
 
+        if (DerefFile && File)
+        {
+            ObDereferenceObject(File);
+            File = NULL;
+        }
+
         if (!VEA_SUCCESS(Status))
         {
             OldIrql = MiAcquirePfnLock();
             
-            if (File->SectionObjectPointer)
+            if (PreviousSectionPointer)
             {
-                File->SectionObjectPointer->DataSectionObject = NULL;
+                ((PSECTION_OBJECT_POINTERS)PreviousSectionPointer)->DataSectionObject = NULL;
             }
             
             ControlArea->u.Flags.BeingCreated = FALSE;
@@ -1238,8 +1308,6 @@ MmCreateArm3Section(
             // TODO: if (FileLock) ObioSetTopLevelIrp(NULL);
 
             UlFreePool(ControlArea);
-            if (FileHandle) ObDereferenceObject(File);
-
             return Status;
         }
 
@@ -1305,7 +1373,7 @@ MmCreateArm3Section(
 
     if ((ControlArea->u.Flags.Image) || !(ControlArea->FilePointer))
     {
-        PagedCharge = sizeof(SECTION) + NewSegment->TotalNumberOfPtes * sizeof(PAGE_ENTRY);
+        PagedCharge = sizeof(SECTION) + NewSegment->TotalNumberOfPtes * sizeof(MMPTE);
         Size = sizeof(SUBSECTION);
     }
     else
@@ -1444,99 +1512,114 @@ MmMapViewOfSegment(
     ULONG_PTR TargetVa;
     KIRQL OldIrql;
     VEASTATUS Status = STATUS_SUCCESS;
-
-    DPRINT("[MM/SEG] MmMapViewOfSegment Entry: Process=%p, Segment=%p, ControlArea=%p, ViewSize=%u, Protect=0x%X, ViewOffset=%I64u\n",
-           Process, Segment, ControlArea, ViewSize, Protect, ViewOffset);
-
+ 
     if (!Segment || !BaseAddress || ViewSize == 0)
     {
-        DPRINT("[MM/SEG] ERROR: Invalid Parameter! Segment=%p, BaseAddress=%p, ViewSize=%u\n",
-               Segment, BaseAddress, ViewSize);
         return STATUS_INVALID_PARAMETER;
     }
-
+ 
     ViewSize = PAGE_ROUND_UP(ViewSize);
     PageCount = (ULONG)(ViewSize >> PAGE_SHIFT);
     TargetVa = (ULONG_PTR)*BaseAddress;
-
-    DPRINT("[MM/SEG] TargetVa Input=0x%08X, Rounded ViewSize=%u (%u pages)\n",
-           TargetVa, ViewSize, PageCount);
-
+ 
     if (TargetVa != 0)
     {
         TargetVa = PAGE_ALIGN_DOWN(TargetVa);
     }
-
+ 
     if (TargetVa == 0)
     {
-        TargetVa = MmAllocateVirtualRange(PageCount);
-        if (TargetVa == 0)
+        if (MM_IS_SYSTEM_PROCESS(Process))
         {
-            DPRINT("[MM/SEG] ERROR: MmAllocateVirtualRange returned 0 for %u pages!\n", PageCount);
-            return STATUS_NO_MEMORY;
-        }
-
-        DPRINT("[MM/SEG] Allocated Virtual Range: TargetVa=0x%08X (%u pages)\n", TargetVa, PageCount);
-
-        /* Hubungkan VAD teralokasi ke ControlArea & Segment */
-        KsAcquireSpinLock(&MmVmmLock, &OldIrql);
-        Vad = MmpFindVadByVpn(MmKernelVadTree.Root, TargetVa >> PAGE_SHIFT);
-        if (Vad)
-        {
-            Vad->ControlArea = ControlArea;
-            Vad->ViewOffset  = ViewOffset;
-            Vad->Protection  = Protect;
-            DPRINT("[MM/SEG] VAD found and assigned: VPN=0x%X, ControlArea=%p\n",
-                   Vad->StartingVpn, ControlArea);
+            /* Jalur kernel (sama seperti sebelumnya) */
+            TargetVa = MmAllocateVirtualRange(PageCount);
+            if (TargetVa == 0)
+            {
+                return STATUS_NO_MEMORY;
+            }
+ 
+            KsAcquireSpinLock(&MmVmmLock, &OldIrql);
+            Vad = MmpFindVadByVpn(MmKernelVadTree.Root, TargetVa >> PAGE_SHIFT);
+            if (Vad)
+            {
+                Vad->ControlArea = ControlArea;
+                Vad->u2.VadFlags2.FileOffset = (ULONG)(ViewOffset >> PAGE_SHIFT);
+                Vad->u.VadFlags.Protection = MiMakeProtectionMask(Protect);
+                Vad->u.VadFlags.MemCommit = 1;
+                Vad->u.VadFlags.PrivateMemory = (ControlArea == NULL) ? 1 : 0;
+            }
+            KsReleaseSpinLock(&MmVmmLock, OldIrql);
+ 
+            if (!Vad) return STATUS_NO_MEMORY;
         }
         else
         {
-            DPRINT("[MM/SEG] ERROR: MmpFindVadByVpn returned NULL for VPN 0x%X!\n",
-                   TargetVa >> PAGE_SHIFT);
+            /* Jalur user: cari celah di ruang user proses ini, granularitas 64KB */
+            Vad = MmpAllocateVadNode();
+            if (!Vad) return STATUS_INSUFFICIENT_RESOURCES;
+ 
+            Vad->ControlArea = ControlArea;
+            Vad->u2.VadFlags2.FileOffset = (ULONG)(ViewOffset >> PAGE_SHIFT);
+            Vad->u.VadFlags.Protection = MiMakeProtectionMask(Protect);
+            Vad->u.VadFlags.MemCommit = 1;
+            Vad->u.VadFlags.PrivateMemory = (ControlArea == NULL) ? 1 : 0;
+            Vad->u.VadFlags.VadType       = 0;
+ 
+            Status = MmpInsertVadAnywhere(&Process->VadRoot, &Process->VadLock,
+                                          Vad, PageCount,
+                                          MM_LOWEST_USER_VPN,
+                                          MM_HIGHEST_USER_VPN + 1,
+                                          MM_VAD_ALIGN_64K);
+            if (!VEA_SUCCESS(Status))
+            {
+                MmpFreeVadNode(Vad);
+                return Status;
+            }
+ 
+            TargetVa = (ULONG_PTR)Vad->StartingVpn << PAGE_SHIFT;
         }
-        KsReleaseSpinLock(&MmVmmLock, OldIrql);
-
-        if (!Vad) return STATUS_NO_MEMORY;
     }
     else
     {
-        DPRINT("[MM/SEG] TargetVa specified (0x%08X), allocating manual VAD node\n", TargetVa);
-
-        Vad = (PMM_VAD)UlAllocatePoolWithTag(NonPagedPool, sizeof(MM_VAD), 'daVM');
-        if (!Vad)
+        /* Alamat ditentukan pemanggil: tree dipilih dari alamatnya, dengan cek konflik */
+        PKSPIN_LOCK Lock;
+        PRTL_AVL_TREE Tree = MmpGetVadTree(Process, (ULONG)(TargetVa >> PAGE_SHIFT), &Lock);
+ 
+        if (!Tree)
         {
-            DPRINT("[MM/SEG] ERROR: Failed to allocate pool for MM_VAD!\n");
-            return STATUS_INSUFFICIENT_RESOURCES;
+            return STATUS_INVALID_PARAMETER;
         }
-
-        RtlZeroMemory(Vad, sizeof(MM_VAD));
-        Vad->StartingVpn = TargetVa >> PAGE_SHIFT;
+ 
+        Vad = MmpAllocateVadNode();
+        if (!Vad) return STATUS_INSUFFICIENT_RESOURCES;
+ 
+        Vad->StartingVpn = (ULONG)(TargetVa >> PAGE_SHIFT);
         Vad->EndingVpn = Vad->StartingVpn + PageCount - 1;
         Vad->ControlArea = ControlArea;
-        Vad->ViewOffset = ViewOffset;
-        Vad->Protection = Protect;
-
-        KsAcquireSpinLock(&MmVmmLock, &OldIrql);
-        RtlInsertElementAvl(&MmKernelVadTree, (PRTL_BALANCED_NODE)Vad);
-        KsReleaseSpinLock(&MmVmmLock, OldIrql);
-
-        DPRINT("[MM/SEG] Manual VAD inserted to AVL tree: StartVPN=0x%X, EndVPN=0x%X\n",
-               Vad->StartingVpn, Vad->EndingVpn);
+        Vad->u2.VadFlags2.FileOffset = (ULONG)(ViewOffset >> PAGE_SHIFT);
+        Vad->u.VadFlags.Protection = MiMakeProtectionMask(Protect);
+        Vad->u.VadFlags.MemCommit = 1;
+        Vad->u.VadFlags.PrivateMemory = (ControlArea == NULL) ? 1 : 0;
+ 
+        Status = MmpInsertVadAt(Tree, Lock, Vad);
+        if (!VEA_SUCCESS(Status))
+        {
+            MmpFreeVadNode(Vad);
+            return Status;
+        }
     }
-
+ 
     /* Update reference counter ControlArea */
     if (ControlArea)
     {
         InterlockedIncrement((PLONG)&ControlArea->NumberOfMappedViews);
         InterlockedIncrement((PLONG)&ControlArea->NumberOfSectionReferences);
-        DPRINT("[MM/SEG] ControlArea reference count updated (MappedViews=%d)\n",
-               ControlArea->NumberOfMappedViews);
     }
-
+ 
     *BaseAddress = (PVOID)TargetVa;
-    DPRINT("[MM/SEG] MmMapViewOfSegment SUCCESS: Final BaseAddress=0x%08X\n", TargetVa);
     return STATUS_SUCCESS;
 }
+
 
 VEASTATUS
 VEAPI
@@ -1560,9 +1643,6 @@ MmMapViewOfSection(
     ULONGLONG ViewOffset = 0;
     ULONG_PTR ImageBase = 0;
     SIZE_T ImageSize = 0;
-
-    DPRINT("[MM] MmMapViewOfSection Entry: Section=%p, Process=%p, BaseAddress=%p (*Base=%p), ViewSize=%p (*Size=%u), Protect=0x%X\n",
-           Section, Process, BaseAddress, BaseAddress ? *BaseAddress : NULL, ViewSize, ViewSize ? (ULONG)*ViewSize : 0, Protect);
 
     if (!Section || !Process || !BaseAddress || !ViewSize)
     {
@@ -1591,6 +1671,7 @@ MmMapViewOfSection(
     if (Section->Flags.Image && Segment)
     {
         PSECTION_IMAGE_INFORMATION ImageInfo = Segment->u2.ImageInformation;
+        BOOLEAN PreferredUsed = FALSE;
         
         if (ImageInfo && ImageInfo->ImageFileSize > 0)
         {
@@ -1603,9 +1684,11 @@ MmMapViewOfSection(
         }
 
         ImageBase = (ULONG_PTR)*BaseAddress;
-
-        DPRINT("[MM] SEC_IMAGE Path: ImageSize=%u, RequestedBase=0x%08X\n",
-               ImageSize, ImageBase);
+        if (ImageBase == 0 && Segment->BasedAddress != NULL)
+        {
+            ImageBase = (ULONG_PTR)Segment->BasedAddress;
+            PreferredUsed = TRUE;
+        }
 
         /* Map segmen image via MmMapViewOfSegment. 
          * Note: Proteksi per-segmen (text/data/bss) dihandle di dalam loader image. */
@@ -1618,13 +1701,23 @@ MmMapViewOfSection(
             0
         );
 
+        if (!VEA_SUCCESS(Status) && PreferredUsed)
+        {
+            ImageBase = 0;
+            Status = MmMapViewOfSegment(
+                Process,
+                Segment,
+                (PVOID*)&ImageBase,
+                ImageSize,
+                Protect,
+                0
+            );
+        }
+
         if (VEA_SUCCESS(Status))
         {
             *BaseAddress = (PVOID)ImageBase;
             *ViewSize = ImageSize;
-
-            DPRINT("[MM] Image Section 0x%p Mapped into Process '%s' at VA 0x%08X (Size: %u bytes)\n",
-                   Section, Process->ImageFileName, ImageBase, ImageSize);
         }
         else
         {
@@ -1728,7 +1821,6 @@ MmMapViewOfSection(
     }
 
 Exit:
-    DPRINT("[MM] MmMapViewOfSection Exit with Status=0x%08X\n", Status);
 
     if (IsAttached)
     {
@@ -1753,6 +1845,10 @@ MmUnmapViewOfSection(
     ULONG PageCount;
     ULONG_PTR CurrentVa;
     PCONTROL_AREA ControlArea = NULL;
+    PRTL_AVL_TREE VadTree = NULL;
+    PKSPIN_LOCK VadLock = NULL;
+    BOOLEAN IsPrivateVad;
+    ULONG VadProtection;
     KIRQL OldIrql;
 
     if (!Process || !BaseAddress)
@@ -1763,6 +1859,12 @@ MmUnmapViewOfSection(
     TargetVa = PAGE_ALIGN_DOWN(TargetVa);
     VpnTarget = TargetVa >> PAGE_SHIFT;
 
+    VadTree = MmpGetVadTree(Process, (ULONG)VpnTarget, &VadLock);
+    if (!VadTree || !VadLock)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     // 1. Switch Process Context jika unmap di proses lain
     if ((PEPROCESS)PtGetCurrentProcess() != Process)
     {
@@ -1770,59 +1872,95 @@ MmUnmapViewOfSection(
         IsAttached = TRUE;
     }
 
-    // 2. Lock VMM Tree & Cari Node VAD
-    KsAcquireSpinLock(&MmVmmLock, &OldIrql);
+    // 2. Lock VAD Tree (User atau Kernel) & Cari Node VAD
+    KsAcquireSpinLock(VadLock, &OldIrql);
 
-    Vad = MmpFindVadByVpn(MmKernelVadTree.Root, VpnTarget);
+    Vad = MmpFindVadByVpn(VadTree->Root, (ULONG)VpnTarget);
     if (!Vad)
     {
-        KsReleaseSpinLock(&MmVmmLock, OldIrql);
+        KsReleaseSpinLock(VadLock, OldIrql);
         Status = STATUS_NOT_MAPPED_VIEW;
         goto Exit;
     }
 
-    // BaseAddress HARUS persis sama dengan StartingVpn VAD (tidak boleh unmap parsial di tengah)
+    // BaseAddress HARUS persis sama dengan StartingVpn VAD (tidak boleh unmap parsial)
     if (Vad->StartingVpn != VpnTarget)
     {
-        KsReleaseSpinLock(&MmVmmLock, OldIrql);
+        KsReleaseSpinLock(VadLock, OldIrql);
         Status = STATUS_FREE_VM_NOT_AT_BASE;
         goto Exit;
     }
 
     PageCount = (Vad->EndingVpn - Vad->StartingVpn) + 1;
     ControlArea = Vad->ControlArea;
+    IsPrivateVad = (Vad->u.VadFlags.PrivateMemory != 0) || (ControlArea == NULL);
+    VadProtection = Vad->u.VadFlags.Protection;
 
-    // 3. Hapus PTE & Bebaskan Memori Fisik untuk setiap halaman
+    // 3. Hapus PTE & Bebaskan Memori Fisik HANYA untuk frame privat
     CurrentVa = TargetVa;
     for (ULONG i = 0; i < PageCount; i++, CurrentVa += PAGE_SIZE)
     {
-        PAGE_ENTRY *pde = MM_GET_PDE(CurrentVa);
-        if (!pde || !pde->bits.present)
+        if (!MiAddressToPde(CurrentVa)->Hard.Valid)
         {
             continue;
         }
 
-        PAGE_ENTRY *pte = MM_GET_PTE(CurrentVa);
-        if (pte && pte->bits.present)
-        {
-            ULONG PhysAddress = pte->bits.frame << PAGE_SHIFT;
+        PMMPTE Pte = MiAddressToPte(CurrentVa);
 
-            // Hapus mapping di Hardware Page Table
-            MI_WRITE_INVALID_PTE(pte);
+        if (Pte->Hard.Valid)
+        {
+            ULONG PhysAddress = Pte->Hard.PageFrameNumber << PAGE_SHIFT;
+            BOOLEAN ShouldFreeFrame = FALSE;
+
+            if (IsPrivateVad)
+            {
+                // Memory privat murni (tidak terikat ControlArea)
+                ShouldFreeFrame = TRUE;
+            }
+            else if (ControlArea->u.Flags.Image)
+            {
+                // Image section (ELF/.so): frame writable = hasil COW (.data/.bss)
+                // Frame read-only (.text/.rodata) masih dishare antar proses
+                if (Pte->Hard.Write)
+                {
+                    ShouldFreeFrame = TRUE;
+                }
+            }
+            else if ((VadProtection == MM_WRITECOPY ||
+                      VadProtection == MM_EXECUTE_WRITECOPY) &&
+                     Pte->Hard.Write)
+            {
+                // Data section Copy-on-Write yang sudah dimodifikasi proses ini
+                ShouldFreeFrame = TRUE;
+            }
+
+            // Hapus mapping di Hardware Page Table proses ini
+            MI_ERASE_PTE(Pte);
 
             // Flush TLB CPU
             MMI_INVALIDATE_TLB(CurrentVa);
 
-            // Bebaskan physical RAM page ke PIP Database Free List
-            MmFreePhysicalPage(PhysAddress);
+            // Bebaskan physical RAM page hanya jika frame tidak dishare
+            if (ShouldFreeFrame)
+            {
+                MmFreePhysicalPage(PhysAddress);
+            }
+        }
+        else if (Pte->Long != 0)
+        {
+            // PTE software (demand-zero/decommit): tidak ada frame fisik
+            MI_ERASE_PTE(Pte);
         }
     }
 
-    // 4. Cabut Node VAD dari AVL Tree
-    RtlDeleteElementAvl(&MmKernelVadTree, (PRTL_BALANCED_NODE)Vad);
-    MmVadRoot = (PMM_VAD)MmKernelVadTree.Root;
+    // 4. Cabut Node VAD dari AVL Tree yang sesuai
+    RtlDeleteElementAvl(VadTree, (PRTL_BALANCED_NODE)Vad);
+    if (VadTree == &MmKernelVadTree)
+    {
+        MmVadRoot = (PMM_VAD)MmKernelVadTree.Root;
+    }
 
-    KsReleaseSpinLock(&MmVmmLock, OldIrql);
+    KsReleaseSpinLock(VadLock, OldIrql);
 
     // Bebaskan struct MM_VAD ke VAD Free List
     MmpFreeVadNode(Vad);
@@ -1830,17 +1968,18 @@ MmUnmapViewOfSection(
     // 5. Update Reference Counter pada Control Area
     if (ControlArea)
     {
-        InterlockedDecrement((PLONG)&ControlArea->NumberOfMappedViews);
+        if (ControlArea->NumberOfMappedViews > 0)
+        {
+            InterlockedDecrement((PLONG)&ControlArea->NumberOfMappedViews);
+        }
 
         OldIrql = MiAcquirePfnLock();
-        ControlArea->NumberOfSectionReferences--;
-        
-        // Panggil MiCheckControlArea untuk free ControlArea jika refcount 0
+        if (ControlArea->NumberOfSectionReferences > 0)
+        {
+            ControlArea->NumberOfSectionReferences--;
+        }
         MiCheckControlArea(ControlArea, OldIrql);
     }
-
-    DPRINT("[MM] Section View at VA 0x%08X Unmapped Successfully (%u pages freed)\n",
-           TargetVa, PageCount);
 
 Exit:
     if (IsAttached)
@@ -1913,6 +2052,260 @@ VeaCreateSection(OUT PHANDLE SectionHandle,
     else
     {
         ObDereferenceObject(SectionObject);
+    }
+
+    return Status;
+}
+
+VEASTATUS
+VEAPI
+VeaQuerySection(
+    IN HANDLE SectionHandle,
+    IN SECTION_INFORMATION_CLASS SectionInformationClass,
+    OUT PVOID SectionInformation,
+    IN SIZE_T SectionInformationLength,
+    OUT PSIZE_T ResultLength OPTIONAL
+)
+{
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    PSECTION Section = NULL;
+    VEASTATUS Status = STATUS_SUCCESS;
+    SIZE_T RequiredLength = 0;
+
+    if (!SectionInformation)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // 1. Dapatkan Objek Section dari Handle Table
+    Status = ObReferenceObjectByHandle(
+        SectionHandle,
+        SECTION_QUERY,
+        MmSectionObjectType,
+        PreviousMode,
+        (PVOID*)&Section
+    );
+
+    if (!VEA_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    // 2. Cabangkan Berdasarkan Class Information
+    switch (SectionInformationClass)
+    {
+        case SectionBasicInformation:
+        {
+            RequiredLength = sizeof(SECTION_BASIC_INFORMATION);
+            if (SectionInformationLength < RequiredLength)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            PSECTION_BASIC_INFORMATION BasicInfo = (PSECTION_BASIC_INFORMATION)SectionInformation;
+            BasicInfo->BaseAddress = NULL;
+            BasicInfo->Attributes  = Section->InitialPageProtection;
+            BasicInfo->Size        = Section->SizeOfSection;
+            break;
+        }
+
+        case SectionImageInformation:
+        {
+            RequiredLength = sizeof(SECTION_IMAGE_INFORMATION);
+            if (SectionInformationLength < RequiredLength)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            // Pastikan Section ini adalah Executable Image (PE/ELF), bukan data biasa
+            if (!(Section->Flags.Image))
+            {
+                Status = STATUS_SECTION_NOT_IMAGE;
+                break;
+            }
+
+            PSECTION_IMAGE_INFORMATION ImageInfo = (PSECTION_IMAGE_INFORMATION)SectionInformation;
+            
+            // Salin data header image dari Segment Control Area
+            if (Section->Segment && Section->Segment->u2.ImageInformation)
+            {
+                RtlCopyMemory(ImageInfo, Section->Segment->u2.ImageInformation, sizeof(SECTION_IMAGE_INFORMATION));
+            }
+            else
+            {
+                RtlZeroMemory(ImageInfo, sizeof(SECTION_IMAGE_INFORMATION));
+            }
+            break;
+        }
+
+        default:
+            Status = STATUS_INVALID_INFO_CLASS;
+            break;
+    }
+
+    ObDereferenceObject(Section);
+
+    if (VEA_SUCCESS(Status) && ResultLength)
+    {
+        *ResultLength = RequiredLength;
+    }
+
+    return Status;
+}
+
+VEASTATUS
+VEAPI
+VeaMapViewOfSection(
+    IN HANDLE SectionHandle,
+    IN HANDLE ProcessHandle,
+    IN OUT PVOID *BaseAddress,
+    IN ULONG_PTR ZeroBits,
+    IN SIZE_T CommitSize,
+    IN OUT PLARGE_INTEGER SectionOffset OPTIONAL,
+    IN OUT PSIZE_T ViewSize,
+    IN SECTION_INHERIT InheritDisposition,
+    IN ULONG AllocationType,
+    IN ULONG Win32Protect
+)
+{
+    PEPROCESS TargetProcess = NULL;
+    PSECTION Section = NULL;
+    VEASTATUS Status = STATUS_SUCCESS;
+    BOOLEAN Attached = FALSE;
+    ACCESS_MASK DesiredAccess = SECTION_MAP_READ;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    PEPROCESS CurrentProcess = (PEPROCESS)PtGetCurrentProcess();
+
+    if (!BaseAddress || !ViewSize)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Tentukan Access Right yang dibutuhkan berdasarkan Proteksi Win32
+    if (Win32Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE))
+        DesiredAccess |= SECTION_MAP_WRITE;
+    if (Win32Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE))
+        DesiredAccess |= SECTION_MAP_EXECUTE;
+
+    // 1. Reference Object Section & Process
+    Status = ObReferenceObjectByHandle(
+        SectionHandle,
+        DesiredAccess,
+        MmSectionObjectType,
+        PreviousMode,
+        (PVOID*)&Section
+    );
+    if (!VEA_SUCCESS(Status)) return Status;
+
+    if (ProcessHandle == NtCurrentProcess() || ProcessHandle == (HANDLE)-1)
+    {
+        TargetProcess = CurrentProcess;
+    }
+    else
+    {
+        Status = ObReferenceObjectByHandle(
+            ProcessHandle,
+            PROCESS_VM_OPERATION,
+            PtEprocessType,
+            PreviousMode,
+            (PVOID*)&TargetProcess
+        );
+        if (!VEA_SUCCESS(Status))
+        {
+            ObDereferenceObject(Section);
+            return Status;
+        }
+    }
+
+    if (CurrentProcess != TargetProcess)
+    {
+        PtAttachProcess((PKPROCESS)TargetProcess);
+        Attached = TRUE;
+    }
+
+    // 2. Panggil Internal Memory Engine: MmMapViewOfSection
+    Status = MmMapViewOfSection(
+        Section,
+        TargetProcess,
+        BaseAddress,
+        ZeroBits,
+        CommitSize,
+        SectionOffset,
+        ViewSize,
+        InheritDisposition,
+        AllocationType,
+        Win32Protect
+    );
+
+    if (Attached)
+    {
+        PtDetachProcess();
+    }
+
+    if (ProcessHandle != NtCurrentProcess() && ProcessHandle != (HANDLE)-1)
+    {
+        ObDereferenceObject(TargetProcess);
+    }
+
+    ObDereferenceObject(Section);
+
+    return Status;
+}
+
+VEASTATUS
+VEAPI
+VeaUnmapViewOfSection(
+    IN HANDLE ProcessHandle,
+    IN PVOID BaseAddress
+)
+{
+    PEPROCESS TargetProcess = NULL;
+    VEASTATUS Status = STATUS_SUCCESS;
+    BOOLEAN Attached = FALSE;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    PEPROCESS CurrentProcess = (PEPROCESS)PtGetCurrentProcess();
+
+    if ((ULONG_PTR)BaseAddress >= 0xC0000000)
+    {
+        return STATUS_INVALID_PARAMETER_2;
+    }
+
+    // 1. Reference Process Object
+    if (ProcessHandle == NtCurrentProcess() || ProcessHandle == (HANDLE)-1)
+    {
+        TargetProcess = CurrentProcess;
+    }
+    else
+    {
+        Status = ObReferenceObjectByHandle(
+            ProcessHandle,
+            PROCESS_VM_OPERATION,
+            PtEprocessType,
+            PreviousMode,
+            (PVOID*)&TargetProcess
+        );
+        if (!VEA_SUCCESS(Status)) return Status;
+    }
+
+    if (CurrentProcess != TargetProcess)
+    {
+        PtAttachProcess((PKPROCESS)TargetProcess);
+        Attached = TRUE;
+    }
+
+    // 2. Eksekusi Unmap Internal
+    Status = MmUnmapViewOfSection(TargetProcess, BaseAddress);
+
+    if (Attached)
+    {
+        PtDetachProcess();
+    }
+
+    if (ProcessHandle != NtCurrentProcess() && ProcessHandle != (HANDLE)-1)
+    {
+        ObDereferenceObject(TargetProcess);
     }
 
     return Status;

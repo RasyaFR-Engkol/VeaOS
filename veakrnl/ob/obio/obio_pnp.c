@@ -39,9 +39,11 @@ ObioInitializePnPService(VOID)
     /* Initialie ListHead*/
     InitializeListHead(&ObioDeviceActionRequestList);
     InitializeListHead(&ObioPnpNotificationList);
+    InitializeListHead(&ObioPnpRootPdoList);
 
     /* Initialize SpinLock */
     KsInitializeSpinlock(&ObioDeviceTreeLock);
+    KsInitializeSpinlock(&ObioPnpRootLock);
 
     /* Initialize Group Order Load */
     ObioInitGroupOrderLoad();
@@ -182,7 +184,7 @@ ObioInitializePnPService(VOID)
     /* Driver is orphaned. How do we fix it? OFC MAKE PDO */
     Status = ObioCreateNewDevice(
         ObioPnpRootDriver, 
-        0,
+        sizeof(PNPROOT_PDO_EXTENSION),
         "PnpManager", 
         FILE_DEVICE_CONTROLLER,
         &PnpPdo
@@ -192,6 +194,15 @@ ObioInitializePnPService(VOID)
     {
         DPRINT("ERROR: Fail to create PnP Device Node\n");
         return Status;
+    }
+
+    {
+        PPNPROOT_PDO_EXTENSION RootExt = (PPNPROOT_PDO_EXTENSION)PnpPdo->DeviceExtension;
+        RtlZeroMemory(RootExt, sizeof(PNPROOT_PDO_EXTENSION));
+        RootExt->IsRootBus = TRUE;
+        RtlCopyRawString(RootExt->DeviceId, "HTREE/ROOT");
+        RtlCopyRawString(RootExt->InstanceId, "0");
+        PnpPdo->Flags &= ~DO_DEVICE_INITIALIZING;
     }
 
     /* Create our DeviceNode as ROOT */
@@ -225,5 +236,174 @@ ObioInitializePnPService(VOID)
 
     /* Enumerate them */
     ObioQueueDeviceAction(PnpPdo, PiActionEnumRootDevices, NULL, NULL);
+    return STATUS_SUCCESS;
+}
+
+VEASTATUS
+VEAPI
+ObioReportDetectedDevice(
+    IN PDRIVER_OBJECT DriverObject,
+    IN PCSTR DeviceId OPTIONAL,
+    IN PCSTR ServiceName OPTIONAL,
+    IN POBIO_RESOURCE_LIST ResourceList OPTIONAL,
+    IN OUT PDEVICE_OBJECT *DeviceObject
+)
+{
+    VEASTATUS Status;
+    PDEVICE_OBJECT Pdo = NULL;
+    PPNPROOT_PDO_EXTENSION PdoExt;
+    PDEVICE_NODE DevNode;
+    CHAR TargetDeviceId[64];
+    CHAR InstanceIdBuf[32];
+    ANSI_STRING TargetIdAnsi;
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+    ULONG InstanceNumber = 0;
+    HANDLE EnumHandle = NULL;
+    HANDLE InstanceKeyHandle = NULL;
+    ANSI_STRING EnumRootPath = RTL_CONSTANT_ANSI_STRING("/REGISTRY/MACHINE/SYSTEM/CurrentControlSet/Enum");
+    ULONG Disposition;
+
+    if (!DriverObject || !DeviceObject)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (!ObioPnpRootDriver || !ObioRootDeviceNode)
+    {
+        DPRINT("[OBIO] ObioReportDetectedDevice called before PnP initialization!\n");
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    RtlZeroMemory(TargetDeviceId, sizeof(TargetDeviceId));
+    if (DeviceId && DeviceId[0] != '\0')
+    {
+        if ((DeviceId[0] == 'R' || DeviceId[0] == 'r') &&
+            (DeviceId[1] == 'O' || DeviceId[1] == 'o') &&
+            (DeviceId[2] == 'O' || DeviceId[2] == 'o') &&
+            (DeviceId[3] == 'T' || DeviceId[3] == 't') &&
+            (DeviceId[4] == '/' || DeviceId[4] == '\\'))
+        {
+            RtlStringCbPrintfA(TargetDeviceId, sizeof(TargetDeviceId), "%s", DeviceId);
+        }
+        else
+        {
+            RtlStringCbPrintfA(TargetDeviceId, sizeof(TargetDeviceId), "ROOT/%s", DeviceId);
+        }
+    }
+    else
+    {
+        RtlCopyRawString(TargetDeviceId, "ROOT/LEGACY_DEVICE");
+    }
+
+    RtlInitAnsiString(&TargetIdAnsi, TargetDeviceId);
+
+    KsAcquireSpinLock(&ObioPnpRootLock, &OldIrql);
+    for (Entry = ObioPnpRootPdoList.Flink;
+         Entry != &ObioPnpRootPdoList;
+         Entry = Entry->Flink)
+    {
+        PPNPROOT_PDO_EXTENSION ExistingExt;
+        ANSI_STRING ExistingIdAnsi;
+
+        ExistingExt = CONTAINING_RECORD(Entry, PNPROOT_PDO_EXTENSION, ListEntry);
+        RtlInitAnsiString(&ExistingIdAnsi, ExistingExt->DeviceId);
+
+        if (RtlEqualString(&TargetIdAnsi, &ExistingIdAnsi, TRUE))
+        {
+            InstanceNumber++;
+        }
+    }
+    KsReleaseSpinLock(&ObioPnpRootLock, OldIrql);
+
+    RtlStringCbPrintfA(InstanceIdBuf, sizeof(InstanceIdBuf), "%04u", InstanceNumber);
+
+    if (*DeviceObject == NULL)
+    {
+        Status = ObioCreateNewDevice(
+            ObioPnpRootDriver,
+            sizeof(PNPROOT_PDO_EXTENSION),
+            NULL,
+            FILE_DEVICE_UNKNOWN,
+            &Pdo
+        );
+        if (!VEA_SUCCESS(Status))
+        {
+            DPRINT("[OBIO] ObioReportDetectedDevice: failed to create PDO (0x%x)\n", Status);
+            return Status;
+        }
+    }
+    else
+    {
+        Pdo = *DeviceObject;
+    }
+
+    PdoExt = (PPNPROOT_PDO_EXTENSION)Pdo->DeviceExtension;
+    RtlZeroMemory(PdoExt, sizeof(PNPROOT_PDO_EXTENSION));
+    PdoExt->IsRootBus = FALSE;
+    RtlCopyRawString(PdoExt->DeviceId, TargetDeviceId);
+    RtlCopyRawString(PdoExt->InstanceId, InstanceIdBuf);
+
+    Pdo->Flags &= ~DO_DEVICE_INITIALIZING;
+    Pdo->Flags |= DO_BUS_ENUMERATED_DEVICE;
+
+    DevNode = ObioCreateDeviceNode(Pdo);
+    if (!DevNode)
+    {
+        DPRINT("[OBIO] ObioReportDetectedDevice: ObioCreateDeviceNode failed for %s/%s\n",
+               TargetDeviceId, InstanceIdBuf);
+        ObDereferenceObject(Pdo);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    DevNode->Flags |= (OBIO_DEVNODE_SYNTHETIC | OBIO_DEVNODE_ENUMERATED);
+    if (ResourceList != NULL)
+    {
+        DevNode->AdditionalResources = ResourceList;
+        DevNode->Flags |= DNF_HAS_BOOT_CONFIG;
+    }
+
+    KsAcquireSpinLock(&ObioPnpRootLock, &OldIrql);
+    InsertTailList(&ObioPnpRootPdoList, &PdoExt->ListEntry);
+    KsReleaseSpinLock(&ObioPnpRootLock, OldIrql);
+
+    Status = ObioOpenVeaKey(NULL, &EnumHandle, &EnumRootPath, KEY_ALL_ACCESS);
+    if (VEA_SUCCESS(Status))
+    {
+        Status = ObioCreateVeaKey(
+            EnumHandle,
+            &DevNode->InstancePath,
+            REG_OPTION_NON_VOLATILE,
+            KEY_ALL_ACCESS,
+            &Disposition,
+            &InstanceKeyHandle
+        );
+        if (VEA_SUCCESS(Status))
+        {
+            if (ServiceName && ServiceName[0] != '\0')
+            {
+                ANSI_STRING ServiceValName = RTL_CONSTANT_ANSI_STRING("Service");
+                ULONG ServiceLen = (ULONG)RtlRawStringLength((PCHAR)ServiceName);
+
+                VeaSetValueKey(
+                    InstanceKeyHandle,
+                    &ServiceValName,
+                    0,
+                    FILE_KEY_STRING,
+                    (PVOID)ServiceName,
+                    ServiceLen
+                );
+            }
+            VeaClose(InstanceKeyHandle);
+        }
+        VeaClose(EnumHandle);
+    }
+
+    ObioInsertDeviceNode(DevNode, ObioRootDeviceNode);
+    ObioSetDevNodeState(DevNode, DeviceNodeStarted);
+
+    *DeviceObject = Pdo;
+    DPRINT("[OBIO] Reported detected device: %Z (PDO=%p)\n", &DevNode->InstancePath, Pdo);
+
     return STATUS_SUCCESS;
 }

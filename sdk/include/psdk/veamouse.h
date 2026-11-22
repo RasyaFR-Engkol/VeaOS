@@ -1,0 +1,75 @@
+#pragma once
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define IOCTL_MOUSE_QUERY_ATTRIBUTES \
+  CTL_CODE(FILE_DEVICE_MOUSE, 0, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#define IOCTL_MOUSE_INSERT_DATA \
+  CTL_CODE(FILE_DEVICE_MOUSE, 1, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#define MOUSE_ERROR_VALUE_BASE            20000
+
+#define MOUSE_LEFT_BUTTON_DOWN            0x0001
+#define MOUSE_LEFT_BUTTON_UP              0x0002
+#define MOUSE_RIGHT_BUTTON_DOWN           0x0004
+#define MOUSE_RIGHT_BUTTON_UP             0x0008
+#define MOUSE_MIDDLE_BUTTON_DOWN          0x0010
+#define MOUSE_MIDDLE_BUTTON_UP            0x0020
+#define MOUSE_BUTTON_4_DOWN               0x0040
+#define MOUSE_BUTTON_4_UP                 0x0080
+#define MOUSE_BUTTON_5_DOWN               0x0100
+#define MOUSE_BUTTON_5_UP                 0x0200
+#define MOUSE_WHEEL                       0x0400
+#define MOUSE_HWHEEL                      0x0800
+
+#define MOUSE_BUTTON_1_DOWN               MOUSE_LEFT_BUTTON_DOWN
+#define MOUSE_BUTTON_1_UP                 MOUSE_LEFT_BUTTON_UP
+#define MOUSE_BUTTON_2_DOWN               MOUSE_RIGHT_BUTTON_DOWN
+#define MOUSE_BUTTON_2_UP                 MOUSE_RIGHT_BUTTON_UP
+#define MOUSE_BUTTON_3_DOWN               MOUSE_MIDDLE_BUTTON_DOWN
+#define MOUSE_BUTTON_3_UP                 MOUSE_MIDDLE_BUTTON_UP
+
+#define MOUSE_MOVE_RELATIVE               0
+#define MOUSE_MOVE_ABSOLUTE               1
+#define MOUSE_VIRTUAL_DESKTOP             0x02
+#define MOUSE_ATTRIBUTES_CHANGED          0x04
+#define MOUSE_TERMSRV_SRC_SHADOW          0x100
+
+typedef struct _MOUSE_INPUT_DATA {
+    USHORT UnitId;
+    USHORT Flags;
+    union {
+        ULONG Buttons;
+        struct {
+            USHORT ButtonFlags;
+            USHORT ButtonData;
+        };
+    };
+    ULONG RawButtons;
+    LONG LastX;
+    LONG LastY;
+    ULONG ExtraInformation;
+} MOUSE_INPUT_DATA, *PMOUSE_INPUT_DATA;
+
+typedef struct _MOUSE_UNIT_ID_PARAMETER {
+    USHORT UnitId;
+} MOUSE_UNIT_ID_PARAMETER, *PMOUSE_UNIT_ID_PARAMETER;
+
+/* MOUSE_ATTRIBUTES.MouseIdentifier constants */
+#define MOUSE_INPORT_HARDWARE             0x0001
+#define MOUSE_I8042_HARDWARE              0x0002
+#define MOUSE_SERIAL_HARDWARE             0x0004
+#define BALLPOINT_I8042_HARDWARE          0x0008
+#define BALLPOINT_SERIAL_HARDWARE         0x0010
+#define WHEELMOUSE_I8042_HARDWARE         0x0020
+#define WHEELMOUSE_SERIAL_HARDWARE        0x0040
+#define MOUSE_HID_HARDWARE                0x0080
+#define WHEELMOUSE_HID_HARDWARE           0x0100
+#define HORIZONTAL_WHEEL_PRESENT          0x8000
+
+#ifdef __cplusplus
+}
+#endif

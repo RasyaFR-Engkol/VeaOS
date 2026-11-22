@@ -86,6 +86,7 @@ FsInitialize(VOID)
 
     if(fat32_init() < 0)
     {
+        SrlSendMsg("Failed to init FS\n");
         LdrError(STATUS_FILE_SYSTEM_CORRUPT);
         while(1) asm("hlt");
     }

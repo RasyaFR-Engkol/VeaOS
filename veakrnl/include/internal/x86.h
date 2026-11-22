@@ -3,6 +3,7 @@
 #include "potypes.h"
 #include <../ndk/ks.h>
 #include <procbind.h>
+#include <teb.h>
 
 typedef struct _KGDTENTRY32 {
     USHORT LimitLow;           // Bit 0-15 dari Segment Limit
@@ -263,9 +264,10 @@ extern void isr_14_entry(void);
 #define KGDT32_R3_DATA   0x23   // Index 4 (Offset 0x20 | 3) -> User Data
 #define KGDT32_TSS       0x28   // Index 5 (Offset 0x28), RPL 0 -> Task State Segment
 #define KGDT32_R0_PCR    0x30   // Index 6 (Offset 0x30), RPL 0 -> KPCR (FS Register)
-#define KGDT32_DF_TSS    0x38
+#define KGDT32_DF_TSS    0x38   // Index 7 (Offset 0x38)
+#define KGDT32_R3_TEB    0x43   // Index 8 (Offset 0x40)
 
-#define GDT_ENTRY_COUNT 8
+#define GDT_ENTRY_COUNT 9
 #define TSS_SIZE_32     104
 
 /* Where kernel bytes END? */
@@ -276,16 +278,6 @@ extern ULONG _veaos_end;
 #define STANDARD_TIMER_HZ 250
 #define TIMER_INTERVAL_MS       (1000 / STANDARD_TIMER_HZ)  // 4 ms
 #define TIMER_INCREMENT         (TIMER_INTERVAL_MS * 10000) 
-
-typedef struct _VEA_TIB {
-    PVOID ExceptionList;
-    PVOID StackBase;                                      // FS:[0x04]
-    PVOID StackLimit;                                     // FS:[0x08]
-    PVOID SubSystemTib;                                   // FS:[0x0C]
-    PVOID FiberData;                                      // FS:[0x10]
-    PVOID ArbitraryUserPointer;                           // FS:[0x14]
-    struct _VEA_TIB *Self;                                 // FS:[0x18] (User-mode Self-Pointer)
-} VEA_TIB, *PVEA_TIB;
 
 typedef UCHAR KAFFINITY;
 

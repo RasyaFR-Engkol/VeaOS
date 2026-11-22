@@ -1090,3 +1090,163 @@ VkpAttachStableValueKey(
     return STATUS_SUCCESS;
 }
 
+VEASTATUS
+VEAPI
+VkpEnumerateKey(
+    IN PVK_KEY_OBJECT KeyObject,
+    IN ULONG Index,
+    OUT PCHAR SubKeyName,
+    IN ULONG SubKeyNameSize,
+    OUT PULONG ResultNameLength,
+    OUT PULONG SubKeyCount OPTIONAL,
+    OUT PULONG Flags OPTIONAL
+)
+{
+    if (!KeyObject || !KeyObject->HiveBase || !ResultNameLength)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    PVK_HIVE Hive = KeyObject->HiveBase;
+    PKEY_DIRECTORY_NODE ParentNode = (PKEY_DIRECTORY_NODE)VkpGetCellPointer(Hive, KeyObject->KeyOffset);
+    if (!ParentNode || ParentNode->Signature != KEY_DIR_SIG)
+    {
+        return STATUS_OBJECT_TYPE_MISMATCH;
+    }
+
+    KeyObject->KeyNode = ParentNode;
+
+    if (Index >= ParentNode->SubKeyCount)
+    {
+        return STATUS_NO_MORE_ENTRIES;
+    }
+
+    ULONG CurrentIndex = 0;
+    ULONG CurrOffset   = ParentNode->FirstSubKeyOffset;
+
+    while (CurrOffset != 0)
+    {
+        PKEY_DIRECTORY_NODE ChildNode = (PKEY_DIRECTORY_NODE)VkpGetCellPointer(Hive, CurrOffset);
+        if (!ChildNode || ChildNode->Signature != KEY_DIR_SIG)
+        {
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+
+        if (CurrentIndex == Index)
+        {
+            *ResultNameLength = ChildNode->NameLength;
+            if (SubKeyCount) *SubKeyCount = ChildNode->SubKeyCount;
+            if (Flags)       *Flags       = ChildNode->Flags;
+
+            /* Butuh ruang untuk karakter nama + null-terminator '\0' */
+            if (!SubKeyName || SubKeyNameSize < (ULONG)ChildNode->NameLength + 1)
+            {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+
+            RtlCopyMemory(SubKeyName, ChildNode->Name, ChildNode->NameLength);
+            SubKeyName[ChildNode->NameLength] = '\0';
+            return STATUS_SUCCESS;
+        }
+
+        CurrOffset = ChildNode->NextSiblingOffset;
+        CurrentIndex++;
+    }
+
+    return STATUS_NO_MORE_ENTRIES;
+}
+
+VEASTATUS
+VEAPI
+VkpEnumerateValueKey(
+    IN PVK_KEY_OBJECT KeyObject,
+    IN ULONG Index,
+    OUT PCHAR ValueName,
+    IN ULONG ValueNameSize,
+    OUT PULONG ResultNameLength,
+    OUT PULONG Type OPTIONAL,
+    OUT PVOID Data OPTIONAL,
+    IN ULONG DataSize,
+    OUT PULONG ResultDataLength OPTIONAL
+)
+{
+    if (!KeyObject || !KeyObject->HiveBase || !ResultNameLength)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    PVK_HIVE Hive = KeyObject->HiveBase;
+    PKEY_DIRECTORY_NODE DirNode = (PKEY_DIRECTORY_NODE)VkpGetCellPointer(Hive, KeyObject->KeyOffset);
+    if (!DirNode || DirNode->Signature != KEY_DIR_SIG)
+    {
+        return STATUS_OBJECT_TYPE_MISMATCH;
+    }
+
+    KeyObject->KeyNode = DirNode;
+
+    ULONG CurrentIndex = 0;
+    ULONG CurrValOff   = DirNode->FirstValueOffset;
+
+    while (CurrValOff != 0)
+    {
+        PKEY_FILE_NODE FileNode = (PKEY_FILE_NODE)VkpGetCellPointer(Hive, CurrValOff);
+        if (!FileNode || FileNode->Signature != KEY_FILE_SIG)
+        {
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+
+        if (CurrentIndex == Index)
+        {
+            *ResultNameLength = FileNode->NameLength;
+            if (Type)             *Type             = FileNode->Type;
+            if (ResultDataLength) *ResultDataLength = FileNode->DataLength;
+
+            /* 1. Validasi & salin nama value (+ '\0') */
+            if (!ValueName || ValueNameSize < (ULONG)FileNode->NameLength + 1)
+            {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+
+            RtlCopyMemory(ValueName, FileNode->Name, FileNode->NameLength);
+            ValueName[FileNode->NameLength] = '\0';
+
+            /* 2. Jika data kosong (0 byte), langsung sukses */
+            if (FileNode->DataLength == 0)
+            {
+                return STATUS_SUCCESS;
+            }
+
+            /* 3. Validasi ukuran buffer data */
+            if (!Data || DataSize < FileNode->DataLength)
+            {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+
+            /* 4. Resolve pointer payload (Inline vs Out-of-line Cell) */
+            PVOID ValueData = NULL;
+            if ((FileNode->Flags & KEY_FILE_INLINE) || FileNode->DataLength <= sizeof(ULONG))
+            {
+                ValueData = &FileNode->DataPOffset;
+            }
+            else
+            {
+                PUCHAR CellPtr = (PUCHAR)VkpGetCellPointer(Hive, FileNode->DataPOffset);
+                if (!CellPtr)
+                {
+                    return STATUS_OBJECT_TYPE_MISMATCH;
+                }
+                ValueData = (PVOID)(CellPtr + sizeof(LONG));
+            }
+
+            RtlCopyMemory(Data, ValueData, FileNode->DataLength);
+            return STATUS_SUCCESS;
+        }
+
+        CurrValOff = FileNode->NextValueOffset;
+        CurrentIndex++;
+    }
+
+    return STATUS_NO_MORE_ENTRIES;
+}
+
+/* EOF */

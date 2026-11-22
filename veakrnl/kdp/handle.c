@@ -219,3 +219,47 @@ KdpDebugMailboxPrint(
     /* TRIGGER IT NOW */
     __asm__ __volatile__ ("int $3");
 }
+
+VEASTATUS
+VEAPI
+VeaKdPrint(
+    IN PCHAR Message
+)
+{
+    CHAR SafeBuffer[512];
+    SIZE_T i;
+
+    if (!Message)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    _VEA_TRY
+    {
+        if ((ULONG_PTR)Message >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+
+        for (i = 0; i < sizeof(SafeBuffer) - 1; i++)
+        {
+            CHAR ch = Message[i];
+            SafeBuffer[i] = ch;
+            if (ch == '\0')
+            {
+                break;
+            }
+        }
+        SafeBuffer[sizeof(SafeBuffer) - 1] = '\0';
+    }
+    _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
+    {
+        _VEA_YIELD(return STATUS_ACCESS_VIOLATION);
+    }
+    _VEA_END
+
+    KdPrintf("%s", SafeBuffer);
+    return STATUS_SUCCESS;
+}
+
+/* EOF */

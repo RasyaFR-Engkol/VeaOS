@@ -43,7 +43,7 @@ ObioGetDumpRoutine(IN HANDLE FileHandle)
     OIP_INFORMATION IoStatusBlock;
     IO_DUMP_ROUTINE DumpRoutine;
 
-    Status = VeaFsControlFile(
+    Status = VeaDeviceIoControlFile(
         FileHandle,
         NULL,
         NULL,
@@ -53,8 +53,7 @@ ObioGetDumpRoutine(IN HANDLE FileHandle)
         NULL,
         0,
         &DumpRoutine,        // Pake buffer tameng lu
-        sizeof(DumpRoutine), // Kasih tau driver limitnya 64 byte
-        TRUE
+        sizeof(DumpRoutine)
     );
 
     if (VEA_SUCCESS(Status))
@@ -63,7 +62,7 @@ ObioGetDumpRoutine(IN HANDLE FileHandle)
         ObioDumpFlushRoutine = DumpRoutine.Flush;
     }
 
-    DPRINT("[OBIO] DumpRoutine: Write %p | Flush %p\n", ObioDumpWriteRoutine, ObioDumpFlushRoutine);
+    // DPRINT("[OBIO] DumpRoutine: Write %p | Flush %p\n", ObioDumpWriteRoutine, ObioDumpFlushRoutine);
     
     return Status;
 }
@@ -149,8 +148,7 @@ ObioInitializeDumpSystem(VOID)
         &InBuffer,
         sizeof(InBuffer),
         OutBuffer,
-        OutBufferSize,
-        FALSE 
+        OutBufferSize
     );
 
     if (OutBuffer->ExtentCount > 0)

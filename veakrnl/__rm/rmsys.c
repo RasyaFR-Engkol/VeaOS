@@ -16,8 +16,41 @@
  * --------------------------------------------------------------------- */
 
 extern UCHAR MainSSPT[];
+extern ULONG MainNumberOfSysCalls;
+extern ULONG_PTR MainSSDT[];
 
-VEASTATUS
+extern VEASTATUS VEAPI KsiSystemCallTrampoline(
+    IN PVOID TargetFunction,
+    IN PULONG_PTR KernelArgs,
+    IN ULONG ParamBytes
+);
+extern VOID VEAPI KsiFastCallExitHandler(IN PKTRAP_FRAME Frame);
+extern VOID VEAPI KsiSystemCallReturn(IN PKTRAP_FRAME Frame);
+
+NORET
+VOID
+VEAPI
+RiServiceExit(IN PKTRAP_FRAME TrapFrame)
+{
+    PKTHREAD CurrentThread = PtGetCurrentThread();
+
+    if (CurrentThread)
+    {
+        CurrentThread->PreviousMode = (KPROCESSOR_MODE)TrapFrame->PreviousPreviousMode;
+    }
+
+    if (TrapFrame->PreviousPreviousMode == UserMode)
+    {
+        KsiFastCallExitHandler(TrapFrame);
+    }
+    else
+    {
+        KsiSystemCallReturn(TrapFrame);
+    }
+}
+
+NORET
+VOID
 VEAPI
 RiSyscallDispatcherHandler(
     IN PKTRAP_FRAME TrapFrame,
@@ -28,16 +61,12 @@ RiSyscallDispatcherHandler(
     KPROCESSOR_MODE OldPreviousMode;
     PKTRAP_FRAME OldTrapFrame;
     VEASTATUS Status = STATUS_SUCCESS;
-    ULONG SyscallNumber, ParamCount;
+    ULONG SyscallNumber;
     UCHAR ParamBytes;
-    ULONG_PTR TargetFunction;
+    ULONG_PTR TargetFunction = 0;
     PULONG_PTR UserArgs;
-    PKSERVICE_TABLE_DESCRIPTOR DescriptorTable;
 
-    if (!CurrentThread || !TrapFrame)
-    {
-        return STATUS_INVALID_PARAMETER;
-    }
+    UNREFERENCED_PARAMETER(Context);
 
     SyscallNumber = TrapFrame->Eax;
 
@@ -46,35 +75,50 @@ RiSyscallDispatcherHandler(
     CurrentThread->TrapFrame = TrapFrame;
     CurrentThread->PreviousMode = (KPROCESSOR_MODE)TrapFrame->PreviousPreviousMode;
 
-    if (SyscallNumber >= KsiServiceLimit)
+    if (CurrentThread->PreviousMode == UserMode)
+    {
+        /* Jalur SYSENTER: KsiFastCallService sudah mengisi HardwareEsp = EDX + 4 (&Arg1) */
+        UserArgs = (PULONG_PTR)((ULONG_PTR)TrapFrame->HardwareEsp + sizeof(ULONG_PTR));
+    }
+    else
+    {
+        /* Jalur Kernel Vz* wrapper: Edx langsung menunjuk ke &Arg1 */
+        UserArgs = (PULONG_PTR)TrapFrame->Edx;
+    }
+
+    if (SyscallNumber >= MainNumberOfSysCalls)
     {
         Status = STATUS_INVALID_SYSTEM_SERVICE;
         goto Exit;
     }
 
-    DescriptorTable = (PKSERVICE_TABLE_DESCRIPTOR)CurrentThread->ServiceTable;
-    TargetFunction = DescriptorTable->Number[SyscallNumber];
+    PULONG_PTR ServiceTable = (PULONG_PTR)CurrentThread->ServiceTable;
+    if ((ULONG_PTR)ServiceTable == (ULONG_PTR)KsServiceTableDescriptor)
+    {
+        PKSERVICE_TABLE_DESCRIPTOR Descriptor = (PKSERVICE_TABLE_DESCRIPTOR)CurrentThread->ServiceTable;
+        TargetFunction = Descriptor[0].Base[SyscallNumber];
+    }
+    else if (ServiceTable != NULL)
+    {
+        TargetFunction = ServiceTable[SyscallNumber];
+    }
+    else
+    {
+        TargetFunction = MainSSDT[SyscallNumber];
+    }
+
     ParamBytes = MainSSPT[SyscallNumber];
 
-    if (!TargetFunction)
+    if (!TargetFunction || TargetFunction < 0xC0000000)
     {
         Status = STATUS_NOT_IMPLEMENTED;
         goto Exit;
     }
 
-    ParamCount = ParamBytes / sizeof(ULONG_PTR);
-    UserArgs = (PULONG_PTR)TrapFrame->Edx;
+    ULONG_PTR KernelArgs[16];
 
-    if (ParamCount == 0)
+    if (ParamBytes > 0)
     {
-        typedef VEASTATUS (VEAPI *PNATIVE_SYSCALL_0)(VOID);
-        Status = ((PNATIVE_SYSCALL_0)TargetFunction)();
-    }
-    else
-    {
-        ULONG_PTR KernelArgs[16];
-
-        // Validasi Alamat Stack User jika PreviousMode == UserMode
         if (CurrentThread->PreviousMode == UserMode)
         {
             if ((ULONG_PTR)UserArgs >= 0x80000000 || ((ULONG_PTR)UserArgs + ParamBytes) >= 0x80000000)
@@ -84,7 +128,6 @@ RiSyscallDispatcherHandler(
             }
         }
 
-        // Copy argumen dari User Stack ke Stack Kernel
         _VEA_TRY
         {
             RtlCopyMemory(KernelArgs, UserArgs, ParamBytes);
@@ -95,23 +138,17 @@ RiSyscallDispatcherHandler(
             goto Exit;
         }
         _VEA_END
-
-        // Panggil handler dengan argumen dari Kernel Stack
-        typedef VEASTATUS (VEAPI *PNATIVE_SYSCALL_FN)(
-            ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
-            ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
-            ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR
-        );
-
-        Status = ((PNATIVE_SYSCALL_FN)TargetFunction)(
-            KernelArgs[0],  KernelArgs[1],  KernelArgs[2],  KernelArgs[3],
-            KernelArgs[4],  KernelArgs[5],  KernelArgs[6],  KernelArgs[7],
-            KernelArgs[8],  KernelArgs[9],  KernelArgs[10], KernelArgs[11]
-        );
     }
+
+    // Eksekusi Syscall via Dynamic ASM Trampoline!
+    Status = KsiSystemCallTrampoline((PVOID)TargetFunction, KernelArgs, ParamBytes);
+
 Exit:
     CurrentThread->PreviousMode = OldPreviousMode;
     CurrentThread->TrapFrame = OldTrapFrame;
 
-    return Status;
+    TrapFrame->Eax = Status;
+
+    RiServiceExit(TrapFrame);
 }
+

@@ -23,7 +23,11 @@
 #include <guid.h> // IWYU pragma: export
 #include <potypes.h>
 #include <pofunc.h>
+#include <rifunc.h>
+#include <kpcfunc.h>
+#include <rmfunc.h>
 #include <../psdk/veaseh.h>
+#include <psdk/veapi2.h>
 
 /* hardware essential */
 #include <../asm/intrin.h> // IWYU pragma: export
@@ -34,3 +38,12 @@
 #include "internal/hcttype.h" // IWYU pragma: export
 #include "internal/hctfunc.h" // IWYU pragma: export
 #include "internal/x.h" // IWYU pragma: export
+#include "vz_wrappers.h"
+
+extern 
+void *
+memcpy(
+    void *dest,
+    const void *src,
+    SIZE_T count
+);

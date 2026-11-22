@@ -930,11 +930,177 @@ VeaFsControlFile(
     IN PVOID InputBuffer,
     IN ULONG InputBufferLength OPTIONAL,
     OUT PVOID OutputBuffer,
-    IN ULONG OutputBufferLength OPTIONAL,
-    IN BOOLEAN IsDevIoCtl);
+    IN ULONG OutputBufferLength OPTIONAL);
 
 VOID
 VEAPI
 ObioInitializeDumpSystem(VOID);
+
+VEASTATUS
+VEAPI
+ObInitProcess(
+    IN struct _EPROCESS *Parent OPTIONAL,
+    IN struct _EPROCESS *Process
+);
+
+VEASTATUS
+VEAPI
+ObDuplicateObject(
+    IN struct _EPROCESS *SourceProcess,
+    IN HANDLE SourceHandle,
+    IN struct _EPROCESS *TargetProcess OPTIONAL,
+    OUT PHANDLE TargetHandle OPTIONAL,
+    IN ACCESS_MASK DesiredAccess,
+    IN ULONG HandleAttributes,
+    IN ULONG Options,
+    IN KPROCESSOR_MODE AccessMode
+);
+
+VEASTATUS
+VEAPI
+VeaDuplicateObject(
+    IN HANDLE SourceProcessHandle,
+    IN HANDLE SourceHandle,
+    IN HANDLE TargetProcessHandle OPTIONAL,
+    OUT PHANDLE TargetHandle OPTIONAL,
+    IN ACCESS_MASK DesiredAccess,
+    IN ULONG HandleAttributes,
+    IN ULONG Options
+);
+
+VEASTATUS
+VEAPI
+VeaWriteFile(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+    IN PVOID ApcContext OPTIONAL,
+    OUT POIP_INFORMATION OipStatusBlock,
+    IN PVOID Buffer,
+    IN ULONG Length,
+    IN PLARGE_INTEGER ByteOffset OPTIONAL,
+    IN PULONG Key OPTIONAL
+);
+
+VEASTATUS
+VEAPI
+VeaWriteFileGather(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE UserApcRoutine OPTIONAL,
+    IN PVOID UserApcContext OPTIONAL,
+    OUT POIP_INFORMATION IoStatusBlock,
+    IN FILE_SEGMENT_ELEMENT BufferDescription[],
+    IN ULONG BufferLength,
+    IN PLARGE_INTEGER ByteOffset,
+    IN PULONG Key OPTIONAL
+);
+
+VEASTATUS
+VEAPI
+VeaReadFileScatter(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE UserApcRoutine OPTIONAL,
+    IN PVOID UserApcContext OPTIONAL,
+    OUT POIP_INFORMATION IoStatusBlock,
+    IN FILE_SEGMENT_ELEMENT BufferDescription[],
+    IN ULONG BufferLength,
+    IN PLARGE_INTEGER ByteOffset,
+    IN PULONG Key OPTIONAL
+);
+
+VEASTATUS
+VEAPI
+VeaDeviceIoControlFile(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE UserApcRoutine OPTIONAL,
+    IN PVOID UserApcContext OPTIONAL,
+    OUT POIP_INFORMATION IoStatusBlock,
+    IN ULONG IoControlCode,
+    IN PVOID InputBuffer OPTIONAL,
+    IN ULONG InputBufferLength,
+    OUT PVOID OutputBuffer OPTIONAL,
+    IN ULONG OutputBufferLength
+);
+
+VEASTATUS
+VEAPI
+VeaDeleteFile(
+    IN POBJECT_ATTRIBUTES ObjectAttributes
+);
+
+VEASTATUS
+VEAPI
+VeaFlushBuffersFile(
+    IN HANDLE FileHandle,
+    OUT POIP_INFORMATION IoStatusBlock
+);
+
+VEASTATUS
+VEAPI
+VeaQueryInformationFile(
+    IN HANDLE FileHandle,
+    OUT POIP_INFORMATION IoStatusBlock,
+    OUT PVOID FileInformation,
+    IN ULONG Length,
+    IN FILE_INFORMATION_CLASS FileInformationClass
+);
+
+VEASTATUS
+VEAPI
+VeaSetInformationFile(
+    IN HANDLE FileHandle,
+    OUT POIP_INFORMATION IoStatusBlock,
+    IN PVOID FileInformation,
+    IN ULONG Length,
+    IN FILE_INFORMATION_CLASS FileInformationClass
+);
+
+VEASTATUS
+VEAPI
+VeaQueryDirectoryFile(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+    IN PVOID ApcContext OPTIONAL,
+    OUT POIP_INFORMATION IoStatusBlock,
+    OUT PVOID FileInformation,
+    IN ULONG Length,
+    IN FILE_INFORMATION_CLASS FileInformationClass,
+    IN BOOLEAN ReturnSingleEntry,
+    IN PANSI_STRING FileName OPTIONAL,
+    IN BOOLEAN RestartScan
+);
+
+VEASTATUS
+VEAPI
+VeaQueryVolumeInformationFile(
+    IN HANDLE FileHandle,
+    OUT POIP_INFORMATION IoStatusBlock,
+    OUT PVOID FsInformation,
+    IN ULONG Length,
+    IN FS_INFORMATION_CLASS FsInformationClass
+);
+
+VEASTATUS
+VEAPI
+ObioGetDeviceObjectPointer(
+    IN PANSI_STRING ObjectName,
+    IN ACCESS_MASK DesiredAccess,
+    OUT PFILE_OBJECT *FileObject,
+    OUT PDEVICE_OBJECT *DeviceObject
+);
+
+VEASTATUS
+VEAPI
+ObioReportDetectedDevice(
+    IN PDRIVER_OBJECT DriverObject,
+    IN PCSTR DeviceId OPTIONAL,
+    IN PCSTR ServiceName OPTIONAL,
+    IN POBIO_RESOURCE_LIST ResourceList OPTIONAL,
+    IN OUT PDEVICE_OBJECT *DeviceObject
+);
 
 /* EOF */

@@ -2,8 +2,6 @@
 
 #include "mmtype.h"
 #include "procbind.h"
-#include "psdk/veaseh.h"
-#include "rtl.h"
 #include "sftypes.h"
 #include "veastatus.h"
 
@@ -138,13 +136,14 @@ typedef enum _KWAIT_REASON {
 typedef struct _KQUEUE KQUEUE, *PKQUEUE;
 
 typedef struct _KPROCESS {
-    ULONG_PTR DirectoryTableBase;  // PENTING: Alamat fisik Page Directory (CR3) buat Context Switch
-    LIST_ENTRY ThreadListHead;     // Daftar semua thread yang ada di dalam proses ini
-    UCHAR State;                   // Status proses
-    UCHAR BasePriority;            // Prioritas dasar untuk scheduling
-    KSPIN_LOCK ProcessLock;        // Lock biar aman kalau diakses dari multicore
+    ULONG_PTR DirectoryTableBase;  
+    LIST_ENTRY ThreadListHead;   
+    UCHAR State;          
+    UCHAR BasePriority;        
+    KSPIN_LOCK ProcessLock; 
     PVEA_TOKEN Token;
     ULONG StackCount;
+    DISPATCHER_HEADER Dispatcher;
 } KPROCESS, *PKPROCESS;
 
 //
@@ -226,6 +225,25 @@ typedef struct _KAPC
     BOOLEAN Inserted;
 } KAPC, *PKAPC;
 
+typedef struct _FXSAVE_FORMAT {
+    USHORT ControlWord;      /* +0x00: FCW (default 0x037F) */
+    USHORT StatusWord;       /* +0x02: FSW */
+    UCHAR  TagWord;          /* +0x04: FTW abridged (0x00 = semua empty) */
+    UCHAR  Reserved1;        /* +0x05 */
+    USHORT ErrorOpcode;      /* +0x06 */
+    ULONG  ErrorOffset;      /* +0x08 */
+    ULONG  ErrorSelector;    /* +0x0C */
+    ULONG  DataOffset;       /* +0x10 */
+    ULONG  DataSelector;     /* +0x14 */
+    ULONG  MxCsr;            /* +0x18: MXCSR (default 0x00001F80) */
+    ULONG  MxCsrMask;        /* +0x1C */
+    UCHAR  FloatRegisters[128]; /* +0x20: ST0..ST7 / MM0..MM7 */
+    UCHAR  XmmRegisters[128];   /* +0xA0: XMM0..XMM7 (32-bit mode) */
+    UCHAR  Reserved2[224];      /* +0x120..0x1FF */
+} FXSAVE_FORMAT, *PFXSAVE_FORMAT;
+
+struct _TEB;
+
 typedef struct _KTHREAD {
     PVOID KernelStack;
     PVOID InitialStack;             // Batas atas stack
@@ -233,7 +251,7 @@ typedef struct _KTHREAD {
     ULONGLONG VRuntime;
     ULONGLONG Weight;
     KTHREAD_STATE State;            // Ready? Running? Waiting?
-    RTL_BALANCED_NODE CfsNode;
+    struct _RTL_BALANCED_NODE CfsNode;
     KWAIT_BLOCK WaitBlock[THREAD_WAIT_OBJECTS];
     PKWAIT_BLOCK WaitBlockList;
     PKQUEUE Queue;
@@ -263,6 +281,13 @@ typedef struct _KTHREAD {
     PVOID ServiceTable;
     KPROCESSOR_MODE PreviousMode;
     UCHAR WaitReason;
+    struct _TEB *Teb;
+    ULONG SuspendCount;
+    DISPATCHER_HEADER Dispatcher;
+    KDPC TimerDpc;
+    ULONG_PTR CallbackStack;
+    PFXSAVE_FORMAT FxSaveArea;
+    UCHAR FxSaveBuffer[528];
 } KTHREAD, *PKTHREAD;
 
 typedef enum _KDPC_IMPORTANCE {
@@ -405,6 +430,17 @@ extern PBLOCK_BOOT_2 KsLoaderBlock;
 VOID
 VEAPI
 BvInitializeDriver(IN PBLOCK_BOOT_2 BlockBoot2);
+
+VEASTATUS
+VEAPI
+BvGetVideoInfo(
+    OUT PVOID *FrameBufferBase,
+    OUT PULONG Width,
+    OUT PULONG Height,
+    OUT PULONG Pitch,
+    OUT PULONG BitsPerPixel,
+    OUT PSIZE_T FrameBufferSize OPTIONAL
+);
 
 //
 // From ReactOS. Object Type, Event Type
@@ -1017,5 +1053,86 @@ typedef struct _DATA_TABLE_ENTRY
 } DATA_TABLE_ENTRY, *PDATA_TABLE_ENTRY;
 
 #pragma pack(pop)
+
+VOID
+VEAPI
+KsiInitializeUserApc(
+    IN PKTRAP_FRAME TrapFrame,
+    IN PKNORMAL_ROUTINE NormalRoutine,
+    IN PVOID NormalContext,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2
+);
+
+VEASTATUS
+VEAPI
+VeaContinue(
+    IN PKTRAP_FRAME ContextFrame,
+    IN BOOLEAN TestAlert
+);
+
+VEASTATUS
+VEAPI
+VeaTerminateProcess(
+    IN HANDLE ProcessHandle,
+    IN VEASTATUS ExitStatus
+);
+
+VOID
+VEAPI
+KsInitializeApc(
+    IN PKAPC Apc,
+    IN PKTHREAD Thread,
+    IN KAPC_ENVIRONMENT TargetEnvironment,
+    IN PKKERNEL_ROUTINE KernelRoutine,
+    IN PKRUNDOWN_ROUTINE RundownRoutine,
+    IN PKNORMAL_ROUTINE NormalRoutine,
+    IN KPROCESSOR_MODE Mode,
+    IN PVOID Context
+);
+
+BOOLEAN
+VEAPI
+KsInsertQueueApc(
+    IN PKAPC Apc,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2
+);
+
+extern VEASTATUS VEAPI KsiCallUserMode(
+    OUT PVOID *Result,
+    OUT PULONG ResultLength
+);
+
+extern NORET VOID VEAPI KsiCallbackReturn(
+    IN PKCALLOUT_FRAME Frame,
+    IN VEASTATUS Status
+);
+
+extern NORET VOID VEAPI RiServiceExit(
+    IN PKTRAP_FRAME TrapFrame
+);
+
+VEASTATUS
+VEAPI
+VeaCallbackReturn(
+    IN PVOID Result OPTIONAL,
+    IN ULONG ResultLength,
+    IN VEASTATUS CallbackStatus
+);
+
+VEASTATUS
+VEAPI
+KsUserModeCallback(
+    IN ULONG RoutineIndex,
+    IN PVOID Argument,
+    IN ULONG ArgumentLength,
+    OUT PVOID *Result,
+    OUT PULONG ResultLength
+);
+
+VOID
+VEAPI
+KiEnableSseAndFxsave(VOID);
 
 /* EOF */

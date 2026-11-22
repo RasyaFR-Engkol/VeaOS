@@ -7,7 +7,7 @@
 #include "ultypes.h"
 #include "veastatus.h"
 #include "ks.h"
-#include "sffunc.h"
+#include "objattr.h"
 #include <../psdk/veaioctl.h>
 
 /* =========================================================
@@ -30,7 +30,8 @@
 #define OIP_MJ_SYSTEM_CONTROL       0x0E // Query/set system-level info (mirip WMI di NT) 
 #define OIP_MJ_FILE_SYSTEM_CONTROL  0x0F
 #define OIP_MJ_DIRECTORY_CONTROL    0x10
-#define OIP_MJ_MAXIMUM_FUNCTION     0x11
+#define OIP_MJ_QUERY_VOLUME_INFORMATION 0x11
+#define OIP_MJ_MAXIMUM_FUNCTION     0x12
 
 /* =========================================================
  * PnP Minor Functions (Dipakai saat Major = OIP_MJ_PNP)
@@ -195,6 +196,81 @@ typedef struct _OBIO_REQUIRED_RESOURCES_LIST_EX
     OBIO_REQUIRED_RESOURCES_LIST List[1];
 } OBIO_REQUIRED_RESOURCES_LIST_EX, *POBIO_REQUIRED_RESOURCES_LIST_EX;
 
+
+typedef enum _FILE_INFORMATION_CLASS {
+    FileDirectoryInformation = 1,
+    FileFullDirectoryInformation,
+    FileBothDirectoryInformation,
+    FileBasicInformation,
+    FileStandardInformation,
+    FileInternalInformation,
+    FileEaInformation,
+    FileAccessInformation,
+    FileNameInformation,
+    FileRenameInformation,
+    FileLinkInformation,
+    FileNamesInformation,
+    FileDispositionInformation,
+    FilePositionInformation,
+    FileFullEaInformation,
+    FileModeInformation,
+    FileAlignmentInformation,
+    FileAllInformation,
+    FileAllocationInformation,
+    FileEndOfFileInformation,
+    FileAlternateNameInformation,
+    FileStreamInformation,
+    FilePipeInformation,
+    FilePipeLocalInformation,
+    FilePipeRemoteInformation,
+    FileMailslotQueryInformation,
+    FileMailslotSetInformation,
+    FileCompressionInformation,
+    FileObjectIdInformation,
+    FileCompletionInformation,
+    FileMoveClusterInformation,
+    FileQuotaInformation,
+    FileReparsePointInformation,
+    FileNetworkOpenInformation,
+    FileAttributeTagInformation,
+    FileTrackingInformation,
+    FileIdBothDirectoryInformation,
+    FileIdFullDirectoryInformation,
+    FileValidDataLengthInformation,
+    FileShortNameInformation,
+    FileIoCompletionNotificationInformation,
+    FileIoStatusBlockRangeInformation,
+    FileIoPriorityHintInformation,
+    FileSfioReserveInformation,
+    FileSfioVolumeInformation,
+    FileHardLinkInformation,
+    FileProcessIdsUsingFileInformation,
+    FileNormalizedNameInformation,
+    FileNetworkPhysicalNameInformation,
+    FileIdGlobalTxDirectoryInformation,
+    FileIsRemoteDeviceInformation,
+    FileAttributeCacheInformation,
+    FileNumaNodeInformation,
+    FileStandardLinkInformation,
+    FileRemoteProtocolInformation,
+    FileMaximumInformation
+} FILE_INFORMATION_CLASS, *PFILE_INFORMATION_CLASS;
+
+typedef enum _FSINFOCLASS {
+    FileFsVolumeInformation       = 1,
+    FileFsLabelInformation,      // 2
+    FileFsSizeInformation,       // 3
+    FileFsDeviceInformation,     // 4
+    FileFsAttributeInformation,  // 5
+    FileFsControlInformation,    // 6
+    FileFsFullSizeInformation,   // 7
+    FileFsObjectIdInformation,   // 8
+    FileFsDriverPathInformation, // 9
+    FileFsVolumeFlagsInformation,// 10
+    FileFsMaximumInformation
+} FS_INFORMATION_CLASS, *PFS_INFORMATION_CLASS;
+
+
 typedef struct _OIP_STACK {
     UCHAR MajorFunction;       // Perintah utama (misal OIP_MJ_READ)
     UCHAR MinorFunction;       // Sub-perintah spesifik
@@ -260,6 +336,37 @@ typedef struct _OIP_STACK {
             struct _VPB *Vpb;
             struct _DEVICE_OBJECT *DeviceObject;
         } MountVolume;
+
+        struct {
+            ULONG Length;                                // Sejajar Argument1
+            FILE_INFORMATION_CLASS FileInformationClass; // Sejajar Argument2
+        } QueryFile;
+
+        struct {
+            ULONG Length;                                // Sejajar Argument1
+            FILE_INFORMATION_CLASS FileInformationClass; // Sejajar Argument2
+            PVOID FileObject;                            // Sejajar Argument3
+            union {                                      // Sejajar Argument4
+                struct {
+                    BOOLEAN ReplaceIfExists;
+                    BOOLEAN AdvanceOnly;
+                };
+                ULONG ClusterCount;
+                HANDLE DeleteHandle;
+            };
+        } SetFile;
+
+        struct {
+            ULONG Length;                                // Sejajar Argument1
+            PANSI_STRING FileName;                       // Sejajar Argument2
+            FILE_INFORMATION_CLASS FileInformationClass; // Sejajar Argument3
+            ULONG FileIndex;                             // Sejajar Argument4
+        } QueryDirectory;
+
+        struct {
+            ULONG Length;
+            FS_INFORMATION_CLASS FsInformationClass;
+        } QueryVolume;
     } Parameters;
 
     // Target object untuk "layer" stack ini
@@ -314,7 +421,18 @@ typedef struct _OIP {
     PKEVENT UserEvent;
     POIP_INFORMATION UserInfoBlock;
     struct _FILE_OBJECT *OriginalFileObject;
+    struct _ETHREAD *RequestorThread;
+    KAPC Apc;
 } OIP, *POIP;
+
+typedef enum _OB_OPEN_REASON
+{
+    ObCreateHandle,
+    ObOpenHandle,
+    ObDuplicateHandle,
+    ObInheritHandle,
+    ObMaxOpenReason
+} OB_OPEN_REASON;
 
 typedef LONG (VEAPI *POB_INTERRUPT_ROUTINE)(
     PVOID Object, 
@@ -369,6 +487,14 @@ typedef VOID
     IN ULONG_PTR SystemHandleCount
 );
 
+typedef VEASTATUS (VEAPI *POB_OPEN_METHOD)(
+    IN OB_OPEN_REASON OpenReason,
+    IN struct _EPROCESS *Process OPTIONAL,
+    IN PVOID Object,
+    IN ACCESS_MASK GrantedAccess,
+    IN ULONG HandleCount
+);
+
 typedef struct _OBJECT_TYPE_INITIALIZER
 {
     USHORT Length;                  // Wajib diisi sizeof(OBJECT_TYPE_INITIALIZER)
@@ -386,6 +512,7 @@ typedef struct _OBJECT_TYPE_INITIALIZER
     POB_OKAYTOCLOSE_METHOD OkayToCloseRoutine;
     POB_CREATE_METHOD   CreateRoutine;
     POB_CLOSE_METHOD    CloseRoutine;
+    POB_OPEN_METHOD       OpenRoutine;
 } OBJECT_TYPE_INITIALIZER, *POBJECT_TYPE_INITIALIZER;
 
 /* Object Struct */
@@ -409,18 +536,27 @@ typedef struct _OBJECT_TYPE
     POB_CLOSE_METHOD CloseRoutine;
 } OBJECT_TYPE, *POBJECT_TYPE;
 
-typedef struct _OBJECT_ATTRIBUTES {
-    ULONG Length;
-    HANDLE RootDirectory;        // HANDLE ke objek direktori tempat path ini bermula (Bisa NULL)
-    PANSI_STRING ObjectName;    // String nama path (misal: "Device/MyDisk")
-    ULONG Attributes;           // Flags (OBJ_CASE_INSENSITIVE, dll)
-    PVOID SecurityDescriptor;   // Konteks keamanan (sementara bisa diset NULL)
-    PVOID SecurityQualityOfServiceLife;
-} OBJECT_ATTRIBUTES, *POBJECT_ATTRIBUTES;
+typedef struct _AUX_ACCESS_DATA
+{
+    ULONG PrivilegesUsed;          // Bitmask privilege yang terpakai saat access check
+    GENERIC_MAPPING GenericMapping;
+    ACCESS_MASK AccessesToAudit;
+    ACCESS_MASK MaximumAuditMask;
+} AUX_ACCESS_DATA, *PAUX_ACCESS_DATA;
 
-typedef struct _ACCESS_STATE {
-    PVEA_TOKEN  Token; 
-    ACCESS_MASK OriginalDesiredAccess;
+typedef struct _ACCESS_STATE
+{
+    PVEA_TOKEN Token;                    // Token aktif (Impersonation atau Primary)
+    BOOLEAN SecurityDescriptorValid;
+    BOOLEAN AccessEvaluated;
+    BOOLEAN GenerateAudit;
+    BOOLEAN GenerateOnClose;
+    ULONG Flags;
+    ACCESS_MASK RemainingDesiredAccess;  // Sisa hak akses yang belum terpenuhi
+    ACCESS_MASK PreviouslyGrantedAccess; // Hak akses yang sudah lolos
+    ACCESS_MASK OriginalDesiredAccess;   // Hak akses mentah awal dari caller
+    PAUX_ACCESS_DATA AuxData;
+    PVEA_SECURITY_DESCRIPTOR SecurityDescriptor;
 } ACCESS_STATE, *PACCESS_STATE;
 
 typedef struct _OB_CREATE_INFO {
@@ -483,14 +619,6 @@ extern PVOID ObpDeviceDirectoryObject;
 extern PVOID ObpDriverDirectoryObject;
 extern POBJECT_TYPE ObpDeviceObjectType;
 extern POBJECT_TYPE ObpDriverObjectType;
-
-#define OBJ_INHERIT             0x00000002
-#define OBJ_PERMANENT           0x00000010
-#define OBJ_EXCLUSIVE           0x00000020
-#define OBJ_CASE_INSENSITIVE    0x00000040
-#define OBJ_OPENIF              0x00000080
-#define OBJ_OPENLINK            0x00000100
-#define OBJ_KERNEL_HANDLE       0x00000200
 
 #define InitializeObjectAttributes( p, n, a, r, s ) { \
     (p)->Length = sizeof( OBJECT_ATTRIBUTES );          \
@@ -1055,6 +1183,61 @@ typedef struct _FILE_BASIC_INFORMATION {
     ULONG FileAttributes;
 } FILE_BASIC_INFORMATION, *PFILE_BASIC_INFORMATION;
 
+typedef struct _FILE_STANDARD_INFORMATION {
+    LARGE_INTEGER AllocationSize;
+    LARGE_INTEGER EndOfFile;
+    ULONG NumberOfLinks;
+    BOOLEAN DeletePending;
+    BOOLEAN Directory;
+} FILE_STANDARD_INFORMATION, *PFILE_STANDARD_INFORMATION;
+
+typedef struct _FILE_POSITION_INFORMATION {
+    LARGE_INTEGER CurrentByteOffset;
+} FILE_POSITION_INFORMATION, *PFILE_POSITION_INFORMATION;
+
+typedef struct _FILE_INTERNAL_INFORMATION {
+    LARGE_INTEGER IndexNumber;
+} FILE_INTERNAL_INFORMATION, *PFILE_INTERNAL_INFORMATION;
+
+typedef struct _FILE_END_OF_FILE_INFORMATION {
+    LARGE_INTEGER EndOfFile;
+} FILE_END_OF_FILE_INFORMATION, *PFILE_END_OF_FILE_INFORMATION;
+
+typedef struct _FILE_DISPOSITION_INFORMATION {
+    BOOLEAN DeleteFile;
+} FILE_DISPOSITION_INFORMATION, *PFILE_DISPOSITION_INFORMATION;
+
+typedef struct _FILE_BOTH_DIR_INFORMATION {
+    ULONG NextEntryOffset;
+    ULONG FileIndex;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG FileAttributes;
+    ULONG FileNameLength;
+    ULONG EaSize;
+    CHAR ShortNameLength;
+    WCHAR ShortName[12];
+    WCHAR FileName[1];
+} FILE_BOTH_DIR_INFORMATION, *PFILE_BOTH_DIR_INFORMATION;
+
+typedef struct _FILE_DIRECTORY_INFORMATION {
+    ULONG NextEntryOffset;
+    ULONG FileIndex;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG FileAttributes;
+    ULONG FileNameLength;
+    WCHAR FileName[1];
+} FILE_DIRECTORY_INFORMATION, *PFILE_DIRECTORY_INFORMATION;
+
 typedef enum _CREATE_FILE_TYPE {
     CreateFileTypeNone,
     CreateFileTypeNamedPipe,
@@ -1237,6 +1420,11 @@ extern LIST_ENTRY ObioFsDiskListHead, ObioFsCdRomListHead, ObioFsNetworkListHead
 #define FILE_GENERIC_WRITE \
   (VEA_STANDARD_RIGHTS_WRITE | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | \
    FILE_WRITE_EA | FILE_APPEND_DATA | VEA_SYNCHRONIZE)
+
+typedef union _FILE_SEGMENT_ELEMENT {
+    PVOID64 Buffer;
+    ULONGLONG Alignment;
+}FILE_SEGMENT_ELEMENT, *PFILE_SEGMENT_ELEMENT;
 
 typedef struct _FILE_FULL_EA_INFORMATION {
     ULONG NextEntryOffset;
@@ -1633,5 +1821,57 @@ typedef struct _IO_DUMP_ROUTINE{
 #define FILE_EXISTS                       0x00000004
 #define FILE_DOES_NOT_EXIST               0x00000005
 
+#define DUPLICATE_CLOSE_SOURCE      0x00000001
+#define DUPLICATE_SAME_ACCESS       0x00000002
+#define DUPLICATE_SAME_ATTRIBUTES   0x00000004
+
+#define DIRECTORY_QUERY                   0x0001
+#define DIRECTORY_TRAVERSE                0x0002
+#define DIRECTORY_CREATE_OBJECT           0x0004
+#define DIRECTORY_CREATE_SUBDIRECTORY     0x0008
+#define DIRECTORY_ALL_ACCESS              (VEA_STANDARD_RIGHTS_REQUIRED | 0xF)
+
+#define OIP_MN_QUERY_DIRECTORY            0x01
+#define OIP_MN_NOTIFY_CHANGE_DIRECTORY    0x02
+
+/* STACK LOCATION FLAGS */
+
+#define SL_FORCE_ACCESS_CHECK             0x01
+#define SL_OPEN_PAGING_FILE               0x02
+#define SL_OPEN_TARGET_DIRECTORY          0x04
+#define SL_STOP_ON_SYMLINK                0x08
+#define SL_CASE_SENSITIVE                 0x80
+
+#define SL_KEY_SPECIFIED                  0x01
+#define SL_OVERRIDE_VERIFY_VOLUME         0x02
+#define SL_WRITE_THROUGH                  0x04
+#define SL_FT_SEQUENTIAL_WRITE            0x08
+#define SL_FORCE_DIRECT_WRITE             0x10
+#define SL_REALTIME_STREAM                0x20
+
+#define SL_READ_ACCESS_GRANTED            0x01
+#define SL_WRITE_ACCESS_GRANTED           0x04
+
+#define SL_FAIL_IMMEDIATELY               0x01
+#define SL_EXCLUSIVE_LOCK                 0x02
+
+#define SL_RESTART_SCAN                   0x01
+#define SL_RETURN_SINGLE_ENTRY            0x02
+#define SL_INDEX_SPECIFIED                0x04
+
+#define SL_WATCH_TREE                     0x01
+
+#define SL_ALLOW_RAW_MOUNT                0x01
+
+extern LIST_ENTRY ObioPnpRootPdoList;
+extern KSPIN_LOCK ObioPnpRootLock;
+
+typedef struct _PNPROOT_PDO_EXTENSION
+{
+    BOOLEAN IsRootBus;
+    CHAR DeviceId[64];     /* Contoh: "HTREE/ROOT" atau "ROOT/DISPLAY" */
+    CHAR InstanceId[32];   /* Contoh: "0" atau "0000" */
+    LIST_ENTRY ListEntry;
+} PNPROOT_PDO_EXTENSION, *PPNPROOT_PDO_EXTENSION;
 
 /* EOF */

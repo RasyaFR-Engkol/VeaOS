@@ -11,11 +11,17 @@ typedef struct _PS2KEY_DEVICE_EXTENSION {
     ULONG CommandPort;
     ULONG IrqVector;
     PKINTERRUPT Interrupt;
+
+    ANSI_STRING SymbolicLinkName;
+    BOOLEAN InterfaceRegistered;
+
     KSPIN_LOCK RingLock;
-    UCHAR RingBuffer[PS2KEY_RING_BUFFER_SIZE];
+    KEYBOARD_INPUT_DATA RingBuffer[PS2KEY_RING_BUFFER_SIZE];
     ULONG RingReadIndex;
     ULONG RingWriteIndex;
     ULONG RingCount;
+    BOOLEAN ExpectE0;
+    POIP PendingReadOip;
 } PS2KEY_DEVICE_EXTENSION, *PPS2KEY_DEVICE_EXTENSION;
 
 static
@@ -78,7 +84,9 @@ PS2KeyInitializeController(
 {
     ULONG Retry;
     UCHAR Status;
+    UCHAR Config;
 
+    /* 1. Kuras sisa output buffer */
     for (Retry = 0; Retry < PS2KEY_IO_TIMEOUT; Retry++)
     {
         Status = PS2KeyReadPort((USHORT)CommandPort);
@@ -86,21 +94,46 @@ PS2KeyInitializeController(
         {
             break;
         }
-
         (VOID)PS2KeyReadPort((USHORT)DataPort);
     }
 
+    /* 2. Enable First PS/2 Port */
     if (!PS2KeyWaitForInputBufferEmpty(CommandPort))
     {
         return FALSE;
     }
-
     PS2KeyWritePort((USHORT)CommandPort, 0xAE);
+
+    /* 3. Baca 8042 Configuration Byte (0x20), nyalain IRQ1 (bit 0) & clock port 1 (clear bit 4) */
     if (!PS2KeyWaitForInputBufferEmpty(CommandPort))
     {
         return FALSE;
     }
+    PS2KeyWritePort((USHORT)CommandPort, 0x20);
+    if (!PS2KeyWaitForOutputBufferFull(CommandPort))
+    {
+        return FALSE;
+    }
+    Config = PS2KeyReadPort((USHORT)DataPort);
+    Config |= 0x01;   /* Enable IRQ1 */
+    Config &= ~0x10;  /* Enable Port 1 Clock */
 
+    if (!PS2KeyWaitForInputBufferEmpty(CommandPort))
+    {
+        return FALSE;
+    }
+    PS2KeyWritePort((USHORT)CommandPort, 0x60);
+    if (!PS2KeyWaitForInputBufferEmpty(CommandPort))
+    {
+        return FALSE;
+    }
+    PS2KeyWritePort((USHORT)DataPort, Config);
+
+    /* 4. Enable Keyboard Scanning (0xF4) */
+    if (!PS2KeyWaitForInputBufferEmpty(CommandPort))
+    {
+        return FALSE;
+    }
     PS2KeyWritePort((USHORT)DataPort, 0xF4);
     if (!PS2KeyWaitForInputBufferEmpty(CommandPort) ||
         !PS2KeyWaitForOutputBufferFull(CommandPort))
@@ -145,46 +178,70 @@ PS2KeyIrqHandler(IN PKINTERRUPT Interrupt, IN PVOID ServiceContext)
     KIRQL OldIrql;
     UCHAR Status;
     UCHAR ScanCode;
-    ULONG RingCountBefore;
-    ULONG RingCountAfter;
-    ULONG Esp;
-    ULONG Ebp;
-    BOOLEAN Enqueued;
+    KEYBOARD_INPUT_DATA Packet;
+    POIP OipToComplete = NULL;
 
     UNREFERENCED_PARAMETER(Interrupt);
-
-    DPRINT("PS2KeyIrqHandler()\n");
-    
 
     Extension = (PPS2KEY_DEVICE_EXTENSION)ServiceContext;
     if (!Extension || !Extension->DataPort || !Extension->CommandPort)
     {
-        DPRINT("PS2 IRQ invalid context: interrupt=%p context=%p extension=%p\n",
-               Interrupt, ServiceContext, Extension);
         return FALSE;
     }
 
     Status = PS2KeyReadPort((USHORT)Extension->CommandPort);
     if (!(Status & 0x01))
     {
-        DPRINT("PS2 IRQ has no output byte; returning FALSE\n");
         return FALSE;
     }
 
     ScanCode = PS2KeyReadPort((USHORT)Extension->DataPort);
 
-    KsAcquireSpinLock(&Extension->RingLock, &OldIrql);
-    RingCountBefore = Extension->RingCount;
-    Enqueued = RingCountBefore < PS2KEY_RING_BUFFER_SIZE;
-    if (Enqueued)
+    // Prefix extended key (arrow keys, right ctrl/alt, dll)
+    if (ScanCode == 0xE0)
     {
-        Extension->RingBuffer[Extension->RingWriteIndex] = ScanCode;
+        Extension->ExpectE0 = TRUE;
+        return TRUE;
+    }
+
+    RtlZeroMemory(&Packet, sizeof(KEYBOARD_INPUT_DATA));
+    Packet.MakeCode = (USHORT)(ScanCode & 0x7F);
+    Packet.Flags = (ScanCode & 0x80) ? KEY_BREAK : KEY_MAKE;
+    if (Extension->ExpectE0)
+    {
+        Packet.Flags |= KEY_E0;
+        Extension->ExpectE0 = FALSE;
+    }
+
+    KsAcquireSpinLock(&Extension->RingLock, &OldIrql);
+
+    if (Extension->PendingReadOip != NULL)
+    {
+        // Langsung serahkan ke continuous reader milik kbdclass yang lagi nunggu
+        OipToComplete = Extension->PendingReadOip;
+        Extension->PendingReadOip = NULL;
+    }
+    else if (Extension->RingCount < PS2KEY_RING_BUFFER_SIZE)
+    {
+        Extension->RingBuffer[Extension->RingWriteIndex] = Packet;
         Extension->RingWriteIndex =
             (Extension->RingWriteIndex + 1) % PS2KEY_RING_BUFFER_SIZE;
         Extension->RingCount++;
     }
-    RingCountAfter = Extension->RingCount;
+
     KsReleaseSpinLock(&Extension->RingLock, OldIrql);
+
+    if (OipToComplete != NULL)
+    {
+        RtlCopyMemory(
+            OipToComplete->AssociatedOip.SystemBuffer,
+            &Packet,
+            sizeof(KEYBOARD_INPUT_DATA)
+        );
+        OipToComplete->StatusInformation.Status = STATUS_SUCCESS;
+        OipToComplete->StatusInformation.Information = sizeof(KEYBOARD_INPUT_DATA);
+        ObioCompleteRequest(OipToComplete);
+    }
 
     return TRUE;
 }
@@ -344,6 +401,23 @@ PS2KeyStartDevice(
         goto cleanup;
     }
 
+    while (PS2KeyReadPort((USHORT)Extension->CommandPort) & 0x01)
+    {
+        (VOID)PS2KeyReadPort((USHORT)Extension->DataPort);
+    }
+
+    if (Extension->InterfaceRegistered)
+    {
+        Status = ObioSetDeviceInterfaceState(&Extension->SymbolicLinkName, TRUE);
+        if (!VEA_SUCCESS(Status))
+        {
+            ObioDisconnectInterrupt(Extension->Interrupt);
+            Extension->Interrupt = NULL;
+            PS2KeyDisableController(Extension->CommandPort);
+            goto cleanup;
+        }
+    }
+
     DPRINT("PS2KEY started: data=0x%x command=0x%x irq=%u\n",
            Extension->DataPort, Extension->CommandPort, Extension->IrqVector);
     Status = STATUS_SUCCESS;
@@ -375,51 +449,64 @@ PS2KeyObjectInterruptHandler(PVOID Object, POIP Oip)
     {
         case OIP_MJ_READ:
         {
-            PDEVICE_OBJECT DeviceObject;
+            PDEVICE_OBJECT DeviceObject = (PDEVICE_OBJECT)Object;
             PPS2KEY_DEVICE_EXTENSION Extension;
-            ULONG Length;
-            ULONG BytesRead = 0;
+            ULONG MaxPackets;
+            ULONG PacketsRead = 0;
             KIRQL OldIrql;
 
-            if (!Object)
+            if (!DeviceObject || !DeviceObject->DeviceExtension)
             {
                 Oip->StatusInformation.Status = STATUS_INVALID_PARAMETER;
                 Oip->StatusInformation.Information = 0;
                 break;
             }
 
-            DeviceObject = (PDEVICE_OBJECT)Object;
             Extension = (PPS2KEY_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
-            if (!Extension)
+            MaxPackets = Stack->Parameters.ReadWrite.Length / sizeof(KEYBOARD_INPUT_DATA);
+
+            if (MaxPackets == 0 || !Oip->AssociatedOip.SystemBuffer)
             {
-                Oip->StatusInformation.Status = STATUS_INVALID_PARAMETER;
+                Oip->StatusInformation.Status = STATUS_BUFFER_TOO_SMALL;
                 Oip->StatusInformation.Information = 0;
-                break;
-            }
-
-            Length = Stack->Parameters.ReadWrite.Length;
-            Oip->StatusInformation.Status = STATUS_SUCCESS;
-            Oip->StatusInformation.Information = 0;
-
-            if (Length && !Oip->AssociatedOip.SystemBuffer)
-            {
-                Oip->StatusInformation.Status = STATUS_INVALID_PARAMETER;
                 break;
             }
 
             KsAcquireSpinLock(&Extension->RingLock, &OldIrql);
-            while (BytesRead < Length && Extension->RingCount)
+
+            if (Extension->RingCount == 0)
             {
-                ((PUCHAR)Oip->AssociatedOip.SystemBuffer)[BytesRead++] =
-                    Extension->RingBuffer[Extension->RingReadIndex];
+                if (Extension->PendingReadOip != NULL)
+                {
+                    KsReleaseSpinLock(&Extension->RingLock, OldIrql);
+                    Oip->StatusInformation.Status = STATUS_DEVICE_BUSY;
+                    Oip->StatusInformation.Information = 0;
+                    break;
+                }
+
+                // Tahan OIP sebagai pending sampai IRQ1 masuk
+                Extension->PendingReadOip = Oip;
+                KsReleaseSpinLock(&Extension->RingLock, OldIrql);
+                return STATUS_PENDING;
+            }
+
+            PKEYBOARD_INPUT_DATA OutBuf =
+                (PKEYBOARD_INPUT_DATA)Oip->AssociatedOip.SystemBuffer;
+
+            while (PacketsRead < MaxPackets && Extension->RingCount > 0)
+            {
+                OutBuf[PacketsRead++] = Extension->RingBuffer[Extension->RingReadIndex];
                 Extension->RingReadIndex =
                     (Extension->RingReadIndex + 1) % PS2KEY_RING_BUFFER_SIZE;
                 Extension->RingCount--;
             }
+
             KsReleaseSpinLock(&Extension->RingLock, OldIrql);
 
-            Oip->StatusInformation.Information = BytesRead;
-            break;
+            Oip->StatusInformation.Status = STATUS_SUCCESS;
+            Oip->StatusInformation.Information = PacketsRead * sizeof(KEYBOARD_INPUT_DATA);
+            ObioCompleteRequest(Oip);
+            return STATUS_SUCCESS;
         }
 
         case OIP_MJ_CREATE:
@@ -504,6 +591,19 @@ PS2KeyAddDevice(
 
     /* Attach Object Interrupt handler ke FDO */
     ObioAttachInterruptToThisObject(Fdo, PS2KeyObjectInterruptHandler);
+
+    Fdo->Flags |= DO_BUFFERED_IO;
+
+    Status = ObioRegisterDeviceInterface(
+        TargetDevice,                       // PDO (ACPI/PNP0303/0)
+        &VEA_GUID_DEVINTERFACE_KEYBOARD,
+        NULL,
+        &Extension->SymbolicLinkName
+    );
+    if (VEA_SUCCESS(Status))
+    {
+        Extension->InterfaceRegistered = TRUE;
+    }
 
     return STATUS_SUCCESS;
 }

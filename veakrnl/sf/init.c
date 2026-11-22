@@ -65,7 +65,12 @@ SfInitSystem(ULONG BootPhase)
     }
     else if(BootPhase == 1)
     {
-        // Inisialisasi tipe objek token untuk formalitas
+        SfpCreateTokenObjectType();
+        
+        if (PtSystemProcess && !PtSystemProcess->Token)
+        {
+            PtSystemProcess->Token = SfSystemToken;
+        }
     }
 
     return TRUE;

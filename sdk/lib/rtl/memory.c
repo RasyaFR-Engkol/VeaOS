@@ -86,3 +86,63 @@ BOOLEAN RtlEqualMemory(PVOID Source1, PVOID Source2, SIZE_T Length) {
 
     return TRUE;
 }
+
+VOID
+RtlMoveMemory(
+    VOID *Destination,
+    const VOID *Source,
+    SIZE_T Length)
+{
+    unsigned char *pdst = (unsigned char *)Destination;
+    const unsigned char *psrc = (const unsigned char *)Source;
+
+    if (pdst == psrc || Length == 0) {
+        return;
+    }
+
+    /* Tujuan SEBELUM sumber (atau tidak overlap): aman copy maju */
+    if (pdst < psrc || pdst >= psrc + Length) {
+
+        /* Copy per-ULONG jika kedua pointer selaras 4 byte */
+        if ((((ULONG_PTR)pdst | (ULONG_PTR)psrc) & (sizeof(ULONG) - 1)) == 0) {
+            ULONG *dw_dst = (ULONG *)pdst;
+            const ULONG *dw_src = (const ULONG *)psrc;
+            SIZE_T dwords = Length / sizeof(ULONG);
+
+            while (dwords--) {
+                *dw_dst++ = *dw_src++;
+            }
+            pdst = (unsigned char *)dw_dst;
+            psrc = (const unsigned char *)dw_src;
+            Length &= (sizeof(ULONG) - 1);
+        }
+
+        while (Length--) {
+            *pdst++ = *psrc++;
+        }
+    }
+    /* Tujuan SETELAH sumber dan overlap: wajib copy MUNDUR */
+    else {
+        pdst += Length;
+        psrc += Length;
+
+        if ((((ULONG_PTR)pdst | (ULONG_PTR)psrc) & (sizeof(ULONG) - 1)) == 0) {
+            ULONG *dw_dst = (ULONG *)pdst;
+            const ULONG *dw_src = (const ULONG *)psrc;
+            SIZE_T dwords = Length / sizeof(ULONG);
+
+            while (dwords--) {
+                *--dw_dst = *--dw_src;
+            }
+            pdst = (unsigned char *)dw_dst;
+            psrc = (const unsigned char *)dw_src;
+            Length &= (sizeof(ULONG) - 1);
+        }
+
+        while (Length--) {
+            *--pdst = *--psrc;
+        }
+    }
+}
+
+/* EOF */

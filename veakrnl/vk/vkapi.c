@@ -930,3 +930,251 @@ VeaSetValueKey(
     return STATUS_SUCCESS;
 }
 
+VEASTATUS
+VEAPI
+VeaEnumerateKey(
+    IN HANDLE KeyHandle,
+    IN ULONG Index,
+    OUT PCHAR SubKeyName,
+    IN ULONG SubKeyNameSize,
+    OUT PULONG ResultNameLength OPTIONAL,
+    OUT PULONG SubKeyCount OPTIONAL,
+    OUT PULONG Flags OPTIONAL
+)
+{
+    PVK_KEY_OBJECT KeyObject = NULL;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    CHAR KernelNameBuf[256];
+    ULONG LocalNameLen = 0;
+    ULONG LocalSubKeyCount = 0;
+    ULONG LocalFlags = 0;
+    VEASTATUS Status;
+
+    if (PreviousMode == UserMode)
+    {
+        if ((SubKeyName && (ULONG_PTR)SubKeyName >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) ||
+            (ResultNameLength && (ULONG_PTR)ResultNameLength >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) ||
+            (SubKeyCount && (ULONG_PTR)SubKeyCount >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) ||
+            (Flags && (ULONG_PTR)Flags >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS))
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+    }
+
+    Status = ObReferenceObjectByHandle(
+        KeyHandle,
+        KEY_READ_ACCESS,
+        VkKeyObjectType,
+        PreviousMode,
+        (PVOID*)&KeyObject
+    );
+    if (!VEA_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    RtlZeroMemory(KernelNameBuf, sizeof(KernelNameBuf));
+    Status = VkpEnumerateKey(
+        KeyObject,
+        Index,
+        KernelNameBuf,
+        sizeof(KernelNameBuf),
+        &LocalNameLen,
+        &LocalSubKeyCount,
+        &LocalFlags
+    );
+
+    ObDereferenceObject(KeyObject);
+
+    if (Status == STATUS_NO_MORE_ENTRIES)
+    {
+        return Status;
+    }
+
+    if (VEA_SUCCESS(Status) && (!SubKeyName || SubKeyNameSize < LocalNameLen + 1))
+    {
+        Status = STATUS_BUFFER_TOO_SMALL;
+    }
+
+    if (PreviousMode == UserMode)
+    {
+        _VEA_TRY
+        {
+            if (ResultNameLength) *ResultNameLength = LocalNameLen;
+            if (SubKeyCount)      *SubKeyCount      = LocalSubKeyCount;
+            if (Flags)            *Flags            = LocalFlags;
+
+            if (VEA_SUCCESS(Status) && SubKeyName)
+            {
+                RtlCopyMemory(SubKeyName, KernelNameBuf, LocalNameLen + 1);
+            }
+        }
+        _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
+        {
+            return GetExceptionCode();
+        }
+        _VEA_END;
+    }
+    else
+    {
+        if (ResultNameLength) *ResultNameLength = LocalNameLen;
+        if (SubKeyCount)      *SubKeyCount      = LocalSubKeyCount;
+        if (Flags)            *Flags            = LocalFlags;
+
+        if (VEA_SUCCESS(Status) && SubKeyName)
+        {
+            RtlCopyMemory(SubKeyName, KernelNameBuf, LocalNameLen + 1);
+        }
+    }
+
+    return Status;
+}
+
+VEASTATUS
+VEAPI
+VeaEnumerateValueKey(
+    IN HANDLE KeyHandle,
+    IN ULONG Index,
+    OUT PCHAR ValueName,
+    IN ULONG ValueNameSize,
+    OUT PULONG ResultNameLength OPTIONAL,
+    OUT PULONG Type OPTIONAL,
+    OUT PVOID Data OPTIONAL,
+    IN ULONG DataSize,
+    OUT PULONG ResultDataLength OPTIONAL
+)
+{
+    PVK_KEY_OBJECT KeyObject = NULL;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    CHAR KernelNameBuf[256];
+    UCHAR StackDataBuf[512];
+    PVOID KernelDataPtr = StackDataBuf;
+    ULONG KernelDataCap = sizeof(StackDataBuf);
+    BOOLEAN PoolAllocated = FALSE;
+    ULONG LocalNameLen = 0;
+    ULONG LocalDataLen = 0;
+    ULONG LocalType = 0;
+    VEASTATUS Status;
+
+    if (PreviousMode == UserMode)
+    {
+        if ((ValueName && (ULONG_PTR)ValueName >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) ||
+            (ResultNameLength && (ULONG_PTR)ResultNameLength >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) ||
+            (Type && (ULONG_PTR)Type >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) ||
+            (Data && (ULONG_PTR)Data >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) ||
+            (ResultDataLength && (ULONG_PTR)ResultDataLength >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS))
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+    }
+
+    Status = ObReferenceObjectByHandle(
+        KeyHandle,
+        KEY_QUERY_VALUE,
+        VkKeyObjectType,
+        PreviousMode,
+        (PVOID*)&KeyObject
+    );
+    if (!VEA_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    if (DataSize > sizeof(StackDataBuf))
+    {
+        KernelDataPtr = UlAllocatePoolWithTag(NonPagedPool, DataSize, 'VkEn');
+        if (!KernelDataPtr)
+        {
+            ObDereferenceObject(KeyObject);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        KernelDataCap = DataSize;
+        PoolAllocated = TRUE;
+    }
+
+    RtlZeroMemory(KernelNameBuf, sizeof(KernelNameBuf));
+    RtlZeroMemory(KernelDataPtr, KernelDataCap);
+
+    Status = VkpEnumerateValueKey(
+        KeyObject,
+        Index,
+        KernelNameBuf,
+        sizeof(KernelNameBuf),
+        &LocalNameLen,
+        &LocalType,
+        KernelDataPtr,
+        KernelDataCap,
+        &LocalDataLen
+    );
+
+    ObDereferenceObject(KeyObject);
+
+    if (Status == STATUS_NO_MORE_ENTRIES)
+    {
+        if (PoolAllocated) UlFreePoolWithTag(KernelDataPtr, 'VkEn');
+        return Status;
+    }
+
+    /* Cek kecukupan buffer milik caller */
+    if (VEA_SUCCESS(Status))
+    {
+        if (!ValueName || ValueNameSize < LocalNameLen + 1)
+        {
+            Status = STATUS_BUFFER_TOO_SMALL;
+        }
+        else if (LocalDataLen > 0 && (!Data || DataSize < LocalDataLen))
+        {
+            Status = STATUS_BUFFER_TOO_SMALL;
+        }
+    }
+
+    if (PreviousMode == UserMode)
+    {
+        _VEA_TRY
+        {
+            if (ResultNameLength) *ResultNameLength = LocalNameLen;
+            if (Type)             *Type             = LocalType;
+            if (ResultDataLength) *ResultDataLength = LocalDataLen;
+
+            if (ValueName && ValueNameSize >= LocalNameLen + 1)
+            {
+                RtlCopyMemory(ValueName, KernelNameBuf, LocalNameLen + 1);
+            }
+
+            if (VEA_SUCCESS(Status) && LocalDataLen > 0 && Data)
+            {
+                RtlCopyMemory(Data, KernelDataPtr, LocalDataLen);
+            }
+        }
+        _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = GetExceptionCode();
+        }
+        _VEA_END;
+    }
+    else
+    {
+        if (ResultNameLength) *ResultNameLength = LocalNameLen;
+        if (Type)             *Type             = LocalType;
+        if (ResultDataLength) *ResultDataLength = LocalDataLen;
+
+        if (ValueName && ValueNameSize >= LocalNameLen + 1)
+        {
+            RtlCopyMemory(ValueName, KernelNameBuf, LocalNameLen + 1);
+        }
+
+        if (VEA_SUCCESS(Status) && LocalDataLen > 0 && Data)
+        {
+            RtlCopyMemory(Data, KernelDataPtr, LocalDataLen);
+        }
+    }
+
+    if (PoolAllocated)
+    {
+        UlFreePoolWithTag(KernelDataPtr, 'VkEn');
+    }
+
+    return Status;
+}
+
+/* EOF */

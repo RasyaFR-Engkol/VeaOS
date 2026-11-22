@@ -117,16 +117,16 @@ LmMapVirtualMemory(
         ULONG PDIndex = PDE_INDEX(CurrentVirt);
         ULONG PTIndex = PTE_INDEX(CurrentVirt);
 
-        if (VirtualPD[PDIndex].bits.present == 0)
+        if (VirtualPD[PDIndex].Hard.Valid == 0)
         {
             // 1. Minta RAM fisik untuk Page Table baru
             ULONG NewPTPhys = LmAllocatePhysicalPages(1);
             
             // 2. Langsung colok ke Page Directory!
-            VirtualPD[PDIndex].bits.present = 1;
-            VirtualPD[PDIndex].bits.rw = 1;
-            VirtualPD[PDIndex].bits.user = 0;
-            VirtualPD[PDIndex].bits.frame = NewPTPhys >> 12;
+            VirtualPD[PDIndex].Hard.Valid = 1;
+            VirtualPD[PDIndex].Hard.Write = 1;
+            VirtualPD[PDIndex].Hard.Owner = 1;
+            VirtualPD[PDIndex].Hard.PageFrameNumber = NewPTPhys >> 12;
             
             // 3. BERSENANG-SENANG DENGAN RECURSIVE MAPPING
             // Alamat virtual ajaib untuk Page Table yang baru dicolok:
@@ -140,14 +140,14 @@ LmMapVirtualMemory(
         PAGE_ENTRY *PageTable = (PAGE_ENTRY*)(0xFFC00000 + (PDIndex * PAGE_SIZE));
 
         // Pasang alamat fisiknya ke PT
-        PageTable[PTIndex].bits.present = 1;
-        PageTable[PTIndex].bits.rw = 1;
-        PageTable[PTIndex].bits.user = 0;
-        PageTable[PTIndex].bits.frame = CurrentPhys >> 12;
+        PageTable[PTIndex].Hard.Valid = 1;
+        PageTable[PTIndex].Hard.Write = 1;
+        PageTable[PTIndex].Hard.Owner = 0;
+        PageTable[PTIndex].Hard.PageFrameNumber = CurrentPhys >> 12;
 
         if (CurrentPhys >= 0xF0000000) {
-            PageTable[PTIndex].bits.cache_disable = 1; // Cache Disable
-            PageTable[PTIndex].bits.write_through = 1; // Write-Through
+            PageTable[PTIndex].Hard.CacheDisable= 1; // Cache Disable
+            PageTable[PTIndex].Hard.WriteThrough = 1; // Write-Through
         }
 
         asm volatile("invlpg (%0)" ::"r"(CurrentVirt) : "memory");

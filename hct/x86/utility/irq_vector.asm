@@ -15,21 +15,21 @@ HctIrq%1:
 %endmacro
 
 ; Generate IRQ Stubs (0x20 s/d 0xFF)
-%assign i 0x20
-%rep (0x100 - 0x20)
+%assign i 0x1F
+%rep (0x100 - 0x1F)
     IRQ_STUB %[i]
     %assign i i+1
 %endrep
 
 ;
-; VOID CDECL HctCommonIrqHandler(VOID)
+; VOID VEAPI HctCommonIrqHandler(VOID)
 ;
 align 16
 HctCommonIrqHandler:
     sub esp, 0x60               ; Alokasikan sisa KTRAP_FRAME (0x00 s/d 0x5F)
 
     mov [esp + 0x44], eax       ; Simpan EAX ke KTRAP_FRAME.Eax
-    mov eax, [esp + 0x60]       ; EAX = IsrVector (baca dari stack)
+    mov eax, [esp + 0x60]       ; EAX = IsrVector (baca nilai dari stack)
 
     ; Simpan General Purpose Registers ke KTRAP_FRAME
     mov [esp + 0x60], ebp       ; KTRAP_FRAME.Ebp (menimpa lokasi bekas IsrVector)
@@ -39,18 +39,35 @@ HctCommonIrqHandler:
     mov [esp + 0x40], ecx       ; KTRAP_FRAME.Ecx
     mov [esp + 0x3C], edx       ; KTRAP_FRAME.Edx
 
-    ; Simpan Segment Registers
-    mov [esp + 0x50], fs        ; KTRAP_FRAME.SegFs
-    mov [esp + 0x38], ds        ; KTRAP_FRAME.SegDs
-    mov [esp + 0x34], es        ; KTRAP_FRAME.SegEs
-    mov [esp + 0x30], gs        ; KTRAP_FRAME.SegGs
+    ; Simpan Segment Registers (zero-extend 32-bit)
+    xor ecx, ecx
+    mov cx, fs
+    mov [esp + 0x50], ecx       ; KTRAP_FRAME.SegFs
+    mov cx, ds
+    mov [esp + 0x38], ecx       ; KTRAP_FRAME.SegDs
+    mov cx, es
+    mov [esp + 0x34], ecx       ; KTRAP_FRAME.SegEs
+    mov cx, gs
+    mov [esp + 0x30], ecx       ; KTRAP_FRAME.SegGs
 
-    ; ExceptionList & PreviousMode
+    ; Paksa pindah ke Segment Kernel (DS/ES = 0x10, FS = 0x30 KPCR)
+    cld
+    mov cx, 0x10                ; KGDT32_R0_DATA
+    mov ds, cx
+    mov es, cx
+    mov cx, 0x30                ; KGDT32_R0_PCR
+    mov fs, cx
+
+    ; Sekarang [fs:0] aman baca KPCR
     mov ecx, [fs:0]
     mov [esp + 0x4C], ecx       ; KTRAP_FRAME.ExceptionList
-    mov dword [esp + 0x48], 0   ; KTRAP_FRAME.PreviousPreviousMode (0 = KernelMode)
 
-    ; Panggil C Function: HctpInterruptHandler(PKTRAP_FRAME Frame, ULONG IsrVector)
+    mov ecx, [esp + 0x6C]
+    and ecx, 3
+    shr ecx, 1
+    mov [esp + 0x48], ecx       ; KTRAP_FRAME.PreviousPreviousMode
+
+    ; Panggil VEAPI (__stdcall): HctpInterruptHandler(PKTRAP_FRAME Frame, ULONG IsrVector)
     push eax                    ; Parameter 2: IsrVector
     lea ecx, [esp + 4]          ; ECX = Pointer tepat ke offset 0x00 KTRAP_FRAME
     push ecx                    ; Parameter 1: PKTRAP_FRAME Frame
@@ -75,14 +92,11 @@ HctCommonIrqHandler:
     add esp, 0x68
     iretd
 
-;
-; Tabel Pointer IRQ Stubs
-;
 section .data
 align 4
 HctIrqStubs:
-%assign i 0x20
-%rep (0x100 - 0x20)
+%assign i 0x1F
+%rep (0x100 - 0x1F)
     dd HctIrq%[i]
     %assign i i+1
 %endrep

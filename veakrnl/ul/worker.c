@@ -94,31 +94,54 @@ UlpWorkerEntryPoint(PVOID Context)
 
 VOID
 VEAPI
-UlpCreateWorkerThread(IN WORK_QUEUE_TYPE Type,
-                      IN BOOLEAN Dynamic)
+UlpCreateWorkerThread(
+    IN WORK_QUEUE_TYPE Type,
+    IN BOOLEAN Dynamic
+)
 {
-    PETHREAD Thread;
-    HANDLE hThread;
-    ULONG Context;
+    PETHREAD Thread = NULL;
+    HANDLE hThread = NULL;
+    ULONG_PTR Context;
     VEASTATUS Status;
 
-    Context = Type;
+    Context = (ULONG_PTR)Type;
 
     if (Dynamic)
     {
         Context |= EX_DYNAMIC_WORK_THREAD;
     }
 
-    Thread = PtCreateSystemThread(
-        (PEPROCESS)PtGetCurrentProcess(),
-        UlpWorkerEntryPoint,
-        (PVOID)Context,
-        NonPagedPool
+    Status = PtCreateSystemThread(
+        &hThread,
+        THREAD_ALL_ACCESS,
+        NULL,
+        NULL,                                    // ProcessHandle NULL -> default ke PtSystemProcess
+        NULL,                                    // ClientId
+        (PKSTART_ROUTINE)UlpWorkerEntryPoint,    // Start Routine
+        (PVOID)Context                           // Start Context
     );
 
-    if (Thread == NULL)
+    if (!VEA_SUCCESS(Status))
     {
-        DPRINT("ERR: UlWorker failed to initialize.\n");
+        DPRINT("ERR: UlWorker failed to initialize (Status: 0x%X).\n", Status);
+        return;
+    }
+
+    // Ambil pointer PETHREAD dari Handle untuk mengatur prioritas thread
+    Status = ObReferenceObjectByHandle(
+        hThread,
+        THREAD_ALL_ACCESS,
+        PtEthreadType,
+        KernelMode,
+        (PVOID*)&Thread
+    );
+
+    // Tutup handle lokal kernel setelah pointer di-reference
+    VeaClose(hThread);
+
+    if (!VEA_SUCCESS(Status) || !Thread)
+    {
+        DPRINT("ERR: Failed to reference UlWorker thread object.\n");
         return;
     }
 
@@ -139,6 +162,9 @@ UlpCreateWorkerThread(IN WORK_QUEUE_TYPE Type,
     {
         PtSetThreadPriority(&Thread->Tcb, EX_DELAYED_WORK_PRIORITY);
     }
+
+    // Lepas reference temporer setelah selesai mengatur prioritas
+    ObDereferenceObject(Thread);
 }
 
 /*

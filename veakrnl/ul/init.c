@@ -1,6 +1,9 @@
 #include <veakrnl.h>
 
 UCHAR UlpInitializationPhase = 0;
+static CHAR VeaSystemRootBuffer[256] = "D1P1:/VeaOS";
+static CHAR VeaInitialUserProcessBuffer[256] = "/SystemRoot/smss.elf";
+extern BOOLEAN BvVideoDriverInstalled;
 
 BOOLEAN
 VEAPI
@@ -25,6 +28,10 @@ UlpInitSystemPhase1(VOID)
         return FALSE;
     }
 
+    if (!UlVeapiInit())
+    {
+        return FALSE;
+    }
     
     return TRUE;
 }
@@ -71,7 +78,7 @@ void ul_initialize_layer(PBLOCK_BOOT_2 block_boot)
         KsBugCheck(MEMORY_INITIALIZATION_FAILURE);
     }
 
-    if(!SfInitSystem(0))
+    if (!SfInitSystem(0))
     {
         KsBugCheck(SECURITY_INITIALIZATION_FAILED);
     }
@@ -85,11 +92,6 @@ void ul_initialize_layer(PBLOCK_BOOT_2 block_boot)
     {
         KsBugCheck(PROCESSTHREAD_INITIALIZATION_FAILED);
     }
-
-    /*if(!kpc_initialize())
-    {
-        //ks_bug_check();
-    }*/
 
     if(!HctInitSystem(0))
     {
@@ -120,64 +122,193 @@ UlpCreateSystemRootLink(
     return STATUS_SUCCESS;
 }
 
-static ULONG MockSpinLock = 0;
-
-static VOID AcquireMockLock(VOID) {
-    MockSpinLock = 1;
-    DPRINT((" -> [LOCK] Spinlock didapatkan.\n"));
-}
-
-static VOID ReleaseMockLock(VOID) {
-    MockSpinLock = 0;
-    DPRINT((" -> [LOCK] Spinlock berhasil dilepas oleh __finally!\n"));
-}
-
-VOID VeaSehTestExecute(VOID)
+VEASTATUS
+VEAPI
+UlpLoadInitialProcess(VOID)
 {
-    DPRINT(("[VeaSEH Test] Memulai pengujian SEH Unwind & Exception Handling...\n"));
+    VEASTATUS Status;
+    ULONG ParamsSize;
+    ULONG EnvSize;
+    PCHAR p;
+    PCHAR EnvCursor;
+    PCHAR SpacePos;
+    PCHAR ColonPos;
+    ULONG SystemRootLen;
+    ULONG SystemDriveLen;
+    ULONG ImageLen;
+    ULONG CmdLineLen;
+    PRTL_USER_PROCESS_PARAMETERS ProcessParams = NULL;
+    PCHAR EnvironmentPtr = NULL;
+    RTL_USER_PROCESS_INFORMATION ProcessInfo;
+    ANSI_STRING SmssName;
 
-    _VEA_TRY {
-        DPRINT(("[Outer TRY] Masuk ke Outer Block.\n"));
-
-        _VEA_TRY {
-            DPRINT(("[Inner TRY] Mengambil Spinlock...\n"));
-            AcquireMockLock();
-
-            DPRINT(("[Inner TRY] Memicu Fault: Divide by Zero...\n"));
-            
-            // Trik Inline ASM untuk memicu Hardware Division Error (Vector 0 / STATUS_INTEGER_DIVIDE_BY_ZERO)
-            volatile int Zero = 0;
-            volatile int Result = 42 / Zero;
-            (VOID)Result;
-
-            DPRINT(("[Inner TRY] KODE INI TIDAK BOLEH DIEKSEKUSI!\n"));
-        }
-        _VEA_FINALLY {
-            DPRINT("[Inner FINALLY] Unwind Pass 2 berjalan! AbnormalTermination = %d\n", 
-                     AbnormalTermination());
-            
-            // Melepas Lock agar tidak terjadi Deadlock di Kernel
-            ReleaseMockLock();
-        }
-        _VEA_END;
-
+    ParamsSize = sizeof(RTL_USER_PROCESS_PARAMETERS) + (256 * 4);
+    ProcessParams = (PRTL_USER_PROCESS_PARAMETERS)UlAllocatePoolWithTag(
+        NonPagedPool,
+        ParamsSize,
+        'mrPP'
+    );
+    if (!ProcessParams)
+    {
+        DPRINT("[UL/INIT] Unable to allocate Process Parameters\n");
+        KsBugCheckEx(SESSION1_INITIALIZATION_FAILED, STATUS_INSUFFICIENT_RESOURCES, 0, 0, 0);
     }
-    _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER) {
-        DPRINT("[Outer EXCEPT] Exception tertangkap dengan sukses!\n");
-        DPRINT(" -> Exception Code : 0x%08X\n", GetExceptionCode());
-        DPRINT(" -> TrapFrame Ptr  : %p\n", GetExceptionInformation()->TrapFrame);
-    }
-    _VEA_END;
 
-    // Evaluasi integritas kernel pasca-unwind
-    DPRINT("[VeaSEH Test] Status Spinlock Akhir: %s\n", 
-             MockSpinLock == 0 ? "OK (Bebas)" : "TERKUNCI (Memory Leak!)");
-    
-    if (MockSpinLock == 0) {
-        DPRINT(("[VeaSEH Test] SUCCESS: Dual-pass unwinding & register restore bekerja sempurna.\n"));
-    } else {
-        DPRINT(("[VeaSEH Test] FAILED: Unwind melompati __finally!\n"));
+    RtlZeroMemory(ProcessParams, ParamsSize);
+    ProcessParams->Length        = ParamsSize;
+    ProcessParams->MaximumLength = ParamsSize;
+    ProcessParams->Flags         = RTL_USER_PROCESS_PARAMETERS_NORMALIZED |
+                                   RTL_USER_PROCESS_PARAMETERS_RESERVE_1MB;
+
+    EnvSize = PAGE_SIZE;
+    EnvironmentPtr = (PCHAR)UlAllocatePoolWithTag(
+        NonPagedPool,
+        EnvSize,
+        'vnEU'
+    );
+
+    if (!EnvironmentPtr)
+    {
+        UlFreePool(ProcessParams);
+        DPRINT("[UL/INIT] Unable to allocate Process Environment\n");
+        KsBugCheckEx(SESSION2_INITIALIZATION_FAILED, STATUS_INSUFFICIENT_RESOURCES, 0, 0, 0);
     }
+
+    RtlZeroMemory(EnvironmentPtr, EnvSize);
+    ProcessParams->Environment = EnvironmentPtr;
+
+    SystemRootLen = 0;
+    while (VeaSystemRootBuffer[SystemRootLen] != '\0' && SystemRootLen < (256 - 1))
+    {
+        SystemRootLen++;
+    }
+
+    p = (PCHAR)(ProcessParams + 1);
+    ProcessParams->CurrentDirectory.DosPath.Buffer        = p;
+    ProcessParams->CurrentDirectory.DosPath.MaximumLength = 256;
+    ProcessParams->CurrentDirectory.DosPath.Length        = (USHORT)SystemRootLen;
+    RtlCopyMemory(p, VeaSystemRootBuffer, SystemRootLen);
+    p[SystemRootLen] = '\0';
+
+    p += 256;
+    ProcessParams->DllPath.Buffer        = p;
+    ProcessParams->DllPath.MaximumLength = 256;
+    RtlCopyMemory(p, VeaSystemRootBuffer, SystemRootLen);
+    RtlCopyMemory(p + SystemRootLen, "/SystemReserved", 15);
+    ProcessParams->DllPath.Length = (USHORT)(SystemRootLen + 15);
+    p[ProcessParams->DllPath.Length] = '\0';
+
+    if (VeaInitialUserProcessBuffer[0] == '\0')
+    {
+        UlFreePool(EnvironmentPtr);
+        UlFreePool(ProcessParams);
+        KsBugCheckEx(SESSION2_INITIALIZATION_FAILED, STATUS_INVALID_PARAMETER, 0, 0, 0);
+    }
+
+    SpacePos = VeaInitialUserProcessBuffer;
+    CmdLineLen = 0;
+    while (VeaInitialUserProcessBuffer[CmdLineLen] != '\0' && CmdLineLen < (256 - 1))
+    {
+        CmdLineLen++;
+    }
+
+    while (*SpacePos != '\0' && *SpacePos != ' ')
+    {
+        SpacePos++;
+    }
+    ImageLen = (ULONG)(SpacePos - VeaInitialUserProcessBuffer);
+
+    p += 256;
+    ProcessParams->ImagePathName.Buffer        = p;
+    ProcessParams->ImagePathName.MaximumLength = 256;
+    ProcessParams->ImagePathName.Length        = (USHORT)ImageLen;
+    RtlCopyMemory(p, VeaInitialUserProcessBuffer, ImageLen);
+    p[ImageLen] = '\0';
+
+    p += 256;
+    ProcessParams->CommandLine.Buffer        = p;
+    ProcessParams->CommandLine.MaximumLength = 256;
+    ProcessParams->CommandLine.Length        = (USHORT)CmdLineLen;
+    RtlCopyMemory(p, VeaInitialUserProcessBuffer, CmdLineLen);
+    p[CmdLineLen] = '\0';
+
+    EnvCursor = EnvironmentPtr;
+
+    RtlCopyMemory(EnvCursor, "Path=", 5);
+    EnvCursor += 5;
+    RtlCopyMemory(EnvCursor, ProcessParams->DllPath.Buffer, ProcessParams->DllPath.Length);
+    EnvCursor += ProcessParams->DllPath.Length;
+    *EnvCursor++ = '\0';
+
+    ColonPos = VeaSystemRootBuffer;
+    while (*ColonPos != '\0' && *ColonPos != ':')
+    {
+        ColonPos++;
+    }
+
+    if (*ColonPos == ':')
+    {
+        SystemDriveLen = (ULONG)(ColonPos - VeaSystemRootBuffer) + 1; /* Termasuk ':' */
+        RtlCopyMemory(EnvCursor, "SystemDrive=", 12);
+        EnvCursor += 12;
+        RtlCopyMemory(EnvCursor, VeaSystemRootBuffer, SystemDriveLen);
+        EnvCursor += SystemDriveLen;
+        *EnvCursor++ = '\0';
+    }
+
+    RtlCopyMemory(EnvCursor, "SystemRoot=", 11);
+    EnvCursor += 11;
+    RtlCopyMemory(EnvCursor, VeaSystemRootBuffer, SystemRootLen);
+    EnvCursor += SystemRootLen;
+    *EnvCursor++ = '\0';
+
+    *EnvCursor++ = '\0';
+
+    SmssName = ProcessParams->ImagePathName;
+    RtlZeroMemory(&ProcessInfo, sizeof(RTL_USER_PROCESS_INFORMATION));
+    ProcessInfo.Size = sizeof(RTL_USER_PROCESS_INFORMATION);
+
+    Status = RtlCreateUserProcess(
+        &SmssName,
+        OBJ_CASE_INSENSITIVE,
+        ProcessParams,
+        NULL,
+        NULL,
+        NULL,
+        FALSE,
+        NULL,
+        NULL,
+        &ProcessInfo
+    );
+
+    UlFreePool(EnvironmentPtr);
+    UlFreePool(ProcessParams);
+
+    if (!VEA_SUCCESS(Status))
+    {
+        DPRINT("[UL/INIT] Unable to create Session Manager: 0x%08X\n", Status);
+        KsBugCheckEx(SESSION3_INITIALIZATION_FAILED, Status, 0, 0, 0);
+    }
+
+    DPRINT("[UL/INIT] SMSS Created! PID=%p, TID=%p, EntryPoint=%p\n",
+           ProcessInfo.ClientId.UniqueProcess,
+           ProcessInfo.ClientId.UniqueThread,
+           ProcessInfo.ImageInformation.TransferAddress);
+
+    Status = VzResumeThread(ProcessInfo.ThreadHandle, NULL);
+    if (!VEA_SUCCESS(Status))
+    {
+        DPRINT("[UL/INIT] Unable to resume Session Manager: 0x%08X\n", Status);
+        VzTerminateProcess(ProcessInfo.ProcessHandle, Status);
+        VzClose(ProcessInfo.ThreadHandle);
+        VzClose(ProcessInfo.ProcessHandle);
+        KsBugCheckEx(SESSION4_INITIALIZATION_FAILED, Status, 0, 0, 0);
+    }
+
+    VzClose(ProcessInfo.ThreadHandle);
+    VzClose(ProcessInfo.ProcessHandle);
+
+    return STATUS_SUCCESS;
 }
 
 VOID
@@ -332,6 +463,8 @@ UlPhase1(VOID)
     // TODO: Initialize Syscall and Machine Depedent Feature
     // if (!KsInitSystem()) KsBugCheckEx(PHASE1_INITIALIZATION_FAILED, 1, 0, 0, 0);
 
+    if (!SfInitSystem(UlpInitializationPhase)) KsBugCheck(SECURITY_INITIALIZATION_FAILED);
+
     if(!VkInitSystemPhase1()) KsBugCheckEx(VKEY1_INITIALIZATION_FAILED, 1, 0, 0, 0);
 
     //
@@ -346,7 +479,7 @@ UlPhase1(VOID)
         KsBugCheck(SYMBOLIC_INITIALIZATION_FAILED);
     }
 
-    if (!MmInitialize(KsLoaderBlock))  KsBugCheckEx(MEMORY_MANAGEMENT_ERROR, 0x2, 0, 0, 0);
+    if (!MmInitialize(KsLoaderBlock)) KsBugCheckEx(MEMORY_MANAGEMENT_ERROR, 0x2, 0, 0, 0);
 
     /* Todo: Initialize Cache (we should create Cache Manager) */
 
@@ -377,8 +510,7 @@ UlPhase1(VOID)
     
     */
 
-    // TODO:
-    // if (!KpcInitSystem()) KsBugCheck(KPC_INITIALIZATION_FAILED);
+    if (!KpcInitSystem()) KsBugCheck(KPC_INITIALIZATION_FAILED);
 
     /*
     
@@ -434,13 +566,13 @@ UlPhase1(VOID)
     /* 
     
         Block of code to:
-        1. Unmap LoaderBlock and set that to NULL
-        2. SfInitSystem1
+        DONE: 1. Unmap LoaderBlock and set that to NULL
+        2. SfRmInitSystem1
         3. Update progress bar to 100
-        4. and then call FinalizeBootLogo
+        DONE 4. and then call FinalizeBootLogo
         5. Allow Inbv to display string
-        6. call ExpLoadInitialProcess to load initial process and then wait for 5 seconds
-        7. if Session terminated, bugcheck SESSION5_FAILED
+        DONE 6. call ExpLoadInitialProcess to load initial process and then wait for 5 seconds
+        7. if Session terminated, bugcheck SESSION5_INITIALIZATION_FAILED
         8. Close that Process Handle
         9. Free virtual memory of Environment PVOID and Initial process parameter
         10. Increase UlpInitializtaionPhase to Phase2
@@ -448,14 +580,22 @@ UlPhase1(VOID)
     
     */
 
-    //
-    // Dump this so we know something fine in VeaOS Ob Tree and Device Tree
-    //
-    
-    ObDumpObjectTree();
-    ObioDumpDeviceTree();
+    if (KsLoaderBlock) KsLoaderBlock = NULL;
+    // MmFreeLoaderBlock(KsLoaderBlock);
 
-    VeaSehTestExecute();
+    // if (!SfRfInitSystem1()) KsBugCheck(PROCESSTHREAD_INITIALIZATION_FAILED);
+
+    if (BvVideoDriverInstalled) BvFinalizeBootLogo();
+
+    //
+    // DUMP
+    //
+
+    ObDumpObjectTree();
+
+    UlpLoadInitialProcess();
+
+    UlpInitializationPhase++;
 
     Loop:
     PtIdleLoop();

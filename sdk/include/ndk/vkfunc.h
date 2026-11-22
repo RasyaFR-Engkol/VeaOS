@@ -233,4 +233,56 @@ PANSI_STRING*
 VEAPI
 VkGetSystemDriverList(VOID);
 
+VEASTATUS
+VEAPI
+VkpEnumerateValueKey(
+    IN PVK_KEY_OBJECT KeyObject,
+    IN ULONG Index,
+    OUT PCHAR ValueName,
+    IN ULONG ValueNameSize,
+    OUT PULONG ResultNameLength,
+    OUT PULONG Type OPTIONAL,
+    OUT PVOID Data OPTIONAL,
+    IN ULONG DataSize,
+    OUT PULONG ResultDataLength OPTIONAL
+);
+
+VEASTATUS
+VEAPI
+VkpEnumerateKey(
+    IN PVK_KEY_OBJECT KeyObject,
+    IN ULONG Index,
+    OUT PCHAR SubKeyName,
+    IN ULONG SubKeyNameSize,
+    OUT PULONG ResultNameLength,
+    OUT PULONG SubKeyCount OPTIONAL,
+    OUT PULONG Flags OPTIONAL
+);
+
+VEASTATUS
+VEAPI
+VeaEnumerateValueKey(
+    IN HANDLE KeyHandle,
+    IN ULONG Index,
+    OUT PCHAR ValueName,
+    IN ULONG ValueNameSize,
+    OUT PULONG ResultNameLength OPTIONAL,
+    OUT PULONG Type OPTIONAL,
+    OUT PVOID Data OPTIONAL,
+    IN ULONG DataSize,
+    OUT PULONG ResultDataLength OPTIONAL
+);
+
+VEASTATUS
+VEAPI
+VeaEnumerateKey(
+    IN HANDLE KeyHandle,
+    IN ULONG Index,
+    OUT PCHAR SubKeyName,
+    IN ULONG SubKeyNameSize,
+    OUT PULONG ResultNameLength OPTIONAL,
+    OUT PULONG SubKeyCount OPTIONAL,
+    OUT PULONG Flags OPTIONAL
+);
+
 /* EOF */

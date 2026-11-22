@@ -12,7 +12,7 @@ set(DDK_INCLUDE_DIR "${SDK_INCLUDE_DIR}/ddk")
 set(DDK_HEADER_FILE "${DDK_INCLUDE_DIR}/veaddk.h")
 set(AUTEXP_C_FILE "${CMAKE_CURRENT_BINARY_DIR}/autexp.c")
 
-# Path ke script generator di folder tool/ (atau tools/)
+# Path ke script generator di folder tool/
 set(GEN_DDK_SCRIPT "${CMAKE_SOURCE_DIR}/tool/gen_ddk.py")
 set(GEN_EXP_SCRIPT "${CMAKE_SOURCE_DIR}/tool/gen_exp.py")
 
@@ -44,6 +44,34 @@ else()
     message(WARNING "[VeaExport] export.lst not found in ${CMAKE_CURRENT_SOURCE_DIR}!")
 endif()
 
+# =====================================================================
+# VZ SYSCALL WRAPPER GENERATOR (from syscall.lst)
+# =====================================================================
+set(SYSCALL_LST_FILE "${CMAKE_SOURCE_DIR}/veakrnl/syscall.lst") 
+set(VZ_WRAPPERS_ASM_FILE "${CMAKE_CURRENT_BINARY_DIR}/vz_wrappers.asm")
+set(VZ_WRAPPERS_H_FILE "${KERNEL_INCLUDE_DIR}/vz_wrappers.h")
+set(GEN_VZ_SCRIPT "${CMAKE_SOURCE_DIR}/tool/vz_syscall.py")
+
+enable_language(ASM_NASM)
+
+if(EXISTS ${SYSCALL_LST_FILE})
+    execute_process(
+        COMMAND python3 ${GEN_VZ_SCRIPT}
+                ${SYSCALL_LST_FILE}
+                ${VZ_WRAPPERS_ASM_FILE}
+                ${VZ_WRAPPERS_H_FILE}
+                ${KERNEL_INCLUDE_DIR}
+        RESULT_VARIABLE GEN_VZ_RESULT
+    )
+    if(NOT GEN_VZ_RESULT EQUAL 0)
+        message(WARNING "[VeaVz] Failed to generate vz_wrappers.c!")
+    else()
+        message(STATUS "[VeaVz] Successfully generated Vz syscall wrappers.")
+    endif()
+else()
+    message(WARNING "[VeaVz] syscall.lst not found in ${SYSCALL_LST_FILE}!")
+endif()
+
 # =============================================================
 # VeaOS COMPILE
 # =============================================================
@@ -60,6 +88,11 @@ list(APPEND KERNEL_C_SOURCES ${RTL_SOURCES})
 # Tambahkan autexp.c hasil generate ke daftar sumber C kernel
 if(EXISTS ${AUTEXP_C_FILE})
     list(APPEND KERNEL_C_SOURCES ${AUTEXP_C_FILE})
+endif()
+
+# Tambahkan vz_wrappers.c hasil generate ke daftar sumber C kernel
+if(EXISTS ${VZ_WRAPPERS_ASM_FILE})
+    list(APPEND KERNEL_ASM_SOURCES ${VZ_WRAPPERS_ASM_FILE})
 endif()
 
 set(KERNEL_OBJS "")
@@ -86,7 +119,7 @@ foreach(C_FILE ${KERNEL_C_SOURCES})
     add_custom_command(
         OUTPUT ${OBJ_FILE}
         COMMAND clang --target=i686-pc-none-elf -march=i686 -m32 -ffreestanding -nostdlib -fno-builtin -fno-builtin-memcpy -c -g -DBUILDING_VEAKRNL ${VEA_INCLUDES} -c ${C_FILE} -o ${OBJ_FILE} -std=gnu23 -fshort-wchar -fms-extensions -fstack-protector-all -Wthread-safety -Wthread-safety-analysis -Werror=thread-safety 
-        -fmacro-prefix-map=/home/xvrasya/VeaOS/= -fno-omit-frame-pointer
+        -fmacro-prefix-map=/home/xvrasya/VeaOS/= -fno-omit-frame-pointer -ferror-limit=0
         DEPENDS ${C_FILE}
         COMMENT "Compiling C: ${SAFE_NAME}"
     )

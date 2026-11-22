@@ -33,7 +33,7 @@ HctTrap%1:
 %endrep
 
 ;
-; VOID CDECL HctCommonTrapHandler(VOID)
+; VOID VEAPI HctCommonTrapHandler(VOID)
 ;
 align 16
 HctCommonTrapHandler:
@@ -50,18 +50,37 @@ HctCommonTrapHandler:
     mov [esp + 0x40], ecx       ; KTRAP_FRAME.Ecx
     mov [esp + 0x3C], edx       ; KTRAP_FRAME.Edx
 
-    ; Simpan Segment Registers
-    mov [esp + 0x50], fs        ; KTRAP_FRAME.SegFs
-    mov [esp + 0x38], ds        ; KTRAP_FRAME.SegDs
-    mov [esp + 0x34], es        ; KTRAP_FRAME.SegEs
-    mov [esp + 0x30], gs        ; KTRAP_FRAME.SegGs
+    ; Simpan Segment Registers (zero-extend 32-bit)
+    xor ecx, ecx
+    mov cx, fs
+    mov [esp + 0x50], ecx       ; KTRAP_FRAME.SegFs
+    mov cx, ds
+    mov [esp + 0x38], ecx       ; KTRAP_FRAME.SegDs
+    mov cx, es
+    mov [esp + 0x34], ecx       ; KTRAP_FRAME.SegEs
+    mov cx, gs
+    mov [esp + 0x30], ecx       ; KTRAP_FRAME.SegGs
 
-    ; ExceptionList & PreviousMode
+    ; Paksa pindah ke Segment Kernel (DS/ES = 0x10, FS = 0x30 KPCR)
+    cld
+    mov cx, 0x10                ; KGDT32_R0_DATA
+    mov ds, cx
+    mov es, cx
+    mov cx, 0x30                ; KGDT32_R0_PCR
+    mov fs, cx
+
+    ; Sekarang [fs:0] aman baca KPCR
     mov ecx, [fs:0]
     mov [esp + 0x4C], ecx       ; KTRAP_FRAME.ExceptionList
-    mov dword [esp + 0x48], 0   ; KTRAP_FRAME.PreviousPreviousMode (0 = KernelMode)
 
-    ; Panggil C Function: HctpInterruptHandler(PKTRAP_FRAME Frame, ULONG IsrVector)
+    ; Set PreviousMode berdasarkan RPL dari SegCs ([esp + 0x6C])
+    mov ecx, [esp + 0x6C]
+    and ecx, 3
+    shr ecx, 1                  ; RPL 3 -> 1 (UserMode), RPL 0 -> 0 (KernelMode)
+    mov [esp + 0x48], ecx       ; KTRAP_FRAME.PreviousPreviousMode
+
+    ; Panggil VEAPI (__stdcall): HctpInterruptHandler(PKTRAP_FRAME Frame, ULONG IsrVector)
+    ; Fungsi ini otomatis melakukan `ret 8`, jangan tambah `add esp, 8`!
     push eax                    ; Parameter 2: IsrVector
     lea ecx, [esp + 4]          ; ECX = Pointer tepat ke offset 0x00 KTRAP_FRAME
     push ecx                    ; Parameter 1: PKTRAP_FRAME Frame
@@ -86,9 +105,6 @@ HctCommonTrapHandler:
     add esp, 0x68
     iretd
 
-;
-; Tabel Pointer Trap Stubs
-;
 section .data
 align 4
 HctTrapStubs:

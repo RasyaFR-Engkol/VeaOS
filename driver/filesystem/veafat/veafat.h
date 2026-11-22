@@ -134,13 +134,13 @@ typedef struct _FAT_DIR_ENTRY {
 
 typedef struct _FAT_LFN_ENTRY {
     UCHAR  SequenceNumber;      // Sequence number (1..20), bit 6 (0x40) = entry LFN terakhir
-    WCHAR  Name1[5];            // 5 karakter UTF-16LE pertama
+    USHORT  Name1[5];            // 5 karakter UTF-16LE pertama
     UCHAR  Attributes;          // Harus 0x0F (FAT_ATTR_LFN)
     UCHAR  Type;                // Reserved, selalu 0x00
     UCHAR  Checksum;            // Checksum dari Short File Name (SFN) 8.3
-    WCHAR  Name2[6];            // 6 karakter UTF-16LE berikutnya
+    USHORT  Name2[6];            // 6 karakter UTF-16LE berikutnya
     USHORT FirstClusterLow;     // Harus 0x0000
-    WCHAR  Name3[2];            // 2 karakter UTF-16LE terakhir
+    USHORT  Name3[2];            // 2 karakter UTF-16LE terakhir
 } FAT_LFN_ENTRY, *PFAT_LFN_ENTRY;
 
 #pragma pack (pop)
@@ -158,6 +158,7 @@ typedef struct _VEAFAT_FCB {
     KSPIN_LOCK          FcbLock;                // Lock lokal FCB
     BOOLEAN             IsVolumeFcb;
     SECTION_OBJECT_POINTERS SectionObjectPointers;
+    BOOLEAN             DeletePending;
 } VEAFAT_FCB, *PVEAFAT_FCB;
 
 typedef struct _VEAFAT_CCB {
@@ -238,14 +239,14 @@ FatpCalculateSfnChecksum(
 
 BOOLEAN
 FatpCompareLfnWithAnsi(
-    IN PWCHAR LfnBuffer,
+    IN PUSHORT LfnBuffer,
     IN PANSI_STRING ComponentName
 );
 
 VOID
 FatpExtractLfnChars(
     IN PFAT_LFN_ENTRY LfnEntry,
-    OUT PWCHAR TargetSlot
+    OUT PUSHORT TargetSlot
 );
 
 VEASTATUS
@@ -291,7 +292,9 @@ FatpAddDirectoryEntry(
     IN PANSI_STRING FileName,
     IN UCHAR Attributes,
     IN ULONG FirstCluster,
-    IN ULONG FileSize
+    IN ULONG FileSize,
+    OUT PULONG OutParentCluster OPTIONAL,
+    OUT PULONG OutEntryOffset OPTIONAL
 );
 
 VEASTATUS
@@ -325,6 +328,101 @@ FatLocateFcbEx(
     OUT PVEAFAT_FCB *OutFcb,
     OUT PULONG OutParentCluster,
     OUT PANSI_STRING OutLeafName
+);
+
+VEASTATUS
+VEAPI
+FatpFlushFsInfo(
+    IN PFAT32_DEVICE_EXTENSION Vcb
+);
+
+VEASTATUS
+VEAPI
+FatMjClose(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN POIP Oip,
+    IN POIP_STACK OipStack
+);
+
+VEASTATUS
+VEAPI
+FatMjCleanup(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN POIP Oip,
+    IN POIP_STACK OipStack
+);
+
+VEASTATUS
+VEAPI
+FatpUpdateDirectoryEntry(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    IN PVEAFAT_FCB Fcb
+);
+
+BOOLEAN
+FatpSfnExistsInDirectory(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    IN ULONG DirStartCluster,
+    IN const UCHAR TargetSfn[11]
+);
+
+VEASTATUS
+VEAPI
+FatMjWrite(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN POIP Oip,
+    IN POIP_STACK Stack
+);
+
+VOID
+FatpGenerateSfnWithTail(
+    IN PANSI_STRING InputName,
+    IN ULONG Tail,
+    OUT UCHAR Sfn[11]
+);
+
+VEASTATUS
+VEAPI
+FatMjQueryInformation(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN POIP Oip,
+    IN POIP_STACK Stack
+);
+
+BOOLEAN
+FatpIsDirectoryEmpty(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    IN ULONG DirStartCluster
+);
+
+VEASTATUS
+VEAPI
+FatpFreeClusterChain(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    IN ULONG StartCluster
+);
+
+VEASTATUS
+VEAPI
+FatMjDirectoryControl(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN POIP Oip,
+    IN POIP_STACK Stack
+);
+
+VEASTATUS
+VEAPI
+FatMjSetInformation(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN POIP Oip,
+    IN POIP_STACK Stack
+);
+
+VEASTATUS
+VEAPI
+FatpDeleteDirectoryEntry(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    IN PVEAFAT_FCB Fcb
 );
 
 /* EOF */

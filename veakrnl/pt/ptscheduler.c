@@ -33,7 +33,9 @@ FORCEINLINE
 ULONG_PTR
 PtpSilentInterrupt(VOID)
 {
-    return __ReadEFlags();
+    ULONG_PTR Flags = __ReadEFlags();
+    __Stop();
+    return Flags;
 }
 
 static 
@@ -57,26 +59,28 @@ PtInitializeRunQueues(VOID)
         PtRunQueue[i].TotalWeight = 0;
         PtRunQueue[i].CurrentThread = NULL;
 
-        RtlZeroMemory(&PtSystemIdleThread[i], sizeof(KTHREAD));
-        
+        // -------------------------------------------------------------
+        // FIX: Inisialisasi KTHREAD Idle Thread secara utuh, bukan zero-mem doang!
+        // -------------------------------------------------------------
+        PiInitializeThread(
+            &PtSystemIdleThread[i],
+            NULL,
+            NULL,
+            NULL,
+            0
+        );
+
         PtSystemIdleThread[i].State = Ready;
         PtSystemIdleThread[i].Weight = 1;
         PtSystemIdleThread[i].VRuntime = 0;
     }
 
-    // --- TAMBAHAN WAJIB DI SINI ---
-    // Daftarkan konteks eksekusi Kernel saat ini sebagai Idle Thread 
-    // untuk CPU yang mengeksekusi fungsi ini (biasanya BSP / Core 0).
     PKPRCB Prcb = KeGetCurrentPrcb();
     ULONG CurrentCpu = Prcb->Number;
 
-    // Ubah state jadi Running karena core ini sedang mengeksekusi kernel boot
     PtSystemIdleThread[CurrentCpu].State = Running; 
 
-    // Tanamkan pointer Idle Thread ke PRCB
     Prcb->CurrentThread = (struct _KTHREAD *)&PtSystemIdleThread[CurrentCpu];
-    
-    // Tanamkan juga ke RunQueue saat ini
     PtRunQueue[CurrentCpu].CurrentThread = &PtSystemIdleThread[CurrentCpu];
 }
 
@@ -102,45 +106,19 @@ VOID
 VEAPI
 PtYieldThread(VOID)
 {
-    ULONG_PTR Flags = PtpSilentInterrupt();
+    KIRQL OldIrql = KsAcquireDispatcherLock();
     PKPRCB Prcb = KeGetCurrentPrcb();
     PKTHREAD CurrentThread = (PKTHREAD)Prcb->CurrentThread;
-    PKRUNQUEUE RunQueue = &PtRunQueue[Prcb->Number];
-    PKTHREAD NextThread = PtSelectNextThread(RunQueue);
 
-    // Ambil IRQL asli thread sebelum interupsi (jika tersimpan) atau simpan PASSIVE_LEVEL jika di-preempt
-    if (CurrentThread && CurrentThread != &PtSystemIdleThread[Prcb->Number] && CurrentThread->State == Running)
+    if (CurrentThread)
     {
-        PtEnqueueThreadCfs(RunQueue, CurrentThread);
+        CurrentThread->WaitIrql = OldIrql;
+        PtSwapThread(CurrentThread, Prcb);
     }
-
-    if (CurrentThread != NextThread)
+    else
     {
-        PtSetCurrentThread(NextThread);
-
-        PKPROCESS OldProcess = CurrentThread ? CurrentThread->ApcState.Process : NULL;
-        PKPROCESS NewProcess = NextThread ? NextThread->ApcState.Process : NULL;
-
-        if (OldProcess != NewProcess && NewProcess != NULL) 
-        {
-            __WriteCR3(NewProcess->DirectoryTableBase);
-        }
-
-        PtSwapContext(CurrentThread, NextThread);
-
-        // Setelah switch ke NextThread, Wajib Turunkan TPR ke IRQL milik ResumedThread (biasanya PASSIVE_LEVEL / 0)
-        PKTHREAD ResumedThread = PtGetCurrentThread();
-        if (ResumedThread)
-        {
-            KeSetCurrentIrql(ResumedThread->Irql); 
-        }
-        else
-        {
-            KeSetCurrentIrql(PASSIVE_LEVEL);
-        }
+        KsReleaseDispatcherLock(OldIrql);
     }
-
-    PtpRestoreInterrupt(Flags);
 }
 
 BOOLEAN
@@ -161,14 +139,25 @@ PtWakeThread(
 )
 {
     PKPRCB Prcb;
+    ULONG_PTR Flags;
 
-    if (!Thread || Thread->State != Waiting)
+    if (!Thread)
         return FALSE;
+
+    Flags = PtpSaveAndDisableInterrupts();
+
+    if (Thread->State != Waiting)
+    {
+        PtpRestoreInterrupts(Flags);
+        return FALSE;
+    }
 
     Thread->State = Ready;
 
     Prcb = KeGetCurrentPrcb();
     PtEnqueueThreadCfs(&PtRunQueue[Prcb->Number], Thread);
+
+    PtpRestoreInterrupts(Flags);
     return TRUE;
 }
 
@@ -207,7 +196,21 @@ PtSchedulerTick(ULONGLONG DeltaTimeNs)
     BOOLEAN ShouldYield = FALSE;
     ULONG_PTR Eflags;
 
+    static HANDLE LastTid = NULL;
+
     if (!CurrentThread) return;
+
+    PETHREAD EThread = CONTAINING_RECORD(CurrentThread, ETHREAD, Tcb);
+    HANDLE CurrentPid = EThread->Cid.UniqueProcess;
+    HANDLE CurrentTid = EThread->Cid.UniqueThread;
+
+    if (CurrentTid != LastTid)
+    {
+        PEPROCESS Process = EThread->ThreadProcess;
+        PCHAR ProcName = (Process && Process->ImageFileName[0]) ? Process->ImageFileName : "UserProcess(NoName)";
+
+        LastTid = CurrentTid;
+    }
 
     if (CurrentThread->Weight != 0)
     {
@@ -230,8 +233,6 @@ PtSchedulerTick(ULONGLONG DeltaTimeNs)
     {
         PKTHREAD Candidate = CONTAINING_RECORD(Leftmost, KTHREAD, CfsNode);
 
-        // Jika Candidate di RBT punya VRuntime lebih kecil dibanding CurrentThread
-        // (Bisa tambahkan threshold/granularity misal 1-2 ms biar gak terlalu sering switch)
         if (Candidate->VRuntime < CurrentThread->VRuntime)
         {
             ShouldYield = TRUE;
@@ -256,7 +257,6 @@ KsDelayExecutionThread(
 {
     PKTHREAD CurrentThread;
     ULONG_PTR Flags;
-    KDPC DelayDpc;
 
     if (!Interval) {
         return STATUS_INVALID_PARAMETER;
@@ -276,15 +276,91 @@ KsDelayExecutionThread(
     CurrentThread->WaitStatus = STATUS_PENDING;
     CurrentThread->State = Waiting;
 
-    KsInitializeDpc(&DelayDpc, PtpDelayExecutionDpcRoutine, (PVOID)CurrentThread);
+    KsInitializeDpc(&CurrentThread->TimerDpc, PtpDelayExecutionDpcRoutine, (PVOID)CurrentThread);
 
-    KsSetTimer(&CurrentThread->Timer, *Interval, 0, &DelayDpc);
+    KsSetTimer(&CurrentThread->Timer, *Interval, 0, &CurrentThread->TimerDpc);
 
     PtYieldThread();
 
     __WriteEFlags(Flags);
 
     return CurrentThread->WaitStatus;
+}
+
+VEASTATUS
+VEAPI
+VeaYieldExecution(VOID)
+{
+    PtYieldThread();
+
+    return STATUS_SUCCESS;
+}
+
+LONG_PTR
+VEAFAST
+PtSwapThread(
+    IN PKTHREAD Thread,
+    IN PKPRCB Prcb
+)
+{
+    KIRQL WaitIrql = Thread->WaitIrql;
+    ULONG_PTR Flags = PtpSilentInterrupt();
+    PKRUNQUEUE RunQueue = &PtRunQueue[Prcb->Number];
+    PKTHREAD IdleThread = &PtSystemIdleThread[Prcb->Number];
+
+    /*
+     * Lepas spinlock dispatcher di DISPATCH_LEVEL (tanpa turun ke PASSIVE_LEVEL)
+     * supaya thread baru di PiThreadStartup tidak deadlock, sementara IRQ/DPC
+     * tetap tertahan sampai PtSwapContext selesai.
+     */
+    KsReleaseDispatcherLock(DISPATCH_LEVEL);
+
+    /*
+     * Enqueue Thread HANYA jika State masih Running (voluntary yield / preemption),
+     * dan lakukan SEBELUM PtSelectNextThread memanggil PtPickNextThreadCfs.
+     */
+    if (Thread && Thread != IdleThread && Thread->State == Running)
+    {
+        PtEnqueueThreadCfs(RunQueue, Thread);
+    }
+
+    PKTHREAD NextThread = PtSelectNextThread(RunQueue);
+
+    if (Thread != NextThread)
+    {
+        PtSetCurrentThread(NextThread);
+
+        PKPCR Pcr = KeGetPcr();
+        if (Pcr && Pcr->TSS)
+        {
+            ULONG_PTR KernelStackTop = (ULONG_PTR)NextThread->InitialStack;
+            ((PKTSSENTRY32)Pcr->TSS)->Esp0 = (ULONG)KernelStackTop;
+            __WriteMSR(MSR_IA32_SYSENTER_ESP, KernelStackTop);
+        }
+
+        PKPROCESS OldProcess = Thread ? Thread->ApcState.Process : NULL;
+        PKPROCESS NewProcess = NextThread ? NextThread->ApcState.Process : NULL;
+
+        if (OldProcess != NewProcess && NewProcess != NULL)
+        {
+            __WriteCR3(NewProcess->DirectoryTableBase);
+        }
+
+        PtSwapContext(Thread, NextThread);
+    }
+
+    /* Eksekusi lanjut di sini setelah Thread di-wake dan dijadwalkan balik */
+    KeLowerIrql(WaitIrql);
+    PtpRestoreInterrupts(Flags);
+
+    if (WaitIrql == PASSIVE_LEVEL &&
+        Thread->ApcState.KernelApcPending &&
+        !Thread->SpecialApcDisable)
+    {
+        HctRequestSoftwareInterrupt(APC_LEVEL);
+    }
+
+    return (LONG_PTR)Thread->WaitStatus;
 }
 
 /* EOF */

@@ -475,6 +475,8 @@ DskAddDevice(IN PDRIVER_OBJECT DriverObject, IN PDEVICE_OBJECT Pdo)
     }
 
     Fdo->Flags |= FdoExt->LowerDeviceObject->Flags & (DO_BUFFERED_IO | DO_DIRECT_IO);
+    Fdo->Flags &= ~DO_BUFFERED_IO;
+    Fdo->Flags |= DO_DIRECT_IO;
 
     Fdo->Flags &= ~DO_DEVICE_INITIALIZING;
 

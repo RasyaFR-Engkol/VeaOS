@@ -51,13 +51,140 @@ ObioCallObject(
 
 VOID
 VEAPI
+ObiopCompleteRequestApc(
+    IN PKAPC Apc,
+    IN PKNORMAL_ROUTINE *NormalRoutine,
+    IN PVOID *NormalContext,
+    IN PVOID *SystemArgument1,
+    IN PVOID *SystemArgument2
+)
+{
+    UNREFERENCED_PARAMETER(NormalRoutine);
+    UNREFERENCED_PARAMETER(NormalContext);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    POIP Oip = CONTAINING_RECORD(Apc, OIP, Apc);
+    UCHAR RequestMajor = (UCHAR)(ULONG_PTR)(*SystemArgument1);
+    PKEVENT UserEvent = (PKEVENT)Oip->UserEvent;
+    PETHREAD Thread = Oip->RequestorThread;
+    BOOLEAN DeallocateOip = (Oip->Flags & OIP_DEALLOCATE_ON_COMPLETION) != 0;
+
+    if ((Oip->Flags & OIP_INPUT_OPERATION) &&
+        (Oip->Flags & OIP_BUFFERED_IO) &&
+        Oip->UserBuffer != NULL &&
+        Oip->AssociatedOip.SystemBuffer != NULL &&
+        Oip->StatusInformation.Information > 0)
+    {
+        if (RequestMajor == OIP_MJ_READ || RequestMajor == OIP_MJ_DEVICE_CONTROL)
+        {
+            if ((ULONG_PTR)Oip->UserBuffer < 0x80000000UL && Thread == NULL)
+            {
+                Oip->StatusInformation.Status = STATUS_INVALID_USER_BUFFER;
+                Oip->StatusInformation.Information = 0;
+            }
+            else
+            {
+                RtlCopyMemory(
+                    Oip->UserBuffer,
+                    Oip->AssociatedOip.SystemBuffer,
+                    Oip->StatusInformation.Information
+                );
+            }
+        }
+    }
+
+    if (DeallocateOip)
+    {
+        if ((Oip->Flags & OIP_DEALLOCATE_BUFFER) &&
+            Oip->AssociatedOip.SystemBuffer != NULL)
+        {
+            UlFreePoolWithTag(Oip->AssociatedOip.SystemBuffer, Oip->SystemTag);
+            Oip->AssociatedOip.SystemBuffer = NULL;
+        }
+
+        if (Oip->MdlAddress != NULL)
+        {
+            ObioFreeMdl(Oip->MdlAddress);
+            Oip->MdlAddress = NULL;
+        }
+    }
+
+    if (Oip->UserInfoBlock != NULL)
+    {
+        *(Oip->UserInfoBlock) = Oip->StatusInformation;
+    }
+
+    if (DeallocateOip)
+    {
+        ObioFreeOip(Oip);
+    }
+
+    if (UserEvent != NULL)
+    {
+        KsSetEvent(UserEvent, FALSE);
+    }
+
+    if (Thread != NULL)
+    {
+        ObDereferenceObject(Thread);
+    }
+}
+
+VOID
+VEAPI
+ObiopRundownRequestApc(
+    IN PKAPC Apc
+)
+{
+    POIP Oip = CONTAINING_RECORD(Apc, OIP, Apc);
+    PETHREAD Thread = Oip->RequestorThread;
+    BOOLEAN DeallocateOip = (Oip->Flags & OIP_DEALLOCATE_ON_COMPLETION) != 0;
+
+    // 1. JANGAN copy-back ke UserBuffer & JANGAN tulis UserInfoBlock!
+    //    Address space user-mode thread ini sudah tidak aman/sedang di-teardown.
+
+    // 2. JANGAN panggil KsSetEvent(Oip->UserEvent)!
+    //    Kalau UserEvent tadinya variabel lokal di stack syscall yang wait-nya
+    //    terputus karena thread di-terminate, nyentuh event itu bakal ngerusak stack.
+
+    // 3. Bebaskan SystemBuffer & MDL kalau dimiliki OIP ini
+    if (DeallocateOip)
+    {
+        if ((Oip->Flags & OIP_DEALLOCATE_BUFFER) &&
+            Oip->AssociatedOip.SystemBuffer != NULL)
+        {
+            UlFreePoolWithTag(Oip->AssociatedOip.SystemBuffer, Oip->SystemTag);
+            Oip->AssociatedOip.SystemBuffer = NULL;
+        }
+
+        if (Oip->MdlAddress != NULL)
+        {
+            ObioFreeMdl(Oip->MdlAddress);
+            Oip->MdlAddress = NULL;
+        }
+
+        // 4. Bebaskan struct OIP-nya sendiri
+        ObioFreeOip(Oip);
+    }
+
+    // 5. Lepas reference thread yang diambil saat OIP dibuat
+    if (Thread != NULL)
+    {
+        ObDereferenceObject(Thread);
+    }
+}
+
+VOID
+VEAPI
 ObioCompleteRequest(
     POIP Oip
 )
 {
     POIP_STACK Stack;
     VEASTATUS Status;
-    UCHAR RequestMajor = 0; // PENYELAMAT MAJOR FUNCTION
+    UCHAR RequestMajor = 0;
+    PETHREAD CurrentThread = (PETHREAD)PtGetCurrentThread();
+    BOOLEAN CanRunInline = FALSE;
 
     if (!Oip) {
         KsBugCheckEx(OIP_STACK_CORRUPTION, 0, 0, 0, 0);
@@ -95,50 +222,38 @@ ObioCompleteRequest(
         Oip->CurrentStackLocation++;
     }
 
-    // FIX COPY-BACK BUFFER
-    // Menggunakan RequestMajor yang sudah di-backup dari stack yang valid
-    if ((Oip->Flags & OIP_INPUT_OPERATION) && 
-        (Oip->Flags & OIP_BUFFERED_IO) && 
-        Oip->UserBuffer != NULL && 
-        Oip->AssociatedOip.SystemBuffer != NULL && 
-        Oip->StatusInformation.Information > 0)
+    if (Oip->RequestorThread == NULL &&
+        Oip->UserBuffer != NULL &&
+        (ULONG_PTR)Oip->UserBuffer < 0x80000000)
     {
-        if (RequestMajor == OIP_MJ_DEVICE_CONTROL || 
-            RequestMajor == OIP_MJ_FILE_SYSTEM_CONTROL)
-        {
-            RtlCopyMemory(
-                Oip->UserBuffer,
-                Oip->AssociatedOip.SystemBuffer,
-                Oip->StatusInformation.Information
-            );
-        }
+        DPRINT("[OIP-WARN] UserBuffer=%p tanpa RequestorThread! Major=0x%X Flags=0x%X Info=%u\n",
+            Oip->UserBuffer, RequestMajor, Oip->Flags, Oip->StatusInformation.Information);
     }
 
-    if (Oip->Flags & OIP_DEALLOCATE_ON_COMPLETION) {
-        if ((Oip->Flags & OIP_DEALLOCATE_BUFFER) &&
-            Oip->AssociatedOip.SystemBuffer != NULL) {
-            UlFreePoolWithTag(Oip->AssociatedOip.SystemBuffer, Oip->SystemTag);
-            Oip->AssociatedOip.SystemBuffer = NULL;
-        }
-
-        if (Oip->MdlAddress != NULL) {
-            ObioFreeMdl(Oip->MdlAddress);
-            Oip->MdlAddress = NULL;
-        }
+    if (Oip->RequestorThread == NULL ||
+        (Oip->RequestorThread == CurrentThread && KeGetCurrentIrql() < DISPATCH_LEVEL))
+    {
+        PVOID Arg1 = (PVOID)(ULONG_PTR)RequestMajor;
+        ObiopCompleteRequestApc(&Oip->Apc, NULL, NULL, &Arg1, NULL);
+        return;
     }
 
-    if (Oip->UserInfoBlock != NULL) {
-        *(Oip->UserInfoBlock) = Oip->StatusInformation;
-    }
+    KsInitializeApc(
+        &Oip->Apc,
+        (PKTHREAD)Oip->RequestorThread,
+        OriginalApcEnvironment,
+        ObiopCompleteRequestApc, // KernelRoutine (berjalan di APC_LEVEL)
+        ObiopRundownRequestApc,  // RundownRoutine (jika thread exit sebelum APC jalan)
+        NULL,                    // NormalRoutine = NULL => Special Kernel APC!
+        KernelMode,
+        NULL
+    );
 
-    if (Oip->UserEvent != NULL) {
-        PKEVENT Event = (PKEVENT)Oip->UserEvent;
-        KsSetEvent(Event, FALSE);
-    }
-
-    if (Oip->Flags & OIP_DEALLOCATE_ON_COMPLETION) {
-        ObioFreeOip(Oip);
-    }
+    KsInsertQueueApc(
+        &Oip->Apc,
+        (PVOID)(ULONG_PTR)RequestMajor, // SystemArgument1
+        NULL                            // SystemArgument2
+    );
 }
 
 VEASTATUS

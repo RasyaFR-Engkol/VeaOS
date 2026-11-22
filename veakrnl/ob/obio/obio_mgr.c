@@ -50,7 +50,7 @@ ObioCreateNewDevice(
             ANSI_STRING DevDirString;
 
             RtlInitAnsiString(&DevDirString, "/Device");
-            InitializeObjectAttributes(&ObjAttr, &DevDirString, OBJ_CASE_INSENSITIVE, NULL, NULL);
+            InitializeObjectAttributes(&ObjAttr, &DevDirString, OBJ_CASE_INSENSITIVE | OBJ_PERMANENT, NULL, NULL);
 
             Status = ObOpenObjectByName(
                 &ObjAttr,
@@ -67,7 +67,7 @@ ObioCreateNewDevice(
                 return Status;
             }
 
-            InitializeObjectAttributes(&Attr, &NameAnsi, OBJ_CASE_INSENSITIVE, DeviceDirHandle, NULL);
+            InitializeObjectAttributes(&Attr, &NameAnsi, OBJ_CASE_INSENSITIVE | OBJ_PERMANENT, DeviceDirHandle, NULL);
         }
     }
 
@@ -1898,8 +1898,6 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
         return STATUS_INVALID_PARAMETER;
     }
 
-    DPRINT("BDI: starting boot-device lookup (loader block %p)\n", BlockBoot2);
-
     InitializeObjectAttributes(
         &Attributes,
         &BdiPath,
@@ -1943,7 +1941,6 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
 
     /* Get Device Identifier */
     DeviceIdentifier = &BlockBoot2->BootPartitionSignature;
-    DPRINT("BDI: boot identifier type=%u\n", DeviceIdentifier->Type);
 
     Status = ObioGetDeviceInterfaces(
         &VEA_GUID_DEVINTERFACE_DISK,
@@ -1967,7 +1964,6 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
 
         Link += LinkLength + 1;
         RtlInitAnsiString(&DiskString, Link - LinkLength - 1);
-        DPRINT("BDI: checking disk[%u] interface %s\n", DiskIndex, DiskString.Buffer);
         DiskIndex++;
 
         InitializeObjectAttributes(
@@ -1999,8 +1995,6 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
             continue;
         }
         ObReferenceObject(TopDeviceObject);
-        DPRINT("BDI: disk object=%p, top stack device=%p\n",
-               DiskObject, TopDeviceObject);
 
         {
             POIP Oip;
@@ -2032,8 +2026,6 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
 
             Status = ObioGoInterruptObject(TopDeviceObject, Oip);
             RequestPending = (Status == STATUS_PENDING);
-            DPRINT("BDI: disk-style IOCTL dispatch returned 0x%x (pending=%u)\n",
-                   Status, RequestPending);
             if (RequestPending)
             {
                 KsWaitForSingleObject(&Event);
@@ -2052,7 +2044,6 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
                        (ULONG)sizeof(DiskStyle));
                 goto NextDisk;
             }
-            DPRINT("BDI: disk-style IOCTL succeeded, style=%u\n", DiskStyle);
         }
 
         if (DiskStyle == DiskStyleMbr)
@@ -2097,8 +2088,6 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
 
             Status = ObioGoInterruptObject(TopDeviceObject, ReadOip);
             RequestPending = (Status == STATUS_PENDING);
-            DPRINT("BDI: MBR read dispatch returned 0x%x (pending=%u)\n",
-                   Status, RequestPending);
             if (RequestPending)
             {
                 KsWaitForSingleObject(&ReadEvent);
@@ -2133,9 +2122,6 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
                        DiskIndex - 1, DiskSignature, PartitionNumber);
                 goto NextDisk;
             }
-            DPRINT("BDI: disk[%u] MBR matches boot identifier "
-                   "(signature=0x%08x partition=%u)\n",
-                   DiskIndex - 1, DiskSignature, PartitionNumber);
 
             {
                 POIP DiskNumOip;
@@ -2172,9 +2158,7 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
 
                 Status = ObioGoInterruptObject(TopDeviceObject, DiskNumOip);
                 RequestPending = (Status == STATUS_PENDING);
-                DPRINT("BDI: harddisk-number IOCTL dispatch returned 0x%x "
-                       "(pending=%u)\n",
-                       Status, RequestPending);
+
                 if (RequestPending)
                 {
                     KsWaitForSingleObject(&Event);
@@ -2194,8 +2178,6 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
                            (ULONG)sizeof(HarddiskNumber));
                     goto NextDisk;
                 }
-                DPRINT("BDI: matched boot partition is Harddisk%u/Partition%u\n",
-                       HarddiskNumber, PartitionNumber);
 
                 Status = RtlStringCbPrintfA(
                     BufferHarddisk,
@@ -2210,7 +2192,6 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
                            Status);
                     goto NextDisk;
                 }
-                DPRINT("BDI: resolving partition device %s\n", BufferHarddisk);
 
                 RtlInitAnsiString(&PartitionString, BufferHarddisk);
 
@@ -2249,8 +2230,6 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
                     goto NextDisk;
                 }
 
-                DPRINT("BDI: creating /BDI/%s -> %s\n",
-                       BdiBufferSymlink, BufferHarddisk);
                 Status = ObCreateSymbolicLinkToObject(
                     DirectoryObject,
                     BdiBufferSymlink,
@@ -2266,8 +2245,6 @@ ObioCreateBdiSymlink(IN PBLOCK_BOOT_2 BlockBoot2)
                     DPRINT("BDI: boot-device symbolic link created successfully\n");
                     return STATUS_SUCCESS;
                 }
-                DPRINT("BDI: creating symbolic link /BDI/%s failed, status=0x%x\n",
-                       BdiBufferSymlink, Status);
             }
         }
         else if (DiskStyle == DiskStyleGpt)

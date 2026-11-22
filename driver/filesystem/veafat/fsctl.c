@@ -30,10 +30,13 @@ FatReadDiskSectors(
     KEVENT Event;
     VEASTATUS Status;
     ULONG ReadLength;
+    ULONG StartSector;
 
     // 1. Hitung total panjang byte yang dibaca
     ReadLength = SectorCount * BytesPerSector;
     ByteOffset.QuadPart = Lba * BytesPerSector;
+
+    StartSector = (ULONG)ByteOffset.QuadPart;
 
     // 2. Inisialisasi event lokal untuk menahan eksekusi jika async
     KsInitializeEvent(&Event, NotificationEvent, FALSE);
@@ -145,6 +148,61 @@ FatValidateVbr(IN PFAT32_VBR Vbr)
 
 VEASTATUS
 VEAPI
+FatpFlushFsInfo(
+    IN PFAT32_DEVICE_EXTENSION Vcb
+)
+{
+    FAT32_FSINFO FsInfo;
+    VEASTATUS Status;
+
+    if (!Vcb || Vcb->IsCdo || !Vcb->FsInfoDirty)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    if (Vcb->FSInfoSector == 0 || Vcb->FSInfoSector == 0xFFFF)
+    {
+        Vcb->FsInfoDirty = FALSE;
+        return STATUS_SUCCESS;
+    }
+
+    Status = FatReadDiskSectors(
+        Vcb->TargetDeviceObject,
+        Vcb->FSInfoSector,
+        1,
+        Vcb->BytesPerSector,
+        &FsInfo
+    );
+    if (!VEA_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    if (FsInfo.LeadSignature == 0x41615252 &&
+        FsInfo.StrucSignature == 0x61417272 &&
+        FsInfo.TrailSignature == 0xAA550000)
+    {
+        FsInfo.FreeClusterCount = Vcb->FreeClusterCount;
+        FsInfo.NextFreeCluster  = Vcb->NextFreeCluster;
+
+        Status = FatWriteDiskSectors(
+            Vcb->TargetDeviceObject,
+            Vcb->FSInfoSector,
+            1,
+            Vcb->BytesPerSector,
+            &FsInfo
+        );
+        if (VEA_SUCCESS(Status))
+        {
+            Vcb->FsInfoDirty = FALSE;
+        }
+    }
+
+    return Status;
+}
+
+VEASTATUS
+VEAPI
 FatMjFsCtl(
     IN PDEVICE_OBJECT DeviceObject,
     IN POIP Oip,
@@ -191,6 +249,8 @@ FatMjFsCtl(
         OIP_INFORMATION IoStatusBlock;
         VEASTATUS Status;
 
+        RtlZeroMemory(&DiskGeometry, sizeof(DISK_GEOMETRY));
+        RtlZeroMemory(&IoStatusBlock, sizeof(OIP_INFORMATION));
         KsInitializeEvent(&IoctlEvent, NotificationEvent, FALSE);
 
         IoctlOip = ObioBuildDeviceIoControlRequest(
@@ -225,6 +285,11 @@ FatMjFsCtl(
         }
 
         BytesPerSector = DiskGeometry.BytesPerSector;
+        if (BytesPerSector == 0 || BytesPerSector > 4096 || (BytesPerSector & (BytesPerSector - 1)) != 0)
+        {
+            DPRINT("FAT32: Invalid BytesPerSector (%u), fallback to 512\n", BytesPerSector);
+            BytesPerSector = 512;
+        }
 
         Status = FatReadDiskSectors(TargetDevice, 0, 1, BytesPerSector, &Vbr);
         if (!VEA_SUCCESS(Status))
@@ -309,6 +374,8 @@ FatMjFsCtl(
 
             Vpb->DeviceObject = Vdo;
             Vpb->Flags |= VPB_MOUNTED;
+            Vdo->Flags &= ~DO_BUFFERED_IO;
+            Vdo->Flags |= DO_DIRECT_IO;
             Vdo->Flags &= ~DO_DEVICE_INITIALIZING;
 
             DPRINT("FAT32: Volume successfully mounted! DataLBA: %u, Clusters: %u\n", 
@@ -330,3 +397,5 @@ FatMjFsCtl(
         return STATUS_NOT_SUPPORTED;
     }
 }
+
+/* EOF */

@@ -30,6 +30,62 @@ FatpSetNextCluster(
     IN ULONG NextCluster
 );
 
+BOOLEAN
+FatpIsDirectoryEmpty(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    IN ULONG DirStartCluster
+)
+{
+    ULONG CurrentCluster = DirStartCluster;
+    PUCHAR SectorBuffer = UlAllocatePoolZero(NonPagedPool, Vcb->BytesPerSector, VEAFAT_POOL_TAG);
+    if (!SectorBuffer) return FALSE;
+
+    ULONG EntriesPerSector = Vcb->BytesPerSector / sizeof(FAT_DIR_ENTRY);
+
+    while (CurrentCluster >= 2 && !FAT32_IS_EOF(CurrentCluster))
+    {
+        ULONGLONG ClusterLba = FAT32_CLUSTER_TO_LBA(Vcb, CurrentCluster);
+
+        for (ULONG s = 0; s < Vcb->SectorsPerCluster; s++)
+        {
+            if (!VEA_SUCCESS(FatReadDiskSectors(Vcb->TargetDeviceObject, ClusterLba + s, 1, Vcb->BytesPerSector, SectorBuffer)))
+            {
+                UlFreePoolWithTag(SectorBuffer, VEAFAT_POOL_TAG);
+                return FALSE;
+            }
+
+            PFAT_DIR_ENTRY Entries = (PFAT_DIR_ENTRY)SectorBuffer;
+            for (ULONG i = 0; i < EntriesPerSector; i++)
+            {
+                if (Entries[i].FileName[0] == 0x00)
+                {
+                    UlFreePoolWithTag(SectorBuffer, VEAFAT_POOL_TAG);
+                    return TRUE;
+                }
+                if (Entries[i].FileName[0] == 0xE5 || Entries[i].Attributes == FAT_ATTR_LFN)
+                {
+                    continue;
+                }
+                if (Entries[i].FileName[0] == '.')
+                {
+                    continue; /* Abaikan '.' dan '..' */
+                }
+
+                UlFreePoolWithTag(SectorBuffer, VEAFAT_POOL_TAG);
+                return FALSE;
+            }
+        }
+
+        if (!VEA_SUCCESS(FatpGetNextCluster(Vcb, CurrentCluster, &CurrentCluster)))
+        {
+            break;
+        }
+    }
+
+    UlFreePoolWithTag(SectorBuffer, VEAFAT_POOL_TAG);
+    return TRUE;
+}
+
 VEASTATUS
 VEAPI
 FatpSearchDirectory(
@@ -45,7 +101,7 @@ FatpSearchDirectory(
     ULONG CurrentCluster = DirStartCluster;
     UCHAR FormattedSfn[11];
     PUCHAR SectorBuffer;
-    WCHAR LfnBuffer[256];
+    USHORT LfnBuffer[256];
     BOOLEAN HasLfn = FALSE;
     UCHAR LfnChecksum = 0;
 
@@ -84,6 +140,7 @@ FatpSearchDirectory(
 
             if (!VEA_SUCCESS(Status))
             {
+                UlFreePoolWithTag(SectorBuffer, 'FAT ');
                 return Status;
             }
 
@@ -95,23 +152,19 @@ FatpSearchDirectory(
                 /* Entry 0x00: Akhir dari daftar direktori */
                 if (Entry[i].FileName[0] == 0x00)
                 {
+                    UlFreePoolWithTag(SectorBuffer, 'FAT ');
                     return STATUS_OBJECT_NAME_NOT_FOUND;
                 }
 
                 /* Entry 0xE5: File terhapus, skip */
                 if (Entry[i].FileName[0] == 0xE5)
                 {
-                    continue;
-                }
-
-                if ((Entry[i].Attributes & FAT_ATTR_VOLUME_ID) && 
-                    (Entry[i].Attributes != FAT_ATTR_LFN))
-                {
+                    HasLfn = FALSE;
                     continue;
                 }
 
                 /* Skip LFN (Long File Name) Pseudo Entries */
-                if (Entry[i].Attributes == FAT_ATTR_LFN)
+                if ((Entry[i].Attributes & 0x3F) == FAT_ATTR_LFN)
                 {
                     PFAT_LFN_ENTRY LfnEntry = (PFAT_LFN_ENTRY)&Entry[i];
                     UCHAR Sequence = LfnEntry->SequenceNumber;
@@ -134,6 +187,12 @@ FatpSearchDirectory(
                             FatpExtractLfnChars(LfnEntry, &LfnBuffer[CharOffset]);
                         }
                     }
+                    continue;
+                }
+
+                if (Entry[i].Attributes & FAT_ATTR_VOLUME_ID)
+                {
+                    HasLfn = FALSE;
                     continue;
                 }
 
@@ -188,7 +247,9 @@ FatpAddDirectoryEntry(
     IN PANSI_STRING FileName,
     IN UCHAR Attributes,
     IN ULONG FirstCluster,
-    IN ULONG FileSize
+    IN ULONG FileSize,
+    OUT PULONG OutParentCluster OPTIONAL,
+    OUT PULONG OutEntryOffset OPTIONAL
 )
 //
 // Routine Description:
@@ -212,24 +273,39 @@ FatpAddDirectoryEntry(
         CurrentCluster = Vcb->RootDirStartCluster;
     }
 
-    // 1. Tentukan apakah butuh LFN & buat SFN-nya
     NeedsLfn = FatpNeedsLfn(FileName);
-    FatpGenerateSfn(FileName, Sfn);
+    if (NeedsLfn)
+    {
+        BOOLEAN FoundUnique = FALSE;
+        for (ULONG Tail = 1; Tail <= 9999; Tail++)
+        {
+            FatpGenerateSfnWithTail(FileName, Tail, Sfn);
+            if (!FatpSfnExistsInDirectory(Vcb, CurrentCluster, Sfn))
+            {
+                FoundUnique = TRUE;
+                break;
+            }
+        }
+        if (!FoundUnique)
+        {
+            return STATUS_OBJECT_NAME_COLLISION;
+        }
+    }
+    else
+    {
+        FatpFormatSfn(FileName, Sfn);
+    }
+
     Checksum = FatpCalculateSfnChecksum(Sfn);
 
     if (NeedsLfn)
     {
         LfnCount = FatpGenerateLfnEntries(FileName, Checksum, LfnBuffer);
-        TotalSlotsNeeded = LfnCount + 1; // LFN entries + 1 SFN entry
+        TotalSlotsNeeded = 1 + LfnCount;
     }
 
     SectorBuffer = (PUCHAR)UlAllocatePoolZero(NonPagedPool, Vcb->BytesPerSector, 'FAT ');
     if (!SectorBuffer) return STATUS_INSUFFICIENT_RESOURCES;
-
-    // 2. Cari slot berurutan sejumlah TotalSlotsNeeded di cluster direktori
-    ULONG ConsecutiveFound = 0;
-    ULONGLONG TargetSectorLba = 0;
-    ULONG TargetEntryIndex = 0;
 
     while (!FAT32_IS_EOF(CurrentCluster) && CurrentCluster >= 2)
     {
@@ -238,6 +314,9 @@ FatpAddDirectoryEntry(
         for (ULONG s = 0; s < Vcb->SectorsPerCluster; s++)
         {
             ULONGLONG SectorLba = ClusterLba + s;
+            ULONG ConsecutiveFound = 0; /* Wajib reset setiap pindah sektor */
+            ULONG TargetEntryIndex = 0;
+
             Status = FatReadDiskSectors(Vcb->TargetDeviceObject, SectorLba, 1, Vcb->BytesPerSector, SectorBuffer);
             if (!VEA_SUCCESS(Status))
             {
@@ -250,29 +329,42 @@ FatpAddDirectoryEntry(
 
             for (ULONG i = 0; i < EntriesPerSector; i++)
             {
-                // Entri kosong ditemukan (0x00 = unused end, 0xE5 = deleted)
                 if (Entries[i].FileName[0] == 0x00 || Entries[i].FileName[0] == 0xE5)
                 {
+                    if (ConsecutiveFound > 0 && ConsecutiveFound < TotalSlotsNeeded)
+                    {
+                        BOOLEAN ModifiedZero = FALSE;
+                        for (ULONG k = TargetEntryIndex; k < EntriesPerSector; k++)
+                        {
+                            if (Entries[k].FileName[0] == 0x00)
+                            {
+                                Entries[k].FileName[0] = 0xE5;
+                                ModifiedZero = TRUE;
+                            }
+                        }
+                        if (ModifiedZero)
+                        {
+                            FatWriteDiskSectors(Vcb->TargetDeviceObject, SectorLba, 1, Vcb->BytesPerSector, SectorBuffer);
+                        }
+                    }
+                    
                     if (ConsecutiveFound == 0)
                     {
-                        TargetSectorLba = SectorLba;
                         TargetEntryIndex = i;
                     }
 
                     ConsecutiveFound++;
 
-                    // Berhasil menemukan slot berurutan yang cukup dalam 1 sektor!
                     if (ConsecutiveFound == TotalSlotsNeeded)
                     {
-                        // 3. Write LFN Entries terlebih dahulu
                         for (ULONG l = 0; l < LfnCount; l++)
                         {
                             PFAT_LFN_ENTRY LfnSlot = (PFAT_LFN_ENTRY)&Entries[TargetEntryIndex + l];
                             RtlCopyMemory(LfnSlot, &LfnBuffer[l], sizeof(FAT_LFN_ENTRY));
                         }
 
-                        // 4. Write SFN Primary Entry di slot paling akhir
-                        PFAT_DIR_ENTRY SfnSlot = &Entries[TargetEntryIndex + LfnCount];
+                        ULONG SfnSlotIndex = TargetEntryIndex + LfnCount;
+                        PFAT_DIR_ENTRY SfnSlot = &Entries[SfnSlotIndex];
                         RtlZeroMemory(SfnSlot, sizeof(FAT_DIR_ENTRY));
                         RtlCopyMemory(SfnSlot->FileName, Sfn, 11);
                         SfnSlot->Attributes = Attributes;
@@ -280,8 +372,12 @@ FatpAddDirectoryEntry(
                         SfnSlot->FirstClusterHigh = (USHORT)((FirstCluster >> 16) & 0xFFFF);
                         SfnSlot->FileSize = FileSize;
 
-                        // Tulis balik sektor direktori ke disk
                         Status = FatWriteDiskSectors(Vcb->TargetDeviceObject, SectorLba, 1, Vcb->BytesPerSector, SectorBuffer);
+                        if (VEA_SUCCESS(Status))
+                        {
+                            if (OutParentCluster) *OutParentCluster = CurrentCluster;
+                            if (OutEntryOffset)   *OutEntryOffset   = (s * Vcb->BytesPerSector) + (SfnSlotIndex * sizeof(FAT_DIR_ENTRY));
+                        }
 
                         UlFreePoolWithTag(SectorBuffer, 'FAT ');
                         return Status;
@@ -289,13 +385,11 @@ FatpAddDirectoryEntry(
                 }
                 else
                 {
-                    // Reset pencarian slot berurutan jika terputus entri terpakai
                     ConsecutiveFound = 0;
                 }
             }
         }
 
-        // Jika dalam cluster ini tidak muat slot berurutan, alokasikan cluster direktori baru
         ULONG NextCluster;
         Status = FatpGetNextCluster(Vcb, CurrentCluster, &NextCluster);
         if (!VEA_SUCCESS(Status) || FAT32_IS_EOF(NextCluster))
@@ -307,13 +401,11 @@ FatpAddDirectoryEntry(
             FatpSetNextCluster(Vcb, CurrentCluster, NewDirCluster);
             CurrentCluster = NewDirCluster;
 
-            // Zero-out sektor cluster baru agar siap diisi slot 0x00
             RtlZeroMemory(SectorBuffer, Vcb->BytesPerSector);
             for (ULONG s = 0; s < Vcb->SectorsPerCluster; s++)
             {
                 FatWriteDiskSectors(Vcb->TargetDeviceObject, FAT32_CLUSTER_TO_LBA(Vcb, NewDirCluster) + s, 1, Vcb->BytesPerSector, SectorBuffer);
             }
-            ConsecutiveFound = 0;
         }
         else
         {
@@ -323,6 +415,44 @@ FatpAddDirectoryEntry(
 
     UlFreePoolWithTag(SectorBuffer, 'FAT ');
     return STATUS_DISK_FULL;
+}
+
+VEASTATUS
+VEAPI
+FatpUpdateDirectoryEntry(
+    IN PFAT32_DEVICE_EXTENSION Vcb,
+    IN PVEAFAT_FCB Fcb
+)
+{
+    if (!Fcb || Fcb->IsVolumeFcb || Fcb->ParentDirCluster < 2)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ULONG SectorIndex = Fcb->DirEntryByteOffset / Vcb->BytesPerSector;
+    ULONG OffsetInSector = Fcb->DirEntryByteOffset % Vcb->BytesPerSector;
+    ULONGLONG SectorLba = FAT32_CLUSTER_TO_LBA(Vcb, Fcb->ParentDirCluster) + SectorIndex;
+
+    PUCHAR SectorBuffer = UlAllocatePoolZero(NonPagedPool, Vcb->BytesPerSector, VEAFAT_POOL_TAG);
+    if (!SectorBuffer)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    VEASTATUS Status = FatReadDiskSectors(Vcb->TargetDeviceObject, SectorLba, 1, Vcb->BytesPerSector, SectorBuffer);
+    if (VEA_SUCCESS(Status))
+    {
+        PFAT_DIR_ENTRY Entry = (PFAT_DIR_ENTRY)(SectorBuffer + OffsetInSector);
+        Entry->Attributes       = Fcb->Attributes;
+        Entry->FirstClusterLow  = (USHORT)(Fcb->FirstCluster & 0xFFFF);
+        Entry->FirstClusterHigh = (USHORT)((Fcb->FirstCluster >> 16) & 0xFFFF);
+        Entry->FileSize         = Fcb->FileSize;
+
+        Status = FatWriteDiskSectors(Vcb->TargetDeviceObject, SectorLba, 1, Vcb->BytesPerSector, SectorBuffer);
+    }
+
+    UlFreePoolWithTag(SectorBuffer, VEAFAT_POOL_TAG);
+    return Status;
 }
 
 /* EOF */

@@ -11,6 +11,34 @@
 
 PMM_VAD VEAPI MmpFindVadByVpn(PRTL_BALANCED_NODE Node, ULONG Vpn);
 extern KSPIN_LOCK MmVmmLock;
+KSPIN_LOCK MmCowScratchLock;
+
+#define MM_PF_READ_AHEAD_SHIFT 16
+#define MM_PF_READ_AHEAD_SIZE  (1UL << MM_PF_READ_AHEAD_SHIFT)
+#define MM_PF_READ_AHEAD_ENTRIES 8
+
+typedef struct _MM_PF_READ_AHEAD_ENTRY
+{
+    PFILE_OBJECT FileObject;
+    ULONGLONG FileOffset;
+    PVOID Buffer;
+    ULONG ValidBytes;
+} MM_PF_READ_AHEAD_ENTRY, *PMM_PF_READ_AHEAD_ENTRY;
+
+static MM_PF_READ_AHEAD_ENTRY MmPfReadAhead[MM_PF_READ_AHEAD_ENTRIES];
+static ULONG MmPfReadAheadNext;
+KSPIN_LOCK MmPfReadAheadLock;
+static BOOLEAN MmPfReadAheadInitialized;
+
+VOID
+VEAPI
+MmpInitializePageFaultReadAhead(VOID)
+{
+    RtlZeroMemory(MmPfReadAhead, sizeof(MmPfReadAhead));
+    MmPfReadAheadNext = 0;
+    MmPfReadAheadInitialized = TRUE;
+    KsInitializeSpinlock(&MmPfReadAheadLock);
+}
 
 static
 VOID
@@ -20,8 +48,11 @@ MmpCopyPhysicalPage(
     ULONG SrcPhys
 )
 {
-    PAGE_ENTRY *SrcPte = MM_GET_PTE(MmScratchSrcVa);
-    PAGE_ENTRY *DstPte = MM_GET_PTE(MmScratchDstVa);
+    PMMPTE SrcPte = MiAddressToPte(MmScratchSrcVa);
+    PMMPTE DstPte = MiAddressToPte(MmScratchDstVa);
+    KIRQL  OldIrql;
+
+    KsAcquireSpinLock(&MmCowScratchLock, &OldIrql);
 
     MMI_WRITE_PTE_VALID(SrcPte, SrcPhys >> 12);
     MMI_WRITE_PTE_VALID(DstPte, DstPhys >> 12);
@@ -30,10 +61,12 @@ MmpCopyPhysicalPage(
 
     RtlCopyMemory((PVOID)MmScratchDstVa, (PVOID)MmScratchSrcVa, PAGE_SIZE);
 
-    MI_WRITE_INVALID_PTE(SrcPte);
-    MI_WRITE_INVALID_PTE(DstPte);
+    MI_ERASE_PTE(SrcPte);
+    MI_ERASE_PTE(DstPte);
     MMI_INVALIDATE_TLB(MmScratchSrcVa);
     MMI_INVALIDATE_TLB(MmScratchDstVa);
+
+    KsReleaseSpinLock(&MmCowScratchLock, OldIrql);
 }
 
 BOOLEAN
@@ -43,37 +76,55 @@ MmFaultCopyOnWrite(
     BOOLEAN WriteFault
 )
 {
-    PAGE_ENTRY *pte = MM_GET_PTE(FaultingAddress);
+    PMMPTE Pte;
+    MMPTE  TempPte;
+    ULONG  OldPfn, OldPhys;
 
-    if (!pte) return FALSE;
+    if (!WriteFault) return FALSE;
 
-    if (WriteFault && pte->bits.present && !pte->bits.rw && pte->bits.COW) 
+    /* PDE harus ada dulu, kalau tidak membaca PTE lewat recursive mapping fault lagi */
+    if (!MiAddressToPde(FaultingAddress)->Hard.Valid) return FALSE;
+
+    Pte = MiAddressToPte(FaultingAddress);
+
+    /* Bit 9 (CopyOnWrite) baru bermakna kalau PTE valid, makanya Valid dicek dulu */
+    if (!Pte->Hard.Valid || Pte->Hard.Write || !Pte->Hard.CopyOnWrite)
     {
-        ULONG OldPhys = pte->bits.frame << 12;
-        ULONG Index = OldPhys / PAGE_SIZE;
+        return FALSE; /* Access violation sejati */
+    }
 
-        if (MmPipDatabase[Index].ShareCount == 1) 
-        {
-            pte->bits.rw = 1;
-            pte->bits.COW = 0;
-        } 
-        else
-        {
-            ULONG NewPhys = MmAllocatePhysicalPage();
-            if (NewPhys == 0) return FALSE;
+    OldPfn  = Pte->Hard.PageFrameNumber;
+    OldPhys = OldPfn << 12;
+    TempPte = *Pte;           /* pertahankan Owner, cache bits, Accessed/Dirty */
 
-            MmpCopyPhysicalPage(NewPhys, OldPhys);
-            MmFreePhysicalPage(OldPhys); 
-            pte->bits.frame = NewPhys >> 12;
-            pte->bits.rw = 1;
-            pte->bits.COW = 0;
-        }
+    if (MmPipDatabase[OldPfn].ShareCount == 1)
+    {
+        /* Satu-satunya pemilik: cukup jadikan writable */
+        TempPte.Hard.Write = 1;
+        TempPte.Hard.CopyOnWrite = 0;
 
+        MI_WRITE_VALID_PTE(Pte, TempPte);
         MMI_INVALIDATE_TLB(FaultingAddress);
         return TRUE;
     }
+    else
+    {
+        ULONG NewPhys = MmAllocatePhysicalPage();
+        if (NewPhys == 0) return FALSE;
 
-    return FALSE; // Access Violation sejati (Write ke Read-Only tanpa flag CoW)
+        MmpCopyPhysicalPage(NewPhys, OldPhys);
+
+        TempPte.Hard.PageFrameNumber = NewPhys >> 12;
+        TempPte.Hard.Write = 1;
+        TempPte.Hard.CopyOnWrite = 0;
+
+        MI_WRITE_VALID_PTE(Pte, TempPte);
+        MMI_INVALIDATE_TLB(FaultingAddress);
+
+        /* Lepas halaman lama setelah mapping lama dibatalkan */
+        MmFreePhysicalPage(OldPhys);
+        return TRUE;
+    }
 }
 
 static
@@ -93,11 +144,29 @@ MmpReadPageFromFile(
     OIP_INFORMATION IoStatus;
     LARGE_INTEGER   Offset;
     VEASTATUS       Status;
+    PVOID           IoBuffer = TargetVa;
+    PVOID           BounceBuffer = NULL;
 
     if (!FileObject || !FileObject->Vpb || !FileObject->Vpb->DeviceObject)
         return STATUS_INVALID_DEVICE_REQUEST;
 
-    DeviceObject = FileObject->Vpb->DeviceObject;      /* pakai satu device saja, untuk build dan call */
+    if (ByteCount == 0)
+        return STATUS_SUCCESS;
+
+    RtlZeroMemory(TargetVa, ByteCount);
+
+    /* Jangan pernah kirim alamat user-space ke storage I/O (rawan beda CR3 saat completion) */
+    if (MI_IS_USER_ADDRESS((ULONG_PTR)TargetVa))
+    {
+        BounceBuffer = UlAllocatePoolWithTag(NonPagedPool, ByteCount, 'pfRb');
+        if (!BounceBuffer)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        RtlZeroMemory(BounceBuffer, ByteCount);
+        IoBuffer = BounceBuffer;
+    }
+
+    DeviceObject = FileObject->Vpb->DeviceObject;
 
     KsInitializeEvent(&Event, NotificationEvent, FALSE);
     RtlZeroMemory(&IoStatus, sizeof(IoStatus));
@@ -106,16 +175,24 @@ MmpReadPageFromFile(
     Oip = ObioBuildSynchronusFsdRequest(
               OIP_MJ_READ,
               DeviceObject,
-              TargetVa,            /* <- buffer tujuan */
+              IoBuffer,
               ByteCount,
               &Offset,
-              &Event,              /* disinyalkan saat completion */
-              &IoStatus);          /* Status + Information diisi saat completion */
+              &Event,
+              &IoStatus);
     if (!Oip)
+    {
+        if (BounceBuffer) UlFreePool(BounceBuffer);
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
-    /* FileObject dan flag paging dipasang di stack location berikutnya */
-    Stack = ObioGetNextOipStackLocation(Oip);          /* nama sesuai desainmu */
+    Oip->RequestorThread = (PETHREAD)PtGetCurrentThread();
+    if (Oip->RequestorThread)
+    {
+        ObReferenceObject(Oip->RequestorThread);
+    }
+
+    Stack = ObioGetNextOipStackLocation(Oip);
     Stack->FileObject = FileObject;
     Oip->Flags |= (OIP_PAGING_IO | OIP_NOCACHE);
 
@@ -127,21 +204,210 @@ MmpReadPageFromFile(
         Status = IoStatus.Status;
     }
 
-    /* Jangan sentuh Oip lagi: sudah di-free saat completion */
-
+    /* Sekarang sudah bangun kembali di konteks CR3 proses yang fault */
     if (Status == STATUS_END_OF_FILE)
     {
-        RtlZeroMemory(TargetVa, ByteCount);            /* page di luar ukuran file */
+        ULONG Valid = (ULONG)IoStatus.Information;
+        if (Valid > ByteCount) Valid = ByteCount;
+
+        if (BounceBuffer && Valid > 0)
+            RtlCopyMemory(TargetVa, BounceBuffer, Valid);
+
+        if (Valid < ByteCount)
+            RtlZeroMemory((PUCHAR)TargetVa + Valid, ByteCount - Valid);
+
+        if (BounceBuffer) UlFreePool(BounceBuffer);
         return STATUS_SUCCESS;
     }
 
-    if (VEA_SUCCESS(Status) && IoStatus.Information < ByteCount)
+    if (VEA_SUCCESS(Status) && BounceBuffer)
     {
-        RtlZeroMemory((PUCHAR)TargetVa + IoStatus.Information,
-                      ByteCount - IoStatus.Information);
+        RtlCopyMemory(TargetVa, BounceBuffer, ByteCount);
+    }
+
+    if (BounceBuffer)
+    {
+        UlFreePool(BounceBuffer);
     }
 
     return Status;
+}
+
+static
+VEASTATUS
+VEAPI
+MmpReadAheadPageFromFile(
+    IN PFILE_OBJECT FileObject,
+    IN ULONGLONG FileOffset,
+    IN PVOID TargetVa,
+    IN ULONG ByteCount
+)
+{
+    ULONGLONG ClusterOffset;
+    ULONG PageOffset;
+    ULONG EntryIndex;
+    PMM_PF_READ_AHEAD_ENTRY Entry = NULL;
+    KIRQL OldIrql;
+
+    if (!MmPfReadAheadInitialized)
+    {
+        RtlZeroMemory(MmPfReadAhead, sizeof(MmPfReadAhead));
+        MmPfReadAheadInitialized = TRUE;
+    }
+
+    ClusterOffset = FileOffset & ~((ULONGLONG)MM_PF_READ_AHEAD_SIZE - 1);
+    PageOffset = (ULONG)(FileOffset - ClusterOffset);
+    if (PageOffset + ByteCount > MM_PF_READ_AHEAD_SIZE)
+        return MmpReadPageFromFile(FileObject, FileOffset, TargetVa, ByteCount);
+
+    KsAcquireSpinLock(&MmPfReadAheadLock, &OldIrql);
+    for (EntryIndex = 0; EntryIndex < MM_PF_READ_AHEAD_ENTRIES; EntryIndex++)
+    {
+        PMM_PF_READ_AHEAD_ENTRY Candidate = &MmPfReadAhead[EntryIndex];
+        if (Candidate->Buffer &&
+            Candidate->FileObject == FileObject &&
+            Candidate->FileOffset == ClusterOffset)
+        {
+            Entry = Candidate;
+            break;
+        }
+    }
+
+    if (Entry)
+    {
+        if (PageOffset < Entry->ValidBytes)
+        {
+            ULONG Copied = min(ByteCount, Entry->ValidBytes - PageOffset);
+            RtlCopyMemory(TargetVa, (PUCHAR)Entry->Buffer + PageOffset, Copied);
+            if (Copied < ByteCount)
+                RtlZeroMemory((PUCHAR)TargetVa + Copied, ByteCount - Copied);
+            KsReleaseSpinLock(&MmPfReadAheadLock, OldIrql);
+            return STATUS_SUCCESS;
+        }
+        KsReleaseSpinLock(&MmPfReadAheadLock, OldIrql);
+        RtlZeroMemory(TargetVa, ByteCount);
+        return STATUS_SUCCESS;
+    }
+    KsReleaseSpinLock(&MmPfReadAheadLock, OldIrql);
+
+    PVOID ClusterBuffer = UlAllocatePoolWithTag(
+        NonPagedPool,
+        MM_PF_READ_AHEAD_SIZE,
+        'pfRa'
+    );
+    if (!ClusterBuffer)
+        return MmpReadPageFromFile(FileObject, FileOffset, TargetVa, ByteCount);
+
+    RtlZeroMemory(ClusterBuffer, MM_PF_READ_AHEAD_SIZE);
+    VEASTATUS ReadStatus = MmpReadPageFromFile(
+        FileObject,
+        ClusterOffset,
+        ClusterBuffer,
+        MM_PF_READ_AHEAD_SIZE
+    );
+    if (!VEA_SUCCESS(ReadStatus))
+    {
+        UlFreePool(ClusterBuffer);
+        RtlZeroMemory(TargetVa, ByteCount);
+        return ReadStatus;
+    }
+
+    KsAcquireSpinLock(&MmPfReadAheadLock, &OldIrql);
+    ULONG ReplaceIndex = MmPfReadAheadNext;
+    MmPfReadAheadNext = (MmPfReadAheadNext + 1) % MM_PF_READ_AHEAD_ENTRIES;
+    if (MmPfReadAhead[ReplaceIndex].Buffer)
+        UlFreePool(MmPfReadAhead[ReplaceIndex].Buffer);
+
+    MmPfReadAhead[ReplaceIndex].FileObject = FileObject;
+    MmPfReadAhead[ReplaceIndex].FileOffset = ClusterOffset;
+    MmPfReadAhead[ReplaceIndex].Buffer = ClusterBuffer;
+    MmPfReadAhead[ReplaceIndex].ValidBytes = MM_PF_READ_AHEAD_SIZE;
+    if (PageOffset < MM_PF_READ_AHEAD_SIZE)
+    {
+        ULONG Copied = min(ByteCount, MM_PF_READ_AHEAD_SIZE - PageOffset);
+        RtlCopyMemory(TargetVa, (PUCHAR)ClusterBuffer + PageOffset, Copied);
+        if (Copied < ByteCount)
+            RtlZeroMemory((PUCHAR)TargetVa + Copied, ByteCount - Copied);
+    }
+    else
+    {
+        RtlZeroMemory(TargetVa, ByteCount);
+    }
+    KsReleaseSpinLock(&MmPfReadAheadLock, OldIrql);
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+VEAPI
+MmpPrefaultClusterPages(
+    IN ULONG BaseFaultVa,
+    IN ULONG StartingVpn,
+    IN ULONG EndingVpn,
+    IN ULONGLONG ViewOffset,
+    IN PFILE_OBJECT FileObject,
+    IN BOOLEAN Owner,
+    IN BOOLEAN Writable,
+    IN ULONG EffectiveProtect
+)
+{
+    ULONG BaseVpn = BaseFaultVa >> PAGE_SHIFT;
+    ULONGLONG BaseFileOffset = ViewOffset + ((ULONGLONG)(BaseVpn - StartingVpn) * PAGE_SIZE);
+    ULONGLONG ClusterEndOffset = (BaseFileOffset & ~((ULONGLONG)MM_PF_READ_AHEAD_SIZE - 1)) +
+                                 MM_PF_READ_AHEAD_SIZE;
+
+    /* Prefault sisa halaman yang masih berada di dalam chunk 64 KB yang sama
+       dan masih di dalam 1 Page Table yang sama (tidak melewati batas 1024 PTE / 4 MB) */
+    for (ULONG Step = 1; Step < (MM_PF_READ_AHEAD_SIZE / PAGE_SIZE); Step++)
+    {
+        ULONG NextVa  = BaseFaultVa + (Step * PAGE_SIZE);
+        ULONG NextVpn = BaseVpn + Step;
+
+        /* Stop jika keluar VAD atau pindah Page Table (PDE baru) */
+        if (NextVpn >= EndingVpn || ((NextVpn & 0x3FF) == 0))
+            break;
+
+        ULONGLONG NextFileOffset = ViewOffset + ((ULONGLONG)(NextVpn - StartingVpn) * PAGE_SIZE);
+        if (NextFileOffset >= ClusterEndOffset)
+            break;
+
+        PMMPTE NextPte = MiAddressToPte(NextVa);
+        if (NextPte->Hard.Valid)
+            break; /* Sudah ter-map, hentikan cluster */
+
+        ULONG ExtraPhys = MmAllocatePhysicalPage();
+        if (ExtraPhys == 0)
+            break;
+
+        MMPTE TempPte;
+        MI_MAKE_VALID_PTE(TempPte, ExtraPhys >> 12, 0, 1);
+        MI_WRITE_VALID_PTE(NextPte, TempPte);
+        MMI_INVALIDATE_TLB(NextVa);
+
+        /* Ini 100% cache hit di MmPfReadAhead (0 disk I/O!) */
+        VEASTATUS Status = MmpReadAheadPageFromFile(
+            FileObject,
+            NextFileOffset,
+            (PVOID)NextVa,
+            PAGE_SIZE
+        );
+        if (!VEA_SUCCESS(Status))
+        {
+            MI_ERASE_PTE(NextPte);
+            MMI_INVALIDATE_TLB(NextVa);
+            MmFreePhysicalPage(ExtraPhys);
+            break;
+        }
+
+        MI_MAKE_VALID_PTE(TempPte, ExtraPhys >> 12, Owner, Writable ? 1 : 0);
+        if (EffectiveProtect & MM_NOCACHE)
+        {
+            TempPte.Hard.CacheDisable = 1;
+            TempPte.Hard.WriteThrough = 1;
+        }
+        MI_WRITE_VALID_PTE(NextPte, TempPte);
+        MMI_INVALIDATE_TLB(NextVa);
+    }
 }
 
 BOOLEAN
@@ -152,81 +418,254 @@ MmFaultDemandPaging(
 )
 {
     KIRQL OldIrql;
-    ULONG VpnTarget = FaultingAddress >> 12;
+    ULONG VpnTarget = FaultingAddress >> PAGE_SHIFT;
     ULONG_PTR AlignedFaultVa = PAGE_ALIGN_DOWN(FaultingAddress);
+    PEPROCESS Process = (PEPROCESS)PtGetCurrentProcess();
+    PKSPIN_LOCK Lock = NULL;
+    PRTL_AVL_TREE Tree = NULL;
+    PMM_VAD Vad = NULL;
+    ULONG StartingVpn = 0, Protect = 0, EndingVpn = 0;
+    ULONGLONG ViewOffset = 0;
+    PCONTROL_AREA ControlArea = NULL;
+    PFILE_OBJECT FileObject;
+    PMMPTE Pte;
+    MMPTE  TempPte;
+    ULONG  PhysPage;
+    BOOLEAN Writable, IsCopyOnWrite, Owner, HandledAsProgramHdr = FALSE;
 
-    KsAcquireSpinLock(&MmVmmLock, &OldIrql);
-    PMM_VAD Vad = MmpFindVadByVpn(MmKernelVadTree.Root, VpnTarget);
-    KsReleaseSpinLock(&MmVmmLock, OldIrql);
+    /* 1. Dapatkan AVL Tree yang tepat (Kernel atau User Process) */
+    Tree = MmpGetVadTree(Process, VpnTarget, &Lock);
+    if (!Tree || !Lock) return FALSE;
 
-    if (!Vad)
+    KsAcquireSpinLock(Lock, &OldIrql);
+    Vad = MmpFindVadByVpn(Tree->Root, VpnTarget);
+    if (Vad)
     {
-        return FALSE; 
+        StartingVpn = Vad->StartingVpn;
+        EndingVpn   = Vad->EndingVpn;
+        Protect     = Vad->u.VadFlags.Protection;
+        ViewOffset  = (ULONGLONG)Vad->u2.VadFlags2.FileOffset << PAGE_SHIFT;
+        ControlArea = Vad->ControlArea;
+    }
+    KsReleaseSpinLock(Lock, OldIrql);
+
+    if (!Vad) return FALSE;
+
+    if (Protect == 0) Protect = MM_READWRITE;
+
+    ULONG EffectiveProtect = Protect;
+
+    /* Jika ELF Image (PT_LOAD), pakai proteksi per-segmen (.text RX vs .data/.bss RW) */
+    if (ControlArea &&
+        ControlArea->u.Flags.Image &&
+        ControlArea->Segment &&
+        ControlArea->Segment->u2.ImageInformation)
+    {
+        PMM_IMAGE_SECTION_OBJECT ImageSection = CONTAINING_RECORD(
+            ControlArea->Segment->u2.ImageInformation,
+            MM_IMAGE_SECTION_OBJECT,
+            ImageInformation
+        );
+
+        if (ImageSection->SegFlags & MM_IMAGE_ELF_PROGRAM_HDR)
+        {
+            ULONG_PTR PageRva    = AlignedFaultVa - ((ULONG_PTR)StartingVpn << PAGE_SHIFT);
+            ULONG_PTR PageEndRva = PageRva + PAGE_SIZE;
+            ULONG MergedProt     = MM_ZERO_ACCESS;
+
+            for (ULONG i = 0; i < ImageSection->NrSegments; i++)
+            {
+                PMM_SECTION_SEGMENT Seg = &ImageSection->Segments[i];
+                ULONG_PTR SegStartRva   = (ULONG_PTR)Seg->Image.VirtualAddress;
+                ULONG_PTR SegEndRva     = SegStartRva + (ULONG_PTR)Seg->Length.QuadPart;
+
+                if (PageRva < SegEndRva && PageEndRva > SegStartRva)
+                {
+                    /* Jika halaman masuk ke segmen writable (.data/.bss), izinkan write */
+                    if (Seg->Protection == MM_READWRITE ||
+                        Seg->Protection == MM_WRITECOPY ||
+                        Seg->Protection == MM_EXECUTE_READWRITE ||
+                        Seg->Protection == MM_EXECUTE_WRITECOPY)
+                    {
+                        MergedProt = Seg->Protection;
+                        break;
+                    }
+                    MergedProt = Seg->Protection;
+                }
+            }
+
+            if (MergedProt != MM_ZERO_ACCESS)
+            {
+                ULONG ConvertedProt = MiMakeProtectionMask(MergedProt);
+                if (ConvertedProt != MM_INVALID_PROTECTION)
+                {
+                    EffectiveProtect = ConvertedProt;
+                }
+            }
+        }
     }
 
-    // Pastikan Hardware Page Table (PDE) sudah valid
-    if (!MmpEnsurePageTable(FaultingAddress))
+    /* 2. Cek hak akses menggunakan Internal MM Mask */
+    ULONG AccessProtect = EffectiveProtect & MM_PROTECT_ACCESS;
+
+    if ((EffectiveProtect & MM_GUARDPAGE) ||
+        AccessProtect == MM_ZERO_ACCESS ||
+        EffectiveProtect == MM_NOACCESS)
     {
         return FALSE;
     }
 
-    PAGE_ENTRY *pte = MM_GET_PTE(FaultingAddress);
-    if (!pte)
+    IsCopyOnWrite = (AccessProtect == MM_WRITECOPY ||
+                     AccessProtect == MM_EXECUTE_WRITECOPY);
+
+    Writable = (AccessProtect == MM_READWRITE ||
+                AccessProtect == MM_EXECUTE_READWRITE ||
+                IsCopyOnWrite);
+
+    if (WriteFault && !Writable) return FALSE;
+
+    /* 3. Pastikan Page Table ada, lalu cek apakah PTE sudah terisi */
+    if (!MmpEnsurePageTable(FaultingAddress)) return FALSE;
+
+    Pte = MiAddressToPte(FaultingAddress);
+
+    if (Pte->Hard.Valid)
     {
-        return FALSE;
+        return (!WriteFault || Pte->Hard.Write) ? TRUE : FALSE;
     }
 
-    // Alokasikan 1 Frame Physical Page baru
-    ULONG PhysPage = MmAllocatePhysicalPage();
-    if (PhysPage == 0)
-    {
-        return FALSE; // Out of Physical Memory
-    }
+    /* 4. Alokasi physical frame */
+    PhysPage = MmAllocatePhysicalPage();
+    if (PhysPage == 0) return FALSE;
 
-    // Tulis ke PTE & tandai RW/Present
-    MMI_WRITE_PTE_VALID(pte, PhysPage >> 12);
-    
-    // Set proteksi awal (RW atau Read-Only)
-    if (WriteFault || (Vad->Protection & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
-    {
-        pte->bits.rw = 1;
-    }
+    Owner = MI_IS_USER_ADDRESS(FaultingAddress) ? 1 : 0;
 
-    // Flush TLB CPU agar RAM fisik baru bisa langsung diakses lewat Virtual Address
+    /* Fase 1: Map sementara supervisor-only + RW supaya kernel bisa mengisi halaman */
+    MI_MAKE_VALID_PTE(TempPte, PhysPage >> 12, 0, 1);
+    MI_WRITE_VALID_PTE(Pte, TempPte);
     MMI_INVALIDATE_TLB(FaultingAddress);
 
-    // CHECK SECTION: ILE-BACKED DEMAND PAGING
-    PCONTROL_AREA ControlArea = Vad->ControlArea;
-    PFILE_OBJECT FileObject = ControlArea ? ControlArea->FilePointer : NULL;
+    RtlZeroMemory((PVOID)AlignedFaultVa, PAGE_SIZE);
+
+    FileObject = ControlArea ? ControlArea->FilePointer : NULL;
 
     if (FileObject != NULL)
     {
-        /* 1. FILE-BACKED DEMAND PAGING */
-        ULONGLONG FileOffset = Vad->ViewOffset + 
-            ((ULONGLONG)(VpnTarget - Vad->StartingVpn) * PAGE_SIZE);
+        BOOLEAN HandledAsProgramHdr = FALSE;
 
-        VEASTATUS ReadStatus = MmpReadPageFromFile(
-            FileObject,
-            FileOffset,
-            (PVOID)AlignedFaultVa,
-            PAGE_SIZE
-        );
-
-        if (!VEA_SUCCESS(ReadStatus))
+        if (ControlArea->u.Flags.Image &&
+            ControlArea->Segment &&
+            ControlArea->Segment->u2.ImageInformation)
         {
-            DPRINT("[#PF ERROR] Failed to read page from disk at offset 0x%x (Status: 0x%X)\n",
+            PMM_IMAGE_SECTION_OBJECT ImageSection = CONTAINING_RECORD(
+                ControlArea->Segment->u2.ImageInformation,
+                MM_IMAGE_SECTION_OBJECT,
+                ImageInformation
+            );
+
+            if (ImageSection->SegFlags & MM_IMAGE_ELF_PROGRAM_HDR)
+            {
+                HandledAsProgramHdr = TRUE;
+                ULONG_PTR PageRva    = AlignedFaultVa - ((ULONG_PTR)StartingVpn << PAGE_SHIFT);
+                ULONG_PTR PageEndRva = PageRva + PAGE_SIZE;
+
+                for (ULONG i = 0; i < ImageSection->NrSegments; i++)
+                {
+                    PMM_SECTION_SEGMENT Seg = &ImageSection->Segments[i];
+                    ULONG_PTR SegStartRva   = (ULONG_PTR)Seg->Image.VirtualAddress;
+                    ULONG_PTR SegFileEndRva = SegStartRva + (ULONG_PTR)Seg->RawLength.QuadPart;
+
+                    ULONG_PTR OverlapStart = (PageRva > SegStartRva) ? PageRva : SegStartRva;
+                    ULONG_PTR OverlapEnd   = (PageEndRva < SegFileEndRva) ? PageEndRva : SegFileEndRva;
+
+                    if (OverlapStart < OverlapEnd)
+                    {
+                        ULONG BytesToRead = (ULONG)(OverlapEnd - OverlapStart);
+                        ULONG PageOffset  = (ULONG)(OverlapStart - PageRva);
+                        ULONGLONG FileOff = (ULONGLONG)Seg->Image.FileOffset +
+                                            (ULONGLONG)(OverlapStart - SegStartRva);
+
+                        VEASTATUS ReadStatus = MmpReadAheadPageFromFile(
+                            FileObject,
+                            FileOff,
+                            (PUCHAR)AlignedFaultVa + PageOffset,
+                            BytesToRead
+                        );
+
+                        if (!VEA_SUCCESS(ReadStatus))
+                        {
+                            DPRINT("[#PF ERROR] Image segment read failed at offset 0x%x (Status: 0x%X)\n",
+                                (ULONG)FileOff, ReadStatus);
+
+                            MI_ERASE_PTE(Pte);
+                            MMI_INVALIDATE_TLB(FaultingAddress);
+                            MmFreePhysicalPage(PhysPage);
+                            return FALSE;
+                        }
+                    }
+                }
+            }
+        }
+
+        /* Berlaku untuk Data Section biasa (!Image) maupun ET_REL */
+        if (!HandledAsProgramHdr)
+        {
+            ULONGLONG FileOffset = ViewOffset +
+                ((ULONGLONG)(VpnTarget - StartingVpn) * PAGE_SIZE);
+
+            VEASTATUS ReadStatus = MmpReadAheadPageFromFile(
+                FileObject,
+                FileOffset,
+                (PVOID)AlignedFaultVa,
+                PAGE_SIZE
+            );
+
+            if (!VEA_SUCCESS(ReadStatus))
+            {
+                DPRINT("[#PF ERROR] Failed to read page from disk at offset 0x%x (Status: 0x%X)\n",
                     (ULONG)FileOffset, ReadStatus);
 
-            /* Rollback PTE jika disk read gagal */
-            MI_WRITE_INVALID_PTE(pte);
-            MMI_INVALIDATE_TLB(FaultingAddress);
-            MmFreePhysicalPage(PhysPage);
-            return FALSE;
+                MI_ERASE_PTE(Pte);
+                MMI_INVALIDATE_TLB(FaultingAddress);
+                MmFreePhysicalPage(PhysPage);
+                return FALSE;
+            }
         }
+    }
+
+    /* Fase 2: Tulis PTE final sesuai proteksi efektif */
+    if (IsCopyOnWrite && !WriteFault)
+    {
+        MI_MAKE_VALID_PTE(TempPte, PhysPage >> 12, Owner, 0);
+        TempPte.Hard.CopyOnWrite = 1;
     }
     else
     {
-        RtlZeroMemory((PVOID)AlignedFaultVa, PAGE_SIZE);
+        MI_MAKE_VALID_PTE(TempPte, PhysPage >> 12, Owner, Writable ? 1 : 0);
+        TempPte.Hard.CopyOnWrite = 0;
+    }
+
+    if (EffectiveProtect & MM_NOCACHE)
+    {
+        TempPte.Hard.CacheDisable = 1;
+        TempPte.Hard.WriteThrough = 1;
+    }
+
+    MI_WRITE_VALID_PTE(Pte, TempPte);
+    MMI_INVALIDATE_TLB(FaultingAddress);
+
+    if (FileObject != NULL && !Owner && !HandledAsProgramHdr && !IsCopyOnWrite)
+    {
+        MmpPrefaultClusterPages(
+            (ULONG)AlignedFaultVa,
+            StartingVpn,
+            EndingVpn,
+            ViewOffset,
+            FileObject,
+            Owner,
+            Writable,
+            EffectiveProtect
+        );
     }
 
     return TRUE;

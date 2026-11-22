@@ -15,12 +15,37 @@ static inline VOID PiSwapProcess(PKPROCESS TargetProcess) {
     );
 }
 
-ULONG
+VOID
 VEAPI
-PtCounterUniqueProcessId(VOID)
+PiInitializeProcess(
+    IN PKPROCESS Process,
+    IN UCHAR BasePriority,
+    IN PULONG_PTR DirectoryTableBase
+)
 {
-    PtUniqueProcessId += 4; // Harus ditambahkan ke variabel aslinya!
-    return PtUniqueProcessId;
+    RtlZeroMemory(Process, sizeof(KPROCESS));
+
+    if (DirectoryTableBase)
+    {
+        Process->DirectoryTableBase = DirectoryTableBase[0];
+    }
+
+    Process->State = Initialized;
+
+    if (BasePriority == PROCESS_PRIORITY_NORMAL)
+    {
+        Process->BasePriority = 8;
+    }
+    else
+    {
+        Process->BasePriority = BasePriority;
+    }
+
+    Process->StackCount = 0;
+    Process->Token = NULL;
+
+    InitializeListHead(&Process->ThreadListHead);
+    KsInitializeSpinlock(&Process->ProcessLock);
 }
 
 VEASTATUS
@@ -36,111 +61,299 @@ PtpCreateProcess(
     IN HANDLE ExceptionPort OPTIONAL
 )
 {
-    PEPROCESS Parent, Process;
     VEASTATUS Status;
-    PULONG_PTR VirtualAddress;
-    PULONG SystemPageDir;
-    ULONG PdeFlags;
+    PEPROCESS Process = NULL;
+    PEPROCESS Parent = NULL;
+    PVOID SectionObject = NULL;
+    HANDLE_TABLE_ENTRY CidEntry;
+    HANDLE hProcess = NULL;
+    ULONG_PTR DirectoryTableBase[2] = {0, 0};
+    BOOLEAN NeedsPeb = FALSE;
+    INITIAL_PEB InitialPeb;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
 
-    UNREFERENCED_PARAMETER(SectionHandle);
     UNREFERENCED_PARAMETER(DebugPort);
     UNREFERENCED_PARAMETER(ExceptionPort);
-    UNREFERENCED_PARAMETER(Flags);
 
+    // Validate Flags
+    if (Flags & ~PROCESS_CREATE_FLAGS_LEGAL_MASK)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    //
+    // 1. EVALUASI PARENT PROCESS & FALLBACK
+    //
     if (ParentProcess)
     {
         Status = ObReferenceObjectByHandle(
             ParentProcess,
-            0x1000, /* TODO: ACCESS_MASK lebih jelas nanti*/
+            PROCESS_CREATE_PROCESS,
             PtEprocessType,
-            KernelMode, /* TODO: Get more Good Access*/
+            PreviousMode,
             (PVOID*)&Parent
         );
-
-        if (!VEA_SUCCESS(Status))
-        {
-            return Status;
-        }
+        if (!VEA_SUCCESS(Status)) return Status;
     }
     else
     {
-        Parent = NULL;
+        // FIX CRUSIAL: Jika membuat User-Mode Process (SectionHandle ada)
+        // tapi ParentProcess NULL, otomatis jadikan PtSystemProcess sebagai Parent!
+        if (SectionHandle)
+        {
+            Parent = PtSystemProcess;
+            ObReferenceObject(Parent);
+        }
+        else
+        {
+            Parent = NULL; // Murni Boot Process (PtSystemProcess awal)
+        }
     }
 
+    //
+    // 2. ALOKASI EPROCESS OBJECT VIA OBJECT MANAGER
+    //
     Status = ObCreateObject(
-        KernelMode, /* TODO: Get more Good Access */
+        PreviousMode,
         PtEprocessType,
         ObjectAttributes,
-        KernelMode,
+        PreviousMode,
         NULL,
         sizeof(EPROCESS),
         0,
         0,
         (PVOID*)&Process
     );
-    if (!VEA_SUCCESS(Status)) return Status;
+
+    if (!VEA_SUCCESS(Status)) goto Cleanup;
 
     RtlZeroMemory(Process, sizeof(EPROCESS));
 
+    // Setup Dasar Struct Process
+    Process->ExitStatus = STATUS_PENDING;
+    InitializeListHead(&Process->ThreadListHead);
+    InitializeListHead(&Process->ActiveProcessLinks);
+
+    MmpInitializeProcessVadTree(Process);
+
     if (Parent)
+    {
         Process->ParentProcess = Parent;
+        Process->InheritedFromUniqueProcessId = Parent->UniqueProcessId;
 
-    Process->Cid.UniqueProcess = PtCounterUniqueProcessId();
+        if (Parent->Token)
+        {
+            Process->Token = SfDuplicateToken(Parent->Token);
+            if (!Process->Token)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                goto CleanupWithRef;
+            }
+        }
+        else if (SfSystemToken)
+        {
+            Process->Token = SfDuplicateToken(SfSystemToken);
+            if (!Process->Token)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                goto CleanupWithRef;
+            }
+        }
+    }
+    else
+    {
+        Process->Token = SfSystemToken;
+    }
 
+    //
+    // 3. ATUR HANDLES SECTION OBJECT (Fisik Executable Image)
+    //
+    if (SectionHandle)
+    {
+        Status = ObReferenceObjectByHandle(
+            SectionHandle,
+            SECTION_MAP_EXECUTE,
+            MmSectionObjectType,
+            PreviousMode,
+            (PVOID*)&SectionObject
+        );
+        if (!VEA_SUCCESS(Status)) goto CleanupWithRef;
+
+        Process->SectionObject = SectionObject;
+    }
+    else if (Parent && Parent != PtSystemProcess)
+    {
+        // Jalur Forking/Cloning: Warisi SectionObject dari Parent jika ada
+        if (Parent->SectionObject)
+        {
+            SectionObject = Parent->SectionObject;
+            ObReferenceObject(SectionObject);
+            Process->SectionObject = SectionObject;
+        }
+        else
+        {
+            Status = STATUS_PROCESS_IS_TERMINATING;
+            goto CleanupWithRef;
+        }
+    }
+
+    //
+    // 4. MEMORY ADDRESS SPACE SETUP (CR3 ALOKASI)
+    //
+    if (Parent)
+    {
+        // Buat Page Directory (CR3) baru untuk proses anak
+        // Menyalin entri PDE kernel-space dari system process
+        if (!MmCreateProcessAddressSpace(Process, DirectoryTableBase))
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto CleanupWithRef;
+        }
+    }
+    else
+    {
+        // Mode Boot/Handbuilt Process (Gunakan CR3 Kernel Awal)
+        Status = MiInitializeHandBuiltProcess(Process, DirectoryTableBase);
+        if (!VEA_SUCCESS(Status)) goto CleanupWithRef;
+    }
+
+    // Inisialisasi PCB (Kernel Process Block) & Load CR3 ke Process Control
+    PiInitializeProcess(
+        &Process->Pcb,
+        PROCESS_PRIORITY_NORMAL,
+        DirectoryTableBase
+    );
+
+    //
+    // 5. INSIALISASI HANDLE TABLE & CID (PROCESS ID)
+    //
+    if (Parent)
+    {
+        // Warisi atau buat Handle Table terisolasi
+        Status = ObInitProcess(
+            (Flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES) ? Parent : NULL,
+            Process
+        );
+        if (!VEA_SUCCESS(Status)) goto CleanupWithRef;
+    }
+    else
+    {
+        Process->ObjectTable = UlCreateHandleTable(TEMPORARY_MAX_HANDLE);
+    }
+
+    // Terbitkan Unique Process ID dari CID Table VeaOS
+    CidEntry.Object = Process;
+    CidEntry.GrantedAccess = 0;
+    Process->UniqueProcessId = UlCreateHandle(PtpCidTable, &CidEntry);
+    if (!Process->UniqueProcessId)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto CleanupWithRef;
+    }
+    
+    if (Process->ObjectTable)
+    {
+        Process->ObjectTable->UniqueProcessId = Process->UniqueProcessId;
+    }
+
+    //
+    // 6. INITIALIZE ADDRESS SPACE & DETEKSI SKENARIO PEB (USER MODE vs SYSTEM/CLONE)
+    //
+    if (SectionHandle)
+    {
+        // SKENARIO A: Process User-Mode Berbasis File Executable (DOOM, dll)
+        Status = MmInitializeProcessAddressSpace(
+            Process,
+            SectionObject,
+            Process->ImageFileName
+        );
+        if (!VEA_SUCCESS(Status)) goto CleanupWithRef;
+
+        NeedsPeb = TRUE; // Wajib punya PEB untuk Ring 3!
+    }
+    else if (Parent)
+    {
+        if (Parent != PtSystemProcess)
+        {
+            // SKENARIO B: Process Cloning / Forking (Tanpa Executable File Baru)
+            // Copy-On-Write (CoW) VAD Tree dari Parent ke Child
+            #if 0
+            Status = MmCloneProcessAddressSpace(Parent, Process);
+            if (!VEA_SUCCESS(Status)) goto CleanupWithRef;
+            NeedsPeb = TRUE;
+            #else
+            // Jika modul cloning belum kamu aktifkan:
+            Status = STATUS_NOT_IMPLEMENTED;
+            goto CleanupWithRef;
+            #endif
+        }
+        else
+        {
+            // SKENARIO C: System Helper Process
+            RtlCopyRawStringN(Process->ImageFileName, "SystemHelper", 15);
+        }
+    }
+    else
+    {
+        // SKENARIO D: Boot Process Kernel
+        RtlCopyRawStringN(Process->ImageFileName, "SystemProcess", 15);
+    }
+
+    // Overwrite ImageFileName jika ada ObjectAttributes spesifik
     if (ObjectAttributes && ObjectAttributes->ObjectName && ObjectAttributes->ObjectName->Buffer)
     {
         RtlCopyRawStringN(Process->ImageFileName, (PCHAR)ObjectAttributes->ObjectName->Buffer, 15);
     }
-    else if (Parent)
-    {
-        RtlCopyRawStringN(Process->ImageFileName, Parent->ImageFileName, 15);
-    }
-    else
-    {
-        RtlCopyRawStringN(Process->ImageFileName, "SystemProcess", 15);
-    }
 
-    Process->ObjectTable = UlCreateHandleTable(TEMPORARY_MAX_HANDLE);
-
-    Status = MmInitializeProcessDirectoryBase(Process);
-    if (!VEA_SUCCESS(Status))
+    //
+    // 7. MAP SYSTEM DLL & BUAT PEB (PROCESS ENVIRONMENT BLOCK)
+    //
+    if (SectionObject)
     {
-        if (Parent) ObDereferenceObject(Parent);
-        ObDereferenceObject(Process);
-        return Status;
+        // Map C Runtime / System Subsystem DLL (misal veaso.so / ntdll.dll) ke User Space
+        PtpMapSystemSo(Process, NULL, FALSE);
     }
 
-    Process->Pcb.BasePriority = 0;
-    Process->Pcb.State = Initialized;
-    InitializeListHead(&Process->Pcb.ThreadListHead);
+    if (Parent && NeedsPeb)
+    {
+        RtlZeroMemory(&InitialPeb, sizeof(INITIAL_PEB));
+        InitialPeb.Mutant = (HANDLE)-1;
 
+        Status = MmCreatePeb(Process, &InitialPeb, (PPEB*)&Process->Peb);
+        if (!VEA_SUCCESS(Status)) goto CleanupWithRef;
+    }
+
+    //
+    // 8. INSERT PROCESS TO ACTIVE LIST & OBJECT MANAGER TABLE
+    //
+    KsEnterCriticalRegion();
     InsertTailList(&PtProcessList, &Process->ActiveProcessLinks);
+    KsLeaveCriticalRegion();
+
+    Status = ObInsertObject(
+        Process,
+        NULL,
+        DesiredAccess,
+        0,
+        NULL,
+        &hProcess
+    );
+
+    if (!VEA_SUCCESS(Status)) goto Cleanup;
 
     if (ProcessHandle)
     {
-        Status = ObInsertObject(
-            Process,
-            NULL,
-            DesiredAccess,
-            0,
-            NULL,
-            ProcessHandle
-        );
-
-        if (!VEA_SUCCESS(Status))
-        {
-            if (Parent) ObDereferenceObject(Parent);
-            ObDereferenceObject(Process);
-            return Status;
-        }
+        *ProcessHandle = hProcess;
     }
 
-    if (Parent)
-    {
-        ObDereferenceObject(Parent);
-    }
+    Process->CreateTime.QuadPart = KsQuerySystemTime();
 
-    return STATUS_SUCCESS;
+CleanupWithRef:
+    //SSSObDereferenceObject(Process);
+
+Cleanup:
+    if (Parent) ObDereferenceObject(Parent);
+    return Status;
 }
 
 VEASTATUS
@@ -161,73 +374,6 @@ PtCreateSystemProcess(
         NULL,
         NULL
     );
-}
-
-PEPROCESS
-VEAPI
-PtCreateProcess(
-    POOL_TYPE ProcessPool,
-    PCHAR ImageFileName
-)
-{
-    PEPROCESS Process = NULL;
-
-    VEASTATUS Status = ObCreateObject(
-        KernelMode,
-        PtEprocessType,
-        NULL,
-        KernelMode,
-        NULL,
-        sizeof(EPROCESS), // Pass sizeof(EPROCESS) atau 0
-        0,
-        0,
-        (PVOID*)&Process
-    );
-
-    if(!VEA_SUCCESS(Status))
-    {
-        return NULL;
-    }
-
-    // Inisialisasi struct EPROCESS
-    Process->Cid.UniqueProcess = PtCounterUniqueProcessId();
-    RtlCopyRawStringN(Process->ImageFileName, ImageFileName, 15);
-    Process->ObjectTable = UlCreateHandleTable(TEMPORARY_MAX_HANDLE);
-
-    Process->Pcb.DirectoryTableBase = MmAllocatePhysicalPage();
-    if(!Process->Pcb.DirectoryTableBase)
-    {
-        // ObDereferenceObject(Process);
-        return NULL;
-    }
-
-    PULONG_PTR VirtualAddress = MmMapIoSpace(Process->Pcb.DirectoryTableBase, PAGE_SIZE, MmCached);
-    if(!VirtualAddress)
-    {
-        return NULL;
-    }
-
-    RtlZeroMemory(VirtualAddress, PAGE_SIZE);
-
-    PULONG SystemPageDir = (PULONG)MM_GET_PD();
-
-    for(ULONG i = 768; i < 1024; i++)
-    {
-        VirtualAddress[i] = SystemPageDir[i];
-    }
-
-    ULONG Flags = VirtualAddress[1023] & 0xFFF;
-    VirtualAddress[1023] = Process->Pcb.DirectoryTableBase | Flags;
-
-    MmUnmapIoSpace(VirtualAddress, PAGE_SIZE);
-
-    Process->Pcb.BasePriority = 0;
-    Process->Pcb.State = Initialized;
-    
-    InitializeListHead(&Process->Pcb.ThreadListHead);
-    InsertTailList(&PtProcessList, &Process->ActiveProcessLinks);
-
-    return Process;
 }
 
 VOID
@@ -315,3 +461,388 @@ PtDetachProcess(VOID)
 
     PiSwapProcess(OriginalProcess);
 }
+
+VEASTATUS
+VEAPI
+VeaCreateProcess(
+    OUT PHANDLE ProcessHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+    IN HANDLE ParentProcess OPTIONAL,
+    IN ULONG Flags,
+    IN HANDLE SectionHandle OPTIONAL,
+    IN HANDLE DebugPort OPTIONAL,
+    IN HANDLE ExceptionPort OPTIONAL
+)
+{
+    VEASTATUS Status = STATUS_SUCCESS;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    HANDLE LocalProcessHandle = NULL;
+    OBJECT_ATTRIBUTES LocalObjectAttributes;
+    POBJECT_ATTRIBUTES CapturedObjectAttributes = NULL;
+
+    //
+    // 1. VALIDASI & CAPTURE POINTER USER MODE VIA SEH
+    //
+    if (PreviousMode == UserMode)
+    {
+        // Validasi Alamat Output Pointer ProcessHandle (< 0x80000000)
+        if (!ProcessHandle || (ULONG_PTR)ProcessHandle >= 0x80000000)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+
+        _VEA_TRY
+        {
+            // Probe Write Access untuk ProcessHandle
+            *(volatile HANDLE*)ProcessHandle = *(volatile HANDLE*)ProcessHandle;
+
+            // Capture & Probe ObjectAttributes jika disuplai oleh User
+            if (ObjectAttributes)
+            {
+                if ((ULONG_PTR)ObjectAttributes >= 0x80000000)
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+
+                // Copy struct ObjectAttributes ke Kernel Stack
+                RtlCopyMemory(&LocalObjectAttributes, ObjectAttributes, sizeof(OBJECT_ATTRIBUTES));
+                CapturedObjectAttributes = &LocalObjectAttributes;
+
+                // Probe ObjectName Buffer jika ada
+                if (LocalObjectAttributes.ObjectName)
+                {
+                    if ((ULONG_PTR)LocalObjectAttributes.ObjectName >= 0x80000000)
+                    {
+                        return STATUS_ACCESS_VIOLATION;
+                    }
+                }
+            }
+        }
+        _VEA_EXCEPT(1)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+        _VEA_END
+    }
+    else
+    {
+        // Panggilan dari Kernel Mode (Trusted Boundary)
+        CapturedObjectAttributes = ObjectAttributes;
+    }
+
+    //
+    // 2. EKSREKUSI ENGINE UTAMA
+    //
+    Status = PtpCreateProcess(
+        &LocalProcessHandle,
+        DesiredAccess,
+        CapturedObjectAttributes,
+        ParentProcess,
+        Flags,
+        SectionHandle,
+        DebugPort,
+        ExceptionPort
+    );
+
+    //
+    // 3. TULIS KEMBALI RESULT HANDLE KE USER SPACE (LEAK-PROOF WRITEBACK)
+    //
+    if (VEA_SUCCESS(Status))
+    {
+        if (PreviousMode == UserMode)
+        {
+            _VEA_TRY
+            {
+                *ProcessHandle = LocalProcessHandle;
+            }
+            _VEA_EXCEPT(1)
+            {
+                // PROTEKSI KEBOCORAN HANDLE (LEAK PREVENTION):
+                // Jika User Space mengalami #PF / crash saat Kernel menulis *ProcessHandle,
+                // Handle yang terlanjur terbuat di Object Table harus ditutup kembali.
+                VzClose(LocalProcessHandle);
+                Status = STATUS_ACCESS_VIOLATION;
+            }
+            _VEA_END
+        }
+        else
+        {
+            *ProcessHandle = LocalProcessHandle;
+        }
+    }
+
+    return Status;
+}
+
+VEASTATUS
+VEAPI
+VeaQueryInformationProcess(
+    IN HANDLE ProcessHandle,
+    IN PROCESSINFOCLASS ProcessInformationClass,
+    OUT PVOID ProcessInformation,
+    IN ULONG ProcessInformationLength,
+    OUT PULONG ReturnLength OPTIONAL
+)
+{
+    VEASTATUS Status = STATUS_SUCCESS;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    PEPROCESS Process = NULL;
+    ULONG RequiredLength = 0;
+
+    if (!ProcessInformation && ProcessInformationLength > 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (PreviousMode == UserMode)
+    {
+        _VEA_TRY
+        {
+            if (ProcessInformationLength > 0)
+            {
+                if ((ULONG_PTR)ProcessInformation >= 0x80000000 ||
+                    ((ULONG_PTR)ProcessInformation + ProcessInformationLength) >= 0x80000000)
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+
+                // Probe write buffer
+                RtlZeroMemory(ProcessInformation, ProcessInformationLength);
+            }
+
+            if (ReturnLength)
+            {
+                if ((ULONG_PTR)ReturnLength >= 0x80000000)
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                *ReturnLength = *ReturnLength;
+            }
+        }
+        _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+        _VEA_END
+    }
+
+    if (ProcessHandle == NtCurrentProcess() || ProcessHandle == (HANDLE)-1)
+    {
+        Process = (PEPROCESS)PtGetCurrentProcess();
+        ObReferenceObject(Process);
+    }
+    else
+    {
+        Status = ObReferenceObjectByHandle(
+            ProcessHandle,
+            PROCESS_QUERY_INFORMATION,
+            PtEprocessType,
+            PreviousMode,
+            (PVOID*)&Process
+        );
+
+        if (!VEA_SUCCESS(Status))
+        {
+            return Status;
+        }
+    }
+
+    switch (ProcessInformationClass)
+    {
+        case ProcessBasicInformation:
+        {
+            PROCESS_BASIC_INFORMATION BasicInfo;
+            RequiredLength = sizeof(PROCESS_BASIC_INFORMATION);
+
+            if (ProcessInformationLength < RequiredLength)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            RtlZeroMemory(&BasicInfo, sizeof(PROCESS_BASIC_INFORMATION));
+            BasicInfo.ExitStatus                   = Process->ExitStatus;
+            BasicInfo.PebBaseAddress               = Process->Peb;
+            BasicInfo.AffinityMask                 = 0x00000001; // Default 1 Core Mask
+            BasicInfo.BasePriority                 = (UCHAR)Process->Pcb.BasePriority;
+            BasicInfo.UniqueProcessId              = (ULONG_PTR)Process->UniqueProcessId;
+            BasicInfo.InheritedFromUniqueProcessId = (ULONG_PTR)Process->InheritedFromUniqueProcessId;
+
+            if (PreviousMode == UserMode)
+            {
+                _VEA_TRY
+                {
+                    RtlCopyMemory(ProcessInformation, &BasicInfo, sizeof(PROCESS_BASIC_INFORMATION));
+                }
+                _VEA_EXCEPT(1)
+                {
+                    Status = STATUS_ACCESS_VIOLATION;
+                }
+                _VEA_END
+            }
+            else
+            {
+                RtlCopyMemory(ProcessInformation, &BasicInfo, sizeof(PROCESS_BASIC_INFORMATION));
+            }
+            break;
+        }
+
+        case ProcessSessionId:
+        {
+            ULONG SessionId = 0;
+            RequiredLength = sizeof(ULONG);
+
+            if (ProcessInformationLength < RequiredLength)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            if (Process->Peb)
+            {
+                SessionId = Process->Peb->SessionId;
+            }
+
+            if (PreviousMode == UserMode)
+            {
+                _VEA_TRY
+                {
+                    *(PULONG)ProcessInformation = SessionId;
+                }
+                _VEA_EXCEPT(1)
+                {
+                    Status = STATUS_ACCESS_VIOLATION;
+                }
+                _VEA_END
+            }
+            else
+            {
+                *(PULONG)ProcessInformation = SessionId;
+            }
+            break;
+        }
+
+        case ProcessImageFileName:
+        {
+            // Salin string nama ImageFileName milik EPROCESS (16 bytes)
+            RequiredLength = sizeof(Process->ImageFileName);
+
+            if (ProcessInformationLength < RequiredLength)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            if (PreviousMode == UserMode)
+            {
+                _VEA_TRY
+                {
+                    RtlCopyMemory(ProcessInformation, Process->ImageFileName, RequiredLength);
+                }
+                _VEA_EXCEPT(1)
+                {
+                    Status = STATUS_ACCESS_VIOLATION;
+                }
+                _VEA_END
+            }
+            else
+            {
+                RtlCopyMemory(ProcessInformation, Process->ImageFileName, RequiredLength);
+            }
+            break;
+        }
+
+        case ProcessWow64Information:
+        {
+            ULONG_PTR Wow64Info = 0; // 32-bit VeaOS (Non-WOW64)
+            RequiredLength = sizeof(ULONG_PTR);
+
+            if (ProcessInformationLength < RequiredLength)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            if (PreviousMode == UserMode)
+            {
+                _VEA_TRY
+                {
+                    *(PULONG_PTR)ProcessInformation = Wow64Info;
+                }
+                _VEA_EXCEPT(1)
+                {
+                    Status = STATUS_ACCESS_VIOLATION;
+                }
+                _VEA_END
+            }
+            else
+            {
+                *(PULONG_PTR)ProcessInformation = Wow64Info;
+            }
+            break;
+        }
+
+        default:
+            Status = STATUS_INVALID_INFO_CLASS;
+            break;
+    }
+
+    if (ReturnLength)
+    {
+        if (PreviousMode == UserMode)
+        {
+            _VEA_TRY
+            {
+                *ReturnLength = RequiredLength;
+            }
+            _VEA_EXCEPT(1)
+            {
+                Status = STATUS_ACCESS_VIOLATION;
+            }
+            _VEA_END
+        }
+        else
+        {
+            *ReturnLength = RequiredLength;
+        }
+    }
+
+    ObDereferenceObject(Process);
+    return Status;
+}
+
+VEASTATUS
+VEAPI
+VeaTerminateProcess(
+    IN HANDLE ProcessHandle,
+    IN VEASTATUS ExitStatus
+)
+{
+    // TODO:
+    // IMPLEMENT THIS
+
+    /* Print and loop */
+    PEPROCESS Process;
+    VEASTATUS Status;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+
+    Status = ObReferenceObjectByHandle(
+        ProcessHandle,
+        PROCESS_ALL_ACCESS,
+        PtEprocessType,
+        PreviousMode,
+        (PVOID*)&Process
+    );
+
+    if (!VEA_SUCCESS(Status)) return Status;
+    
+    DPRINT("Process stopped: %p with status 0x%x\n", Process, Status);
+
+    while (1)
+    {
+        __YieldProcessor();
+    }
+}
+
+/* EOF */

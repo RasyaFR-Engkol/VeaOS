@@ -17,9 +17,8 @@ UlDestroyHandle(
 HANDLE
 VEAPI
 UlCreateHandle(
-    PHANDLE_TABLE Table,
-    PVOID Object,
-    ULONG GrantedAccess
+    IN PHANDLE_TABLE Table,
+    IN PHANDLE_TABLE_ENTRY HandleTableEntry
 );
 
 PHANDLE_TABLE
@@ -63,7 +62,7 @@ VOID
 InitializeSListHead(
   _Out_ PSLIST_HEADER SListHead)
 {
-#if defined(_WIN64)
+#if defined(_VEA64B_)
     if (((ULONG_PTR)SListHead & 0xf) != 0) {
         ExRaiseStatus(STATUS_DATATYPE_MISALIGNMENT);
     }
@@ -72,7 +71,7 @@ InitializeSListHead(
 #else
     SListHead->Region = 0;
 #endif /* _IA64_ */
-#endif /* _WIN64 */
+#endif /* _VEA64B_ */
     SListHead->Alignment = 0;
 }
 
@@ -228,5 +227,66 @@ VEAPI
 ProbeForWrite(IN PVOID Address,
               IN SIZE_T Length,
               IN ULONG Alignment);
+
+PHANDLE_TABLE
+VEAPI
+UlDupHandleTable(
+    IN PEPROCESS TargetProcess,
+    IN PHANDLE_TABLE SourceTable
+);
+
+VEASTATUS
+VEAPI
+VeaQuerySystemInformation(
+    IN SYSTEM_INFORMATION_CLASS SystemInformationClass,
+    OUT PVOID SystemInformation,
+    IN ULONG SystemInformationLength,
+    OUT PULONG ReturnedLength
+);
+
+static const UNICODE_STRING __emptyUnicodeString = {0, 0, NULL};
+static const LARGE_INTEGER __emptyLargeInteger = {{0, 0}};
+static const ULARGE_INTEGER __emptyULargeInteger = {{0, 0}};
+static const OIP_INFORMATION __emptyIoStatusBlock = {{0}, 0};
+
+#define ProbeForReadGenericType(Ptr, Type, Default)                            \
+    (((ULONG_PTR)(Ptr) + sizeof(Type) - 1 < (ULONG_PTR)(Ptr) ||                \
+     (ULONG_PTR)(Ptr) + sizeof(Type) - 1 >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS) ?   \
+         UlRaiseStatus(STATUS_ACCESS_VIOLATION), Default :                     \
+         *(const volatile Type *)(Ptr))
+
+#define ProbeForReadBoolean(Ptr) ProbeForReadGenericType(Ptr, BOOLEAN, FALSE)
+#define ProbeForReadUchar(Ptr) ProbeForReadGenericType(Ptr, UCHAR, 0)
+#define ProbeForReadChar(Ptr) ProbeForReadGenericType(Ptr, CHAR, 0)
+#define ProbeForReadUshort(Ptr) ProbeForReadGenericType(Ptr, USHORT, 0)
+#define ProbeForReadShort(Ptr) ProbeForReadGenericType(Ptr, SHORT, 0)
+#define ProbeForReadUlong(Ptr) ProbeForReadGenericType(Ptr, ULONG, 0)
+#define ProbeForReadLong(Ptr) ProbeForReadGenericType(Ptr, LONG, 0)
+#define ProbeForReadUint(Ptr) ProbeForReadGenericType(Ptr, UINT, 0)
+#define ProbeForReadInt(Ptr) ProbeForReadGenericType(Ptr, INT, 0)
+#define ProbeForReadUlonglong(Ptr) ProbeForReadGenericType(Ptr, ULONGLONG, 0)
+#define ProbeForReadLonglong(Ptr) ProbeForReadGenericType(Ptr, LONGLONG, 0)
+#define ProbeForReadPointer(Ptr) ProbeForReadGenericType(Ptr, PVOID, NULL)
+#define ProbeForReadHandle(Ptr) ProbeForReadGenericType(Ptr, HANDLE, NULL)
+#define ProbeForReadLangId(Ptr) ProbeForReadGenericType(Ptr, LANGID, 0)
+#define ProbeForReadSize_t(Ptr) ProbeForReadGenericType(Ptr, SIZE_T, 0)
+#define ProbeForReadLargeInteger(Ptr) ProbeForReadGenericType((const LARGE_INTEGER *)(Ptr), LARGE_INTEGER, __emptyLargeInteger)
+#define ProbeForReadUlargeInteger(Ptr) ProbeForReadGenericType((const ULARGE_INTEGER *)(Ptr), ULARGE_INTEGER, __emptyULargeInteger)
+#define ProbeForReadUnicodeString(Ptr) ProbeForReadGenericType((const UNICODE_STRING *)(Ptr), UNICODE_STRING, __emptyUnicodeString)
+
+VEASTATUS
+VEAPI
+VeaSetSystemInformation(
+    IN SYSTEM_INFORMATION_CLASS SystemInformationClass,
+    IN PVOID SystemInformation,
+    IN ULONG SystemInformationLength
+);
+
+BOOLEAN
+VEAPI
+UlVeapiInit(VOID);
+
+extern POBJECT_TYPE UlWindowStationObjectType;
+extern POBJECT_TYPE UlDesktopObjectType;
 
 /* EOF */
