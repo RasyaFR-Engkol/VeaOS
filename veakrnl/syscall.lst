@@ -53,3 +53,6 @@
 50  EnumerateValueKey       9   VeaEnumerateValueKey
 51  SetSystemInformation    3   VeaSetSystemInformation
 52  CallbackReturn          3   VeaCallbackReturn
+53  CreateEvent             5   VeaCreateEvent
+54  WaitForSingleObject     3   VeaWaitForSingleObject
+55  SetEvent                2   VeaSetEvent

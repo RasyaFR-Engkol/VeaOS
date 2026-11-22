@@ -1135,4 +1135,13 @@ VOID
 VEAPI
 KiEnableSseAndFxsave(VOID);
 
+VEASTATUS
+VEAPI
+VeaWaitForSingleObject(
+    IN HANDLE Handle,
+    IN BOOLEAN Alertable,
+    IN PLARGE_INTEGER Timeout OPTIONAL
+);
+
+
 /* EOF */

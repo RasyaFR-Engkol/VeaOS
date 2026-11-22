@@ -264,6 +264,36 @@ KsWaitForSingleObject(
 
 VEASTATUS
 VEAPI
+VeaWaitForSingleObject(
+    IN HANDLE Handle,
+    IN BOOLEAN Alertable,
+    IN PLARGE_INTEGER Timeout OPTIONAL
+)
+{
+    PKEVENT EventObject;
+    VEASTATUS Status;
+
+    if (Alertable || Timeout != NULL)
+        return STATUS_NOT_IMPLEMENTED;
+
+    Status = ObReferenceObjectByHandle(
+        Handle,
+        VEA_SYNCHRONIZE,
+        UlEventObjectType,
+        KeGetPreviousMode(),
+        (PVOID*)&EventObject
+    );
+    if (!VEA_SUCCESS(Status))
+        return Status;
+
+    Status = KsWaitForSingleObject(EventObject);
+    ObDereferenceObject(EventObject);
+
+    return Status;
+}
+
+VEASTATUS
+VEAPI
 KsWaitForMultipleObjects(
     IN ULONG ObjectCount,
     IN PVOID *Objects,

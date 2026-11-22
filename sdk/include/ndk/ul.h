@@ -289,4 +289,22 @@ UlVeapiInit(VOID);
 extern POBJECT_TYPE UlWindowStationObjectType;
 extern POBJECT_TYPE UlDesktopObjectType;
 
+VEASTATUS
+VEAPI
+VeaSetEvent(
+    IN HANDLE EventHandle,
+    OUT PLONG PreviousState OPTIONAL
+);
+
+VEASTATUS
+VEAPI
+VeaCreateEvent(
+    OUT PHANDLE EventHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+    IN EVENT_TYPE EventType,
+    IN BOOLEAN InitialState
+);
+
+
 /* EOF */
