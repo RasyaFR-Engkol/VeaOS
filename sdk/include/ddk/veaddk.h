@@ -110,7 +110,7 @@ VEA_EXPORT BOOLEAN VEAPI RmAddSystemServiceTable( IN PULONG_PTR Base, IN PULONG 
 VEA_EXPORT NORET VOID VEAPI RiSyscallDispatcherHandler( IN PKTRAP_FRAME TrapFrame, IN PVOID Context );
 VEA_EXPORT VEASTATUS VEAPI PtCreateSystemThread( OUT PHANDLE ThreadHandle, IN ACCESS_MASK DesiredAccess, IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL, IN HANDLE ProcessHandle OPTIONAL, OUT PCLIENT_ID ClientId OPTIONAL, IN PKSTART_ROUTINE StartRoutine, IN PVOID StartContext OPTIONAL );
 VEA_EXPORT VOID VEAPI KsInitializeEvent( IN OUT PKEVENT Event, IN EVENT_TYPE Type, IN BOOLEAN State );
-VEA_EXPORT extern void * memcpy( void *dest, const void *src, SIZE_T count ); 
+VEA_EXPORT extern void * memcpy( void *dest, const void *src, SIZE_T count );
 VEA_EXPORT VEASTATUS VEAPI KsWaitForSingleObject( IN PVOID Object );
 VEA_EXPORT VOID RtlCopyMemory(PVOID Dest, PVOID Src, SIZE_T N);
 VEA_EXPORT int __attribute__((regparm(1), returns_twice)) VeaSehRegister(volatile VEA_SEH_FRAME *Frame);

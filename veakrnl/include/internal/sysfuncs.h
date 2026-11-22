@@ -51,3 +51,6 @@ SVC_(EnumerateKey, 7)                 /* SSN 49 */
 SVC_(EnumerateValueKey, 9)            /* SSN 50 */
 SVC_(SetSystemInformation, 3)         /* SSN 51 */
 SVC_(CallbackReturn, 3)               /* SSN 52 */
+SVC_(CreateEvent, 5)                 /* SSN 53 */
+SVC_(WaitForSingleObject, 3)         /* SSN 54 */
+SVC_(SetEvent, 2)                    /* SSN 55 */

@@ -64,6 +64,9 @@ VEASTATUS VEAPI VzEnumerateKey(IN HANDLE KeyHandle, IN ULONG Index, OUT PCHAR Su
 VEASTATUS VEAPI VzEnumerateValueKey(IN HANDLE KeyHandle, IN ULONG Index, OUT PCHAR ValueName, IN ULONG ValueNameSize, OUT PULONG ResultNameLength OPTIONAL, OUT PULONG Type OPTIONAL, OUT PVOID Data OPTIONAL, IN ULONG DataSize, OUT PULONG ResultDataLength OPTIONAL);
 VEASTATUS VEAPI VzSetSystemInformation(IN SYSTEM_INFORMATION_CLASS SystemInformationClass, IN PVOID SystemInformation, IN ULONG SystemInformationLength);
 VEASTATUS VEAPI VzCallbackReturn(IN PVOID Result OPTIONAL, IN ULONG ResultLength, IN VEASTATUS CallbackStatus);
+VEASTATUS VEAPI VzCreateEvent(OUT PHANDLE EventHandle, IN ACCESS_MASK DesiredAccess, IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL, IN EVENT_TYPE EventType, IN BOOLEAN InitialState);
+VEASTATUS VEAPI VzWaitForSingleObject(IN HANDLE Handle, IN BOOLEAN Alertable, IN PLARGE_INTEGER Timeout OPTIONAL);
+VEASTATUS VEAPI VzSetEvent(IN HANDLE EventHandle, OUT PLONG PreviousState OPTIONAL);
 #ifdef __cplusplus
 }
 #endif
