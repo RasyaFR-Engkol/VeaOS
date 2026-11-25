@@ -17,6 +17,40 @@
 
 #if defined(BUILD_USER)
 
+static
+ULONG
+RtlpCalcParamStringSize(
+    IN PANSI_STRING Str OPTIONAL
+)
+{
+    if (Str && Str->Buffer && Str->Length > 0)
+    {
+        return (ULONG)Str->Length + sizeof(CHAR);
+    }
+    return 0;
+}
+
+static
+VOID
+RtlpCopyParamString(
+    IN OUT PCHAR *Cursor,
+    OUT PANSI_STRING Dest,
+    IN PANSI_STRING Src OPTIONAL
+)
+{
+    if (Src && Src->Buffer && Src->Length > 0)
+    {
+        RtlCopyMemory(*Cursor, Src->Buffer, Src->Length);
+        (*Cursor)[Src->Length] = '\0';
+
+        Dest->Length = Src->Length;
+        Dest->MaximumLength = (USHORT)(Src->Length + sizeof(CHAR));
+        Dest->Buffer = *Cursor;
+
+        *Cursor += Src->Length + sizeof(CHAR);
+    }
+}
+
 VEASTATUS
 VEAPI
 RtlCreateProcessParameters(
@@ -34,27 +68,23 @@ RtlCreateProcessParameters(
 {
     PRTL_USER_PROCESS_PARAMETERS Params;
     PANSI_STRING EffectiveCmdLine = (CommandLine && CommandLine->Buffer) ? CommandLine : ImagePathName;
-    ULONG PathLen = (ImagePathName && ImagePathName->Buffer) ? ImagePathName->Length : 0;
-    ULONG CmdLen  = (EffectiveCmdLine && EffectiveCmdLine->Buffer) ? EffectiveCmdLine->Length : 0;
-    ULONG TotalSize = sizeof(RTL_USER_PROCESS_PARAMETERS)
-                    + (PathLen ? PathLen + sizeof(CHAR) : 0)
-                    + (CmdLen  ? CmdLen  + sizeof(CHAR) : 0);
+    ULONG TotalSize = sizeof(RTL_USER_PROCESS_PARAMETERS);
     PCHAR StringData;
-
-    UNREFERENCED_PARAMETER(DllPath);
-    UNREFERENCED_PARAMETER(CurrentDirectory);
-    UNREFERENCED_PARAMETER(Environment);
-    UNREFERENCED_PARAMETER(WindowTitle);
-    UNREFERENCED_PARAMETER(DesktopInfo);
-    UNREFERENCED_PARAMETER(ShellInfo);
-    UNREFERENCED_PARAMETER(RuntimeData);
 
     if (!ProcessParameters)
     {
         return STATUS_INVALID_PARAMETER;
     }
 
-    // Alokasi 1 blok datar di Process Heap: [Header PPB] + [ImagePathName] + [CommandLine]
+    TotalSize += RtlpCalcParamStringSize(CurrentDirectory);
+    TotalSize += RtlpCalcParamStringSize(DllPath);
+    TotalSize += RtlpCalcParamStringSize(ImagePathName);
+    TotalSize += RtlpCalcParamStringSize(EffectiveCmdLine);
+    TotalSize += RtlpCalcParamStringSize(WindowTitle);
+    TotalSize += RtlpCalcParamStringSize(DesktopInfo);
+    TotalSize += RtlpCalcParamStringSize(ShellInfo);
+    TotalSize += RtlpCalcParamStringSize(RuntimeData);
+
     Params = (PRTL_USER_PROCESS_PARAMETERS)RtlAllocateHeap(
         RtlGetProcessHeap(),
         HEAP_ZERO_MEMORY,
@@ -68,30 +98,18 @@ RtlCreateProcessParameters(
     Params->MaximumLength = TotalSize;
     Params->Length = TotalSize;
     Params->Flags = RTL_USER_PROCESS_PARAMETERS_NORMALIZED;
+    Params->Environment = Environment;
 
     StringData = (PCHAR)(Params + 1);
 
-    if (PathLen > 0)
-    {
-        RtlCopyMemory(StringData, ImagePathName->Buffer, PathLen);
-        StringData[PathLen] = '\0';
-
-        Params->ImagePathName.Length = (USHORT)PathLen;
-        Params->ImagePathName.MaximumLength = (USHORT)(PathLen + sizeof(CHAR));
-        Params->ImagePathName.Buffer = StringData;
-
-        StringData += PathLen + sizeof(CHAR);
-    }
-
-    if (CmdLen > 0)
-    {
-        RtlCopyMemory(StringData, EffectiveCmdLine->Buffer, CmdLen);
-        StringData[CmdLen] = '\0';
-
-        Params->CommandLine.Length = (USHORT)CmdLen;
-        Params->CommandLine.MaximumLength = (USHORT)(CmdLen + sizeof(CHAR));
-        Params->CommandLine.Buffer = StringData;
-    }
+    RtlpCopyParamString(&StringData, &Params->CurrentDirectory.DosPath, CurrentDirectory);
+    RtlpCopyParamString(&StringData, &Params->DllPath, DllPath);
+    RtlpCopyParamString(&StringData, &Params->ImagePathName, ImagePathName);
+    RtlpCopyParamString(&StringData, &Params->CommandLine, EffectiveCmdLine);
+    RtlpCopyParamString(&StringData, &Params->WindowTitle, WindowTitle);
+    RtlpCopyParamString(&StringData, &Params->DesktopInfo, DesktopInfo);
+    RtlpCopyParamString(&StringData, &Params->ShellInfo, ShellInfo);
+    RtlpCopyParamString(&StringData, &Params->RuntimeData, RuntimeData);
 
     *ProcessParameters = Params;
     return STATUS_SUCCESS;

@@ -103,9 +103,8 @@ RtlpCreateUserStack(
     );
     if (!VEA_SUCCESS(Status))
     {
-        // Rollback: Bebaskan kembali memori jika alokasi commit gagal
         GuardPageSize = 0;
-        VzFreeVirtualMemory(ProcessHandle, (PVOID*)&Stack, &GuardPageSize, MEM_RELEASE);
+        VzFreeVirtualMemory(ProcessHandle, &InitialTeb->AllocatedStackBase, &GuardPageSize, MEM_RELEASE);
         return Status;
     }
 
