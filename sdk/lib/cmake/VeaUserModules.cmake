@@ -33,6 +33,7 @@ set(baseaddress_veaso    0x7C920000)
 set(baseaddress_kernel32 0x7C800000)
 set(baseaddress_user32   0x77D40000)
 set(baseaddress_userapi  0x77E00000)
+set(baseaddress_uitheme  0x77C80000)
 set(baseaddress_gdi32    0x77F10000)
 
 # 3. Helper: Set Image Base
@@ -68,11 +69,50 @@ function(set_module_type MODULE TYPE)
         $<$<COMPILE_LANGUAGE:C>:${VEA_USER_C_FLAGS}>
     )
 
+    get_target_property(_MOD_SOURCES ${MODULE} SOURCES)
+    set(_HAS_RSRC FALSE)
+
+    if(_MOD_SOURCES)
+        set(_INC_FLAGS "")
+        foreach(_INC ${VEA_USER_INCLUDES} ${CMAKE_CURRENT_SOURCE_DIR})
+            list(APPEND _INC_FLAGS "-I${_INC}")
+        endforeach()
+
+        foreach(_SRC ${_MOD_SOURCES})
+            if("${_SRC}" MATCHES "\\.rc$")
+                set(_HAS_RSRC TRUE)
+                get_filename_component(_RC_ABS "${_SRC}" ABSOLUTE)
+                get_filename_component(_RC_NAME "${_SRC}" NAME_WE)
+                set(_RSRC_OBJ "${CMAKE_CURRENT_BINARY_DIR}/${MODULE}_${_RC_NAME}.rsrc.o")
+
+                # Tandai .rc asli agar tidak dilempar mentah ke linker
+                set_source_files_properties("${_SRC}" PROPERTIES HEADER_FILE_ONLY TRUE)
+
+                add_custom_command(
+                    OUTPUT "${_RSRC_OBJ}"
+                    COMMAND "${VEA_COMRC_EXECUTABLE}" ${_INC_FLAGS} "${_RC_ABS}" -o "${_RSRC_OBJ}"
+                    DEPENDS "${_RC_ABS}" comrc_tool
+                    COMMENT "[COMRC] Compiling resource ${_RC_NAME}.rc for ${MODULE}..."
+                )
+
+                target_sources(${MODULE} PRIVATE "${_RSRC_OBJ}")
+            endif()
+        endforeach()
+    endif()
+
+    if(_HAS_RSRC)
+        if(EXISTS "${VEA_TOOL_DIR}/veadll.ld")
+            target_link_options(${MODULE} PRIVATE "-Wl,-T,${VEA_TOOL_DIR}/veadll.ld")
+        endif()
+        # Pastikan __vea_rsrc_start ikut masuk .dynsym meski targetnya .elf (veagui/nativeapp)
+        target_link_options(${MODULE} PRIVATE "-Wl,--export-dynamic")
+    endif()
+
     if("${TYPE}" STREQUAL "veadll")
         if(DEFINED baseaddress_${MODULE})
             set(_BASE ${baseaddress_${MODULE}})
         else()
-            message(FATAL_ERROR "[VeaBuild] baseaddress_${MODULE} belum didaftarkan di VeaUserModules.cmake!")
+            message(FATAL_ERROR "[VeaBuild] baseaddress_${MODULE} not registered in VeaUserModules.cmake!")
         endif()
 
         set_target_properties(${MODULE} PROPERTIES
@@ -133,7 +173,7 @@ function(set_module_type MODULE TYPE)
         target_compile_options(${MODULE} PRIVATE
             $<$<COMPILE_LANGUAGE:C>:-fPIC -fvisibility=default>
         )
-    elseif("${TYPE}" STREQUAL "nativeapp" OR "${TYPE}" STREQUAL "veacui" OR "${TYPE}" STREQUAL "veagui")
+    elseif("${TYPE}" STREQUAL "veacui" OR "${TYPE}" STREQUAL "veagui")
         set_target_properties(${MODULE} PROPERTIES
             SUFFIX ".elf"
             OUTPUT_NAME "${MODULE}"
@@ -156,8 +196,6 @@ function(set_module_type MODULE TYPE)
 
         if(DEFINED ARG_ENTRYPOINT)
             set_entrypoint(${MODULE} ${ARG_ENTRYPOINT})
-        elseif("${TYPE}" STREQUAL "nativeapp")
-            set_entrypoint(${MODULE} VeaProcessStartup)
         elseif("${TYPE}" STREQUAL "veacui")
             set_entrypoint(${MODULE} mainCRTStartup)
         elseif("${TYPE}" STREQUAL "veagui")
@@ -168,6 +206,6 @@ function(set_module_type MODULE TYPE)
             target_link_libraries(${MODULE} PRIVATE veacrt)
         endif()
     else()
-        message(FATAL_ERROR "[VeaBuild] Tipe modul tidak dikenal: '${TYPE}'")
+        message(FATAL_ERROR "[VeaBuild] Unknown Type Module: '${TYPE}'")
     endif()
 endfunction()
