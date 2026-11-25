@@ -126,6 +126,12 @@ _main(
         while (1);
     }
 
+    Status = VzInitializeKey(VK_INIT_BOOT_SM);
+    if (!VEA_SUCCESS(Status))
+    {
+        KdPrintf("[SMSS] Peringatan: VzInitializeKey gagal: 0x%08X\n", Status);
+    }
+
     Status = SmpLoadConfiguration(argc, argv, envp);
     if (!VEA_SUCCESS(Status))
     {
@@ -172,20 +178,7 @@ _main(
     {
         KdPrintf("[SMSS] Step 4 failed: 0x%08X\n\r", Status);
     }
-
-    PCHAR TestAppPath = "/D1P1:/VeaOS/SystemReserved/TestVeapiApp.elf";
-    Status = SmpExecuteImage(TestAppPath, TestAppPath, envp, FALSE, &TestAppInfo);
-    if (VEA_SUCCESS(Status))
-    {
-        KdPrintf("[SMSS] Meluncurkan %s (PID=0x%p)\n\r", TestAppPath, TestAppInfo.ClientId.UniqueProcess);
-        VzClose(TestAppInfo.ThreadHandle);
-        VzClose(TestAppInfo.ProcessHandle);
-    }
-    else
-    {
-        KdPrintf("[SMSS] Gagal meluncurkan %s: 0x%08X\n\r", TestAppPath, Status);
-    }
-
+    
     KdPrintf("[SMSS] Boot sesi awal selesai! Memasuki mode standby...\n\r");
 
 ExecuteLoop:
