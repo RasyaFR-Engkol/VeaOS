@@ -22,6 +22,7 @@ typedef struct _PS2KEY_DEVICE_EXTENSION {
     ULONG RingCount;
     BOOLEAN ExpectE0;
     POIP PendingReadOip;
+    KDPC IsrDpc;
 } PS2KEY_DEVICE_EXTENSION, *PPS2KEY_DEVICE_EXTENSION;
 
 static
@@ -60,13 +61,52 @@ PS2KeyWaitForInputBufferEmpty(IN ULONG CommandPort)
 
 static
 BOOLEAN
-PS2KeyWaitForOutputBufferFull(IN ULONG CommandPort)
+PS2KeyReadControllerOutput(
+    IN ULONG DataPort,
+    IN ULONG CommandPort,
+    OUT PUCHAR Value
+)
 {
     ULONG Retry;
+    UCHAR Status;
 
     for (Retry = 0; Retry < PS2KEY_IO_TIMEOUT; Retry++)
     {
-        if (PS2KeyReadPort((USHORT)CommandPort) & 0x01)
+        Status = PS2KeyReadPort((USHORT)CommandPort);
+        if (!(Status & 0x01))
+        {
+            continue;
+        }
+
+        *Value = PS2KeyReadPort((USHORT)DataPort);
+        if (!(Status & 0x20))
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+static
+BOOLEAN
+PS2KeyWaitForKeyboardAck(
+    IN ULONG DataPort,
+    IN ULONG CommandPort
+)
+{
+    ULONG Retry;
+    UCHAR Status;
+    UCHAR Response;
+
+    for (Retry = 0; Retry < PS2KEY_IO_TIMEOUT; Retry++)
+    {
+        Status = PS2KeyReadPort((USHORT)CommandPort);
+        if (!(Status & 0x01))
+        {
+            continue;
+        }
+
+        Response = PS2KeyReadPort((USHORT)DataPort);
+        if (!(Status & 0x20) && Response == 0xFA)
         {
             return TRUE;
         }
@@ -85,36 +125,36 @@ PS2KeyInitializeController(
     ULONG Retry;
     UCHAR Status;
     UCHAR Config;
+    BOOLEAN OutputBufferEmpty = FALSE;
 
-    /* 1. Kuras sisa output buffer */
+    /* Stop keyboard traffic while draining the shared controller output. */
+    if (!PS2KeyWaitForInputBufferEmpty(CommandPort))
+        return FALSE;
+    PS2KeyWritePort((USHORT)CommandPort, 0xAD);
+
     for (Retry = 0; Retry < PS2KEY_IO_TIMEOUT; Retry++)
     {
         Status = PS2KeyReadPort((USHORT)CommandPort);
         if (!(Status & 0x01))
         {
+            OutputBufferEmpty = TRUE;
             break;
         }
         (VOID)PS2KeyReadPort((USHORT)DataPort);
     }
 
-    /* 2. Enable First PS/2 Port */
-    if (!PS2KeyWaitForInputBufferEmpty(CommandPort))
+    if (!OutputBufferEmpty)
     {
         return FALSE;
     }
-    PS2KeyWritePort((USHORT)CommandPort, 0xAE);
 
-    /* 3. Baca 8042 Configuration Byte (0x20), nyalain IRQ1 (bit 0) & clock port 1 (clear bit 4) */
+    /* 2. Read controller config, ignoring bytes currently arriving from the mouse. */
     if (!PS2KeyWaitForInputBufferEmpty(CommandPort))
-    {
         return FALSE;
-    }
     PS2KeyWritePort((USHORT)CommandPort, 0x20);
-    if (!PS2KeyWaitForOutputBufferFull(CommandPort))
-    {
+    if (!PS2KeyReadControllerOutput(DataPort, CommandPort, &Config))
         return FALSE;
-    }
-    Config = PS2KeyReadPort((USHORT)DataPort);
+
     Config |= 0x01;   /* Enable IRQ1 */
     Config &= ~0x10;  /* Enable Port 1 Clock */
 
@@ -129,19 +169,23 @@ PS2KeyInitializeController(
     }
     PS2KeyWritePort((USHORT)DataPort, Config);
 
-    /* 4. Enable Keyboard Scanning (0xF4) */
+    /* 3. Enable Port 1 and reset scanning before enabling it. */
     if (!PS2KeyWaitForInputBufferEmpty(CommandPort))
-    {
         return FALSE;
-    }
-    PS2KeyWritePort((USHORT)DataPort, 0xF4);
-    if (!PS2KeyWaitForInputBufferEmpty(CommandPort) ||
-        !PS2KeyWaitForOutputBufferFull(CommandPort))
-    {
-        return FALSE;
-    }
+    PS2KeyWritePort((USHORT)CommandPort, 0xAE);
 
-    return (PS2KeyReadPort((USHORT)DataPort) == 0xFA);
+    if (!PS2KeyWaitForInputBufferEmpty(CommandPort))
+        return FALSE;
+    PS2KeyWritePort((USHORT)DataPort, 0xF5);
+    if (!PS2KeyWaitForInputBufferEmpty(CommandPort) ||
+        !PS2KeyWaitForKeyboardAck(DataPort, CommandPort))
+        return FALSE;
+
+    if (!PS2KeyWaitForInputBufferEmpty(CommandPort))
+        return FALSE;
+    PS2KeyWritePort((USHORT)DataPort, 0xF4);
+    return PS2KeyWaitForInputBufferEmpty(CommandPort) &&
+           PS2KeyWaitForKeyboardAck(DataPort, CommandPort);
 }
 
 static
@@ -157,6 +201,63 @@ PS2KeyDisableController(IN ULONG CommandPort)
 VEASTATUS 
 VEAPI
 PS2KeyObjectInterruptHandler(PVOID Object, POIP Oip);
+
+VOID
+VEAPI
+PS2KeyDpcRoutine(
+    IN PKDPC Dpc,
+    IN PVOID DeferredContext,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2
+)
+{
+    PPS2KEY_DEVICE_EXTENSION Extension = (PPS2KEY_DEVICE_EXTENSION)DeferredContext;
+    KIRQL OldIrql;
+    POIP OipToComplete = NULL;
+    ULONG PacketsRead = 0;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    if (!Extension)
+    {
+        return;
+    }
+
+    KsAcquireSpinLock(&Extension->RingLock, &OldIrql);
+
+    if (Extension->PendingReadOip != NULL && Extension->RingCount > 0)
+    {
+        POIP Oip = Extension->PendingReadOip;
+        POIP_STACK Stack = ObioGetCurrentOipStackLocation(Oip);
+        ULONG MaxPackets = Stack->Parameters.ReadWrite.Length / sizeof(KEYBOARD_INPUT_DATA);
+        PKEYBOARD_INPUT_DATA OutBuf = (PKEYBOARD_INPUT_DATA)Oip->AssociatedOip.SystemBuffer;
+
+        if (MaxPackets > 0 && OutBuf != NULL)
+        {
+            while (PacketsRead < MaxPackets && Extension->RingCount > 0)
+            {
+                OutBuf[PacketsRead++] = Extension->RingBuffer[Extension->RingReadIndex];
+                Extension->RingReadIndex =
+                    (Extension->RingReadIndex + 1) % PS2KEY_RING_BUFFER_SIZE;
+                Extension->RingCount--;
+            }
+
+            Extension->PendingReadOip = NULL;
+            OipToComplete = Oip;
+        }
+    }
+
+    KsReleaseSpinLock(&Extension->RingLock, OldIrql);
+
+    if (OipToComplete != NULL)
+    {
+        OipToComplete->StatusInformation.Status = STATUS_SUCCESS;
+        OipToComplete->StatusInformation.Information = PacketsRead * sizeof(KEYBOARD_INPUT_DATA);
+        ObioCompleteRequest(OipToComplete);
+    }
+}
 
 VEASTATUS
 VEAPI
@@ -174,30 +275,28 @@ BOOLEAN
 VEAPI
 PS2KeyIrqHandler(IN PKINTERRUPT Interrupt, IN PVOID ServiceContext)
 {
-    PPS2KEY_DEVICE_EXTENSION Extension;
+    PPS2KEY_DEVICE_EXTENSION Extension = (PPS2KEY_DEVICE_EXTENSION)ServiceContext;
     KIRQL OldIrql;
     UCHAR Status;
     UCHAR ScanCode;
     KEYBOARD_INPUT_DATA Packet;
-    POIP OipToComplete = NULL;
+    BOOLEAN NeedDpc = FALSE;
 
     UNREFERENCED_PARAMETER(Interrupt);
 
-    Extension = (PPS2KEY_DEVICE_EXTENSION)ServiceContext;
     if (!Extension || !Extension->DataPort || !Extension->CommandPort)
     {
         return FALSE;
     }
 
     Status = PS2KeyReadPort((USHORT)Extension->CommandPort);
-    if (!(Status & 0x01))
+    if ((Status & 0x21) != 0x01)
     {
         return FALSE;
     }
 
     ScanCode = PS2KeyReadPort((USHORT)Extension->DataPort);
 
-    // Prefix extended key (arrow keys, right ctrl/alt, dll)
     if (ScanCode == 0xE0)
     {
         Extension->ExpectE0 = TRUE;
@@ -215,13 +314,7 @@ PS2KeyIrqHandler(IN PKINTERRUPT Interrupt, IN PVOID ServiceContext)
 
     KsAcquireSpinLock(&Extension->RingLock, &OldIrql);
 
-    if (Extension->PendingReadOip != NULL)
-    {
-        // Langsung serahkan ke continuous reader milik kbdclass yang lagi nunggu
-        OipToComplete = Extension->PendingReadOip;
-        Extension->PendingReadOip = NULL;
-    }
-    else if (Extension->RingCount < PS2KEY_RING_BUFFER_SIZE)
+    if (Extension->RingCount < PS2KEY_RING_BUFFER_SIZE)
     {
         Extension->RingBuffer[Extension->RingWriteIndex] = Packet;
         Extension->RingWriteIndex =
@@ -229,18 +322,16 @@ PS2KeyIrqHandler(IN PKINTERRUPT Interrupt, IN PVOID ServiceContext)
         Extension->RingCount++;
     }
 
+    if (Extension->PendingReadOip != NULL)
+    {
+        NeedDpc = TRUE;
+    }
+
     KsReleaseSpinLock(&Extension->RingLock, OldIrql);
 
-    if (OipToComplete != NULL)
+    if (NeedDpc)
     {
-        RtlCopyMemory(
-            OipToComplete->AssociatedOip.SystemBuffer,
-            &Packet,
-            sizeof(KEYBOARD_INPUT_DATA)
-        );
-        OipToComplete->StatusInformation.Status = STATUS_SUCCESS;
-        OipToComplete->StatusInformation.Information = sizeof(KEYBOARD_INPUT_DATA);
-        ObioCompleteRequest(OipToComplete);
+        KsInsertQueueDpc(&Extension->IsrDpc, NULL, NULL);
     }
 
     return TRUE;
@@ -281,6 +372,7 @@ PS2KeyStartDevice(
     }
 
     KsInitializeSpinlock(&Extension->RingLock);
+    KsInitializeDpc(&Extension->IsrDpc, PS2KeyDpcRoutine, Extension);
     Extension->RingReadIndex = 0;
     Extension->RingWriteIndex = 0;
     Extension->RingCount = 0;
