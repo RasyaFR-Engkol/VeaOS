@@ -22,11 +22,11 @@ VEASTATUS VEAPI MouArmPortRead(IN PMOUSE_DEVICE_EXTENSION DevExt);
 static
 ULONG_PTR
 MouAcquireDeviceLock(
-    IN PKSPIN_LOCK SpinLock
+    IN  PKSPIN_LOCK SpinLock,
+    OUT PKIRQL      OldIrql
 )
 {
     ULONG_PTR Flags;
-    KIRQL DummyIrql;
 
     __asm__ __volatile__(
         "pushf\n\t"
@@ -37,7 +37,10 @@ MouAcquireDeviceLock(
         : "memory"
     );
 
-    KsAcquireSpinLock(SpinLock, &DummyIrql);
+    KsAcquireSpinLock(SpinLock, OldIrql);
+
+    /* Pastikan IF tetap 0 kalau KsAcquireSpinLock / KfRaiseIrql menyalakan sti */
+    __asm__ __volatile__("cli" ::: "memory");
     return Flags;
 }
 
@@ -45,14 +48,19 @@ static
 VOID
 MouReleaseDeviceLock(
     IN PKSPIN_LOCK SpinLock,
+    IN KIRQL       OldIrql,
     IN ULONG_PTR   SavedFlags
 )
 {
-    KsReleaseSpinLock(SpinLock, PASSIVE_LEVEL);
+    KsReleaseSpinLock(SpinLock, OldIrql);
 
     if (SavedFlags & 0x200)
     {
         __asm__ __volatile__("sti" ::: "memory");
+    }
+    else
+    {
+        __asm__ __volatile__("cli" ::: "memory");
     }
 }
 
@@ -182,11 +190,12 @@ MouPopInputData(
 )
 {
     KIRQL OldIrql;
+    ULONG_PTR LockFlags;
     ULONG Count;
 
-    KsAcquireSpinLock(&DevExt->PdoData.MouseLock, &OldIrql);
+    LockFlags = MouAcquireDeviceLock(&DevExt->PdoData.MouseLock, &OldIrql);
     Count = MouPopInputDataLocked(DevExt, OutBuffer, MaxPackets);
-    KsReleaseSpinLock(&DevExt->PdoData.MouseLock, OldIrql);
+    MouReleaseDeviceLock(&DevExt->PdoData.MouseLock, OldIrql, LockFlags);
 
     return Count;
 }
@@ -204,11 +213,12 @@ MouPortReadCompletion(
     PMOUSE_DEVICE_EXTENSION DevExt = (PMOUSE_DEVICE_EXTENSION)Context;
 
     if (VEA_SUCCESS(Oip->StatusInformation.Status) &&
-        Oip->StatusInformation.Information >= sizeof(MOUSE_INPUT_DATA))
+    Oip->StatusInformation.Information >= sizeof(MOUSE_INPUT_DATA))
     {
-        ULONG_PTR LockFlags = MouAcquireDeviceLock(&DevExt->PdoData.MouseLock);
+        KIRQL OldIrql;
+        ULONG_PTR LockFlags = MouAcquireDeviceLock(&DevExt->PdoData.MouseLock, &OldIrql);
         MouPushInputDataLocked(DevExt, &DevExt->PdoData.RawPacket);
-        MouReleaseDeviceLock(&DevExt->PdoData.MouseLock, LockFlags);
+        MouReleaseDeviceLock(&DevExt->PdoData.MouseLock, OldIrql, LockFlags);
     }
 
     if (Oip->StatusInformation.Status != STATUS_CANCELLED)
@@ -230,6 +240,7 @@ MouInputDpcRoutine(
 {
     PMOUSE_DEVICE_EXTENSION DevExt = (PMOUSE_DEVICE_EXTENSION)DeferredContext;
     KIRQL OldIrql;
+    ULONG_PTR LockFlags;
     POIP UserOip = NULL;
     ULONG Copied = 0;
 
@@ -237,7 +248,7 @@ MouInputDpcRoutine(
     UNREFERENCED_PARAMETER(SystemArgument1);
     UNREFERENCED_PARAMETER(SystemArgument2);
 
-    KsAcquireSpinLock(&DevExt->PdoData.MouseLock, &OldIrql);
+    LockFlags = MouAcquireDeviceLock(&DevExt->PdoData.MouseLock, &OldIrql);
 
     if (DevExt->PdoData.PendingReadOip != NULL)
     {
@@ -267,7 +278,7 @@ MouInputDpcRoutine(
         }
     }
 
-    KsReleaseSpinLock(&DevExt->PdoData.MouseLock, OldIrql);
+    MouReleaseDeviceLock(&DevExt->PdoData.MouseLock, OldIrql, LockFlags);
 
     if (UserOip != NULL)
     {
@@ -367,10 +378,10 @@ MouPdoHandle(
             KIRQL OldIrql;
             POIP Pending;
 
-            KsAcquireSpinLock(&DevExt->PdoData.MouseLock, &OldIrql);
+            ULONG_PTR LockFlags = MouAcquireDeviceLock(&DevExt->PdoData.MouseLock, &OldIrql);
             Pending = DevExt->PdoData.PendingReadOip;
             DevExt->PdoData.PendingReadOip = NULL;
-            KsReleaseSpinLock(&DevExt->PdoData.MouseLock, OldIrql);
+            MouReleaseDeviceLock(&DevExt->PdoData.MouseLock, OldIrql, LockFlags);
 
             if (Pending != NULL)
             {
@@ -397,7 +408,7 @@ MouPdoHandle(
             KIRQL OldIrql;
             ULONG Copied;
 
-            KsAcquireSpinLock(&DevExt->PdoData.MouseLock, &OldIrql);
+            ULONG_PTR LockFlags = MouAcquireDeviceLock(&DevExt->PdoData.MouseLock, &OldIrql);
             Copied = MouPopInputDataLocked(
                 DevExt,
                 (PMOUSE_INPUT_DATA)Oip->AssociatedOip.SystemBuffer,
@@ -406,7 +417,7 @@ MouPdoHandle(
 
             if (Copied > 0)
             {
-                KsReleaseSpinLock(&DevExt->PdoData.MouseLock, OldIrql);
+                MouReleaseDeviceLock(&DevExt->PdoData.MouseLock, OldIrql, LockFlags);
                 Oip->StatusInformation.Status = STATUS_SUCCESS;
                 Oip->StatusInformation.Information = Copied * sizeof(MOUSE_INPUT_DATA);
                 ObioCompleteRequest(Oip);
@@ -419,13 +430,13 @@ MouPdoHandle(
                     DevExt->PdoData.PendingReadOip,
                     DevExt->Self,
                     DevExt->PdoData.PortDevice);
-                KsReleaseSpinLock(&DevExt->PdoData.MouseLock, OldIrql);
+                MouReleaseDeviceLock(&DevExt->PdoData.MouseLock, OldIrql, LockFlags);
                 Status = STATUS_DEVICE_BUSY;
                 break;
             }
 
             DevExt->PdoData.PendingReadOip = Oip;
-            KsReleaseSpinLock(&DevExt->PdoData.MouseLock, OldIrql);
+            MouReleaseDeviceLock(&DevExt->PdoData.MouseLock, OldIrql, LockFlags);
             return STATUS_PENDING;
         }
 
