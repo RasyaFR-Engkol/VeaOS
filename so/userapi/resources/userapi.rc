@@ -1,0 +1,7 @@
+#include "../userapi_priv.h"
+
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+
+IDB_DEFAULT_CURSOR  BITMAP  "cursor.bmp"
+IDB_16X16_CURSOR BITMAP "cursor_16x16.bmp"
+IDB_32X32_CURSOR BITMAP "cursor_32x32.bmp"
