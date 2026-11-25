@@ -240,40 +240,45 @@ PS2MouInitializeController(IN PPS2MOU_DEVICE_EXTENSION Extension)
     UCHAR OrigConfig;
     UCHAR WorkConfig;
     BOOLEAN KbdWasEnabled;
+    BOOLEAN Result = FALSE;
+    ULONG_PTR Flags;
 
-    /* 1. Disable sementara Port 1 (Keyboard) & Port 2 (Mouse) agar tidak tabrakan di 0x60 */
-    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) return FALSE;
-    PS2MouWritePort((USHORT)CommandPort, 0xAD);
+    __asm__ __volatile__("pushf\n\tpop %0\n\tcli" : "=r"(Flags) :: "memory");
 
-    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) return FALSE;
-    PS2MouWritePort((USHORT)CommandPort, 0xA7);
-
-    PS2MouFlushOutputBuffer(DataPort, CommandPort);
-
-    /* 2. Baca 8042 Controller Configuration Byte (0x20) */
-    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) return FALSE;
+    /* 1. Baca 8042 Controller Configuration Byte (0x20) SEBELUM mengirim 0xAD */
+    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) goto out;
     PS2MouWritePort((USHORT)CommandPort, 0x20);
 
     if (!PS2MouWaitForOutputBufferFull(CommandPort))
     {
         DPRINT("PS2MOU: Gagal baca i8042 config byte\n");
-        return FALSE;
+        goto out;
     }
     OrigConfig = PS2MouReadPort((USHORT)DataPort);
     KbdWasEnabled = ((OrigConfig & 0x10) == 0);
+    WorkConfig = OrigConfig;
 
-    /* Matikan IRQ1 & IRQ12 selama proses probing, tapi nyalakan clock Port 2 (~0x20) */
+    /* 2. Disable sementara Port 1 (Keyboard) & Port 2 (Mouse) agar tidak tabrakan di 0x60 */
+    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) goto restore_kbd;
+    PS2MouWritePort((USHORT)CommandPort, 0xAD);
+
+    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) goto restore_kbd;
+    PS2MouWritePort((USHORT)CommandPort, 0xA7);
+
+    PS2MouFlushOutputBuffer(DataPort, CommandPort);
+
+    /* Matikan IRQ1 & IRQ12 selama proses probing, nyalakan clock Port 2 (~0x20) */
     WorkConfig = OrigConfig;
     WorkConfig &= ~0x03; /* Clear bit 0 (IRQ1) & bit 1 (IRQ12) sementara */
     WorkConfig &= ~0x20; /* Clear bit 5 (Enable Mouse Clock) */
 
-    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) return FALSE;
+    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) goto restore_kbd;
     PS2MouWritePort((USHORT)CommandPort, 0x60);
-    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) return FALSE;
+    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) goto restore_kbd;
     PS2MouWritePort((USHORT)DataPort, WorkConfig);
 
     /* 3. Aktifkan Second PS/2 Port (Auxiliary / Mouse) */
-    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) return FALSE;
+    if (!PS2MouWaitForInputBufferEmpty(CommandPort)) goto restore_kbd;
     PS2MouWritePort((USHORT)CommandPort, 0xA8);
     PS2MouFlushOutputBuffer(DataPort, CommandPort);
 
@@ -281,29 +286,27 @@ PS2MouInitializeController(IN PPS2MOU_DEVICE_EXTENSION Extension)
     if (!PS2MouSendMouseCommand(DataPort, CommandPort, 0xF6))
     {
         DPRINT("PS2MOU: Gagal kirim 0xF6 (Set Defaults)\n");
-        if (KbdWasEnabled && PS2MouWaitForInputBufferEmpty(CommandPort))
-            PS2MouWritePort((USHORT)CommandPort, 0xAE);
-        return FALSE;
+        goto restore_kbd;
     }
 
-    /* 5. Probe IntelliMouse 4-byte wheel (fallback ke 3-byte jika tidak didukung) */
+    /* 5. Probe IntelliMouse 4-byte wheel */
     Extension->DeviceId = 0x00;
     Extension->HasWheel = FALSE;
     Extension->PacketLength = 3;
     (VOID)PS2MouDetectIntelliMouse(Extension);
 
-    /* Set sample rate kerja ke 100 Hz */
     (VOID)PS2MouSetSampleRate(DataPort, CommandPort, 100);
 
     /* 6. Enable Data Reporting (0xF4) */
     if (!PS2MouSendMouseCommand(DataPort, CommandPort, 0xF4))
     {
         DPRINT("PS2MOU: Gagal kirim 0xF4 (Enable Streaming)\n");
-        if (KbdWasEnabled && PS2MouWaitForInputBufferEmpty(CommandPort))
-            PS2MouWritePort((USHORT)CommandPort, 0xAE);
-        return FALSE;
+        goto restore_kbd;
     }
 
+    Result = TRUE;
+
+restore_kbd:
     /* 7. Kembalikan Port 1 (jika sebelumnya aktif) dan aktifkan IRQ12 (+ IRQ1 jika aktif) */
     if (KbdWasEnabled)
     {
@@ -311,11 +314,19 @@ PS2MouInitializeController(IN PPS2MOU_DEVICE_EXTENSION Extension)
         {
             PS2MouWritePort((USHORT)CommandPort, 0xAE);
         }
+        WorkConfig &= ~0x10; /* Pastikan bit Disable Port 1 Clock bersih */
     }
 
-    WorkConfig |= (OrigConfig & 0x01); /* Pertahankan IRQ1 keyboard */
-    WorkConfig |= 0x02;                /* Aktifkan IRQ12 mouse */
-    WorkConfig &= ~0x20;               /* Pastikan clock Port 2 tetap aktif */
+    if (Result)
+    {
+        WorkConfig = OrigConfig;
+        WorkConfig |= 0x02;            /* Aktifkan IRQ12 mouse */
+        WorkConfig &= ~0x20;           /* Pastikan clock Port 2 tetap aktif */
+    }
+    else
+    {
+        WorkConfig = OrigConfig;
+    }
 
     if (PS2MouWaitForInputBufferEmpty(CommandPort))
     {
@@ -326,7 +337,12 @@ PS2MouInitializeController(IN PPS2MOU_DEVICE_EXTENSION Extension)
         }
     }
 
-    return TRUE;
+out:
+    if (Flags & 0x200)
+    {
+        __asm__ __volatile__("sti" ::: "memory");
+    }
+    return Result;
 }
 
 static
