@@ -108,8 +108,7 @@ AhciDpcRoutine(
             }
             else
             {
-                ULONG MaxChunkSize = AHCI_COMMAND_TABLE_PRDT_COUNT * 4096;
-                ULONG JustTransferred = (Chunk->RemainingBytes > MaxChunkSize) ? MaxChunkSize : Chunk->RemainingBytes;
+                ULONG JustTransferred = Chunk->LastDispatchedBytes;
 
                 if (!Chunk->IsWrite && Chunk->UsesBounceBuffer && PortCtx->BounceBufferVirtual)
                 {

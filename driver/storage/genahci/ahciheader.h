@@ -104,6 +104,7 @@ typedef struct _AHCI_IO_CHUNK_CONTEXT {
     ULONG RemainingBytes;
     ULONG TransferredBytes;
     ULONG BufferByteOffset; 
+    ULONG LastDispatchedBytes;
     BOOLEAN IsWrite;
     BOOLEAN UsesBounceBuffer;
 } AHCI_IO_CHUNK_CONTEXT, *PAHCI_IO_CHUNK_CONTEXT;

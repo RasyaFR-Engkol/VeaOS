@@ -527,86 +527,133 @@ AhciDispatchSubChunk(
     PMDL Mdl = Oip->MdlAddress;
     ULONG MaxChunkSize = AHCI_COMMAND_TABLE_PRDT_COUNT * 4096;
     ULONG CurrentChunkSize = (Chunk->RemainingBytes > MaxChunkSize) ? MaxChunkSize : Chunk->RemainingBytes;
-    ULONG SectorCount = CurrentChunkSize / PortCtx->SectorSize;
     PVOID UserCurrentBuffer = NULL;
 
-    if (Mdl)
+    if (Mdl && Mdl->MappedSystemVa)
     {
         UserCurrentBuffer = (PVOID)((ULONG_PTR)Mdl->MappedSystemVa + Chunk->BufferByteOffset);
     }
-    else if ((Oip->Flags & OIP_BUFFERED_IO) && Oip->AssociatedOip.SystemBuffer)
+    else if (!Mdl && (Oip->Flags & OIP_BUFFERED_IO) && Oip->AssociatedOip.SystemBuffer)
     {
         UserCurrentBuffer = (PVOID)((ULONG_PTR)Oip->AssociatedOip.SystemBuffer + Chunk->BufferByteOffset);
     }
-    else if (Oip->UserBuffer)
+    else if (!Mdl && Oip->UserBuffer)
     {
         UserCurrentBuffer = (PVOID)((ULONG_PTR)Oip->UserBuffer + Chunk->BufferByteOffset);
     }
 
-    BOOLEAN NeedsBounce = !AhciIsBufferAligned(UserCurrentBuffer, CurrentChunkSize);
+    BOOLEAN NeedsBounce = FALSE;
+    if (Mdl)
+    {
+        NeedsBounce = (((Mdl->ByteOffset + Chunk->BufferByteOffset) & 0x03) != 0) ||
+                      ((CurrentChunkSize & 0x03) != 0);
+    }
+    else
+    {
+        NeedsBounce = !UserCurrentBuffer ||
+                      ((ULONG_PTR)UserCurrentBuffer < 0x80000000UL) ||
+                      !AhciIsBufferAligned(UserCurrentBuffer, CurrentChunkSize);
+    }
 
     Chunk->UsesBounceBuffer = FALSE;
 
     AhciPrepareH2dCommand(PortCtx, Slot, Chunk->IsWrite, 0, &CmdHeader, &CmdTable, &Fis);
 
     ULONG PrdtEntries = 0;
+    ULONG ActualDispatchedBytes = 0;
 
     if (NeedsBounce && PortCtx->BounceBufferVirtual)
     {
         Chunk->UsesBounceBuffer = TRUE;
 
-        if (Chunk->IsWrite)
+        if (Chunk->IsWrite && UserCurrentBuffer)
         {
-            // Jika WRITE: Copy data dari buffer unaligned user KE Bounce Buffer dulu
             RtlCopyMemory(PortCtx->BounceBufferVirtual, UserCurrentBuffer, CurrentChunkSize);
         }
 
-        // PRDT cuma butuh 1 entry menunjuk ke Bounce Buffer Kontigu
         AhciSetupSinglePrdt(CmdTable, 0, PortCtx->BounceBufferPhysical, CurrentChunkSize, TRUE);
         PrdtEntries = 1;
+        ActualDispatchedBytes = CurrentChunkSize;
     }
-    else
+    else if (Mdl)
     {
-        if (Mdl)
+        PPFN_NUMBER PageArray = (PPFN_NUMBER)(Mdl + 1);
+        ULONG TotalOffset = Mdl->ByteOffset + Chunk->BufferByteOffset;
+        ULONG PageIndex = TotalOffset / 4096;
+        ULONG OffsetInPage = TotalOffset % 4096;
+        ULONG BytesRemainingInChunk = CurrentChunkSize;
+
+        while (BytesRemainingInChunk > 0 && PrdtEntries < AHCI_MAX_PRDT_ENTRIES)
         {
-            PPFN_NUMBER PageArray = (PPFN_NUMBER)(Mdl + 1);
-            ULONG TotalOffset = Mdl->ByteOffset + Chunk->BufferByteOffset;
-            ULONG PageIndex = TotalOffset / 4096;
-            ULONG OffsetInPage = TotalOffset % 4096;
-            ULONG BytesRemainingInChunk = CurrentChunkSize;
+            PHYSICAL_ADDRESS PagePhys;
+            PagePhys.QuadPart = ((ULONGLONG)PageArray[PageIndex] << 12) + OffsetInPage;
 
-            while (BytesRemainingInChunk > 0 && PrdtEntries < AHCI_MAX_PRDT_ENTRIES)
-            {
-                PHYSICAL_ADDRESS PagePhys;
-                PagePhys.QuadPart = ((ULONGLONG)PageArray[PageIndex] << 12) + OffsetInPage;
-                
-                ULONG ChunkSize = 4096 - OffsetInPage;
-                if (ChunkSize > BytesRemainingInChunk) ChunkSize = BytesRemainingInChunk;
+            ULONG PageBytes = 4096 - OffsetInPage;
+            if (PageBytes > BytesRemainingInChunk) PageBytes = BytesRemainingInChunk;
 
-                AhciSetupSinglePrdt(CmdTable, PrdtEntries, PagePhys, ChunkSize, FALSE);
+            AhciSetupSinglePrdt(CmdTable, PrdtEntries, PagePhys, PageBytes, FALSE);
 
-                BytesRemainingInChunk -= ChunkSize;
-                OffsetInPage = 0;
-                PageIndex++;
-                PrdtEntries++;
-            }
-            
-            if (PrdtEntries > 0)
-            {
-                CmdTable->Prdt[PrdtEntries - 1].I = 1;
-            }
+            BytesRemainingInChunk -= PageBytes;
+            ActualDispatchedBytes += PageBytes;
+            OffsetInPage = 0;
+            PageIndex++;
+            PrdtEntries++;
         }
-        else if (Oip->UserBuffer)
+
+        /* Jika terpotong batas 16 PRDT di tengah sektor, bulatkan turun ke kelipatan SectorSize */
+        ULONG AlignedBytes = (ActualDispatchedBytes / PortCtx->SectorSize) * PortCtx->SectorSize;
+        if (AlignedBytes < ActualDispatchedBytes && PrdtEntries > 0)
         {
-            PHYSICAL_ADDRESS PhysAddr = MmGetPhysicalAddress(UserCurrentBuffer);
-            AhciSetupSinglePrdt(CmdTable, 0, PhysAddr, CurrentChunkSize, TRUE);
-            PrdtEntries = 1;
+            ULONG Trim = ActualDispatchedBytes - AlignedBytes;
+            CmdTable->Prdt[PrdtEntries - 1].Dbc -= Trim;
+            ActualDispatchedBytes = AlignedBytes;
+        }
+
+        if (PrdtEntries > 0)
+        {
+            CmdTable->Prdt[PrdtEntries - 1].I = 1;
+        }
+    }
+    else if (UserCurrentBuffer)
+    {
+        /* Walk virtual buffer per-page (4096 byte) agar aman untuk NonPagedPool non-contiguous */
+        ULONG_PTR CurrentVa = (ULONG_PTR)UserCurrentBuffer;
+        ULONG BytesRemainingInChunk = CurrentChunkSize;
+
+        while (BytesRemainingInChunk > 0 && PrdtEntries < AHCI_MAX_PRDT_ENTRIES)
+        {
+            ULONG OffsetInPage = (ULONG)(CurrentVa & 0xFFF);
+            ULONG PageBytes = 4096 - OffsetInPage;
+            if (PageBytes > BytesRemainingInChunk) PageBytes = BytesRemainingInChunk;
+
+            PHYSICAL_ADDRESS PagePhys = MmGetPhysicalAddress((PVOID)CurrentVa);
+            AhciSetupSinglePrdt(CmdTable, PrdtEntries, PagePhys, PageBytes, FALSE);
+
+            CurrentVa += PageBytes;
+            BytesRemainingInChunk -= PageBytes;
+            ActualDispatchedBytes += PageBytes;
+            PrdtEntries++;
+        }
+
+        ULONG AlignedBytes = (ActualDispatchedBytes / PortCtx->SectorSize) * PortCtx->SectorSize;
+        if (AlignedBytes < ActualDispatchedBytes && PrdtEntries > 0)
+        {
+            ULONG Trim = ActualDispatchedBytes - AlignedBytes;
+            CmdTable->Prdt[PrdtEntries - 1].Dbc -= Trim;
+            ActualDispatchedBytes = AlignedBytes;
+        }
+
+        if (PrdtEntries > 0)
+        {
+            CmdTable->Prdt[PrdtEntries - 1].I = 1;
         }
     }
 
+    ULONG SectorCount = ActualDispatchedBytes / PortCtx->SectorSize;
+    Chunk->LastDispatchedBytes = ActualDispatchedBytes;
     CmdHeader->Prdtl = PrdtEntries;
 
-    /* Setup Standard LBA48 DMA FIS */
+    /* Setup Standard LBA48 DMA FIS sesuai jumlah sektor aktual di PRDT */
     Fis->Command         = Chunk->IsWrite ? ATA_CMD_WRITE_DMA_EX : ATA_CMD_READ_DMA_EX;
     Fis->LbaLow          = (UCHAR)(Chunk->CurrentStartLba & 0xFF);
     Fis->LbaMid          = (UCHAR)((Chunk->CurrentStartLba >> 8) & 0xFF);
@@ -619,7 +666,7 @@ AhciDispatchSubChunk(
     Fis->SectorCountHigh = (UCHAR)((SectorCount >> 8) & 0xFF);
 
     KIRQL OldIrql;
-    
+
     KsAcquireSpinLock(&PortCtx->PortLock, &OldIrql);
     PortCtx->PendingOip[Slot] = Oip;
     PortRegs->Ci = (1 << Slot);
