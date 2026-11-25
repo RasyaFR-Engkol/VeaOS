@@ -44,12 +44,14 @@ typedef struct _WND_CLASS_OBJECT {
     HINSTANCE hInstance;
     HBRUSH    hbrBackground;
     BOOLEAN   Used;
+    PEPROCESS OwnerProcess;
 } WND_CLASS_OBJECT, *PWND_CLASS_OBJECT;
 
 typedef struct _WND_OBJECT
 {
     ULONG           Magic;
     LIST_ENTRY      GlobalListEntry;
+    volatile LONG   RefCount;
     BOOLEAN         Used;
     HWND            hWnd;
     HWND            hWndParent;      /* NULL untuk top-level window */
@@ -71,9 +73,46 @@ typedef struct _WND_OBJECT
     ULONG           Width;
     ULONG           Height;
     BOOLEAN         NeedsPaint;
+    PULONG          ShadowBackup;
+    ULONG           ShadowBackupCapacity;
+    LONG            LastShadowX;
+    LONG            LastShadowY;
+    ULONG           LastShadowW;
+    ULONG           LastShadowH;
+    BOOLEAN         HasShadowDrawn;
+    LONG            NormalX;
+    LONG            NormalY;
+    ULONG           NormalWidth;
+    ULONG           NormalHeight;
+    ULONG_PTR       UserData;
 } WND_OBJECT, *PWND_OBJECT;
 
 extern HWND IptFocusWindow;
+
+typedef struct _QUEUED_MESSAGE {
+    LIST_ENTRY    ListEntry;
+    MESSAGE_QUEUE Msg;
+} QUEUED_MESSAGE, *PQUEUED_MESSAGE;
+
+struct _ETHREAD;
+
+typedef struct _USER_MESSAGE_QUEUE {
+    LIST_ENTRY    ThreadListEntry;
+    struct _ETHREAD *Thread;
+    volatile LONG RefCount;
+    BOOLEAN       Destroyed;
+    KSPIN_LOCK    Lock;
+    KEVENT        WakeEvent;        /* NotificationEvent (manual-reset) */
+    LIST_ENTRY    PostListHead;     /* Antrean PostMessage & WM_CHAR */
+    LIST_ENTRY    InputListHead;    /* Antrean Hardware Input (Mouse & Keyboard) */
+    LIST_ENTRY    SentListHead;
+    ULONG         MessageCount;
+    ULONG         WakeBits;         /* Bitmask pesan yang sedang tersedia (QS_*) */
+    BOOLEAN       QuitPosted;
+    INT           QuitExitCode;
+} USER_MESSAGE_QUEUE, *PUSER_MESSAGE_QUEUE;
+
+#include <psdk/w32thread.h>
 
 BOOLEAN
 VEAPI
@@ -151,11 +190,8 @@ VeaUserTranslateMessage(
     IN const PMESSAGE_QUEUE UserMsg
 );
 
-extern MESSAGE_QUEUE MsgMessageQueue[MAX_INPUT_QUEUE];
 extern UCHAR IptAsyncKeyState[256];
 extern BOOLEAN UserSubsystemInitialized;
-extern GDI_DC_OBJECT gDcTable[MAX_GDI_DCS];
-extern KEVENT MsgInputEvent;
 
 VEASTATUS
 WINAPI
@@ -245,6 +281,12 @@ UserInitializeWindowStations(VOID);
 VOID
 VEAPI
 WndCleanupProcessWindows(
+    IN PEPROCESS Process
+);
+
+VOID
+VEAPI
+WndCleanupProcessClasses(
     IN PEPROCESS Process
 );
 
@@ -408,6 +450,506 @@ VOID
 VEAPI
 UserProcessMousePacket(
     IN PMOUSE_INPUT_DATA Mou
+);
+
+BOOLEAN
+VEAPI
+VeaUserSetCursorShape(
+    IN ULONG        Width,
+    IN ULONG        Height,
+    IN LONG         HotX,
+    IN LONG         HotY,
+    IN CONST ULONG *PixelsARGB
+);
+
+INT
+VEAPI
+VeaUserShowCursor(
+    IN BOOLEAN bShow
+);
+
+BOOLEAN
+VEAPI
+VeaUserGetCursorPos(
+    OUT PPOINT lpPoint
+);
+
+BOOLEAN
+VEAPI
+VeaUserSetCursorPos(
+    IN LONG X,
+    IN LONG Y
+);
+
+HWND
+VEAPI
+VeaUserSetCapture(
+    IN HWND hWnd
+);
+
+BOOLEAN
+VEAPI
+VeaUserReleaseCapture(VOID);
+
+PWND_OBJECT
+WndLookupHandleLocked(
+    IN HWND hWnd
+);
+
+VOID
+VEAPI
+MsgDestroyThreadQueue(
+    IN PETHREAD Thread
+);
+
+VOID
+WndDereference(
+    IN PWND_OBJECT Wnd
+);
+
+BOOLEAN
+VEAPI
+MsgPostToWindow(
+    IN HWND      hWnd,
+    IN ULONG     Message,
+    IN ULONG_PTR wParam,
+    IN LONG_PTR  lParam,
+    IN BOOLEAN   IsInput
+);
+
+VOID
+VEAPI
+MsgNotifyPaint(
+    IN PETHREAD TargetThread
+);
+
+VOID
+VEAPI
+MsgNotifyPaintAll(VOID);
+
+PUSER_MESSAGE_QUEUE
+MsgGetThreadQueue(
+    IN PETHREAD Thread,
+    IN BOOLEAN  CreateIfMissing
+);
+
+VEASTATUS
+VEAPI
+VeaUserPeekMessage(
+    OUT PMESSAGE_QUEUE UserMsg,
+    IN  PVOID          hWnd,
+    IN  ULONG          MsgMin,
+    IN  ULONG          MsgMax,
+    IN  UINT           wRemoveMsg
+);
+
+BOOLEAN
+VEAPI
+VeaUserPostMessage(
+    IN HWND   hWnd,
+    IN UINT   Msg,
+    IN WPARAM wParam,
+    IN LPARAM lParam
+);
+
+PVOID
+VEAPI
+PtGetCurrentThreadVeapiThread(VOID);
+
+HDESK
+VEAPI
+VeaUserCreateDesktop(
+    IN CONST CHAR  *lpszDesktop,
+    IN CONST CHAR  *lpszDevice,
+    IN PVOID        pDevmode,
+    IN ULONG        dwFlags,
+    IN ACCESS_MASK  dwDesiredAccess,
+    IN BOOLEAN      bInheritHandle
+);
+
+HDESK
+VEAPI
+VeaUserOpenDesktop(
+    IN CONST CHAR  *lpszDesktop,
+    IN ULONG        dwFlags,
+    IN BOOLEAN      fInherit,
+    IN ACCESS_MASK  dwDesiredAccess
+);
+
+BOOLEAN
+VEAPI
+VeaUserSetThreadDesktop(
+    IN HDESK hDesktop
+);
+
+BOOLEAN
+VEAPI
+VeaUserSwitchDesktop(
+    IN HDESK hDesktop
+);
+
+BOOLEAN
+VEAPI
+VeaUserSetLogonNotifyWindow(
+    IN HWND hWnd
+);
+
+extern HWND      GpLogonNotifyWindow;
+
+VOID
+WndGetClippedClientRect(
+    IN  PWND_OBJECT Wnd,
+    OUT PLONG OriginX,
+    OUT PLONG OriginY,
+    OUT PLONG ClipLeft,
+    OUT PLONG ClipTop,
+    OUT PLONG ClipRight,
+    OUT PLONG ClipBottom
+);
+
+BOOLEAN
+VEAPI
+GdipGetTextExtentFontInternal(
+    IN  HDC         hdc,
+    IN  CONST CHAR *Text,
+    OUT PULONG      OutWidth,
+    OUT PULONG      OutHeight,
+    IN  BOOLEAN     FromUser
+);
+
+BOOLEAN
+VEAPI
+GdipDrawTextInternal(
+    IN HDC         hdc,
+    IN INT         X,
+    IN INT         Y,
+    IN CONST CHAR *Text,
+    IN ULONG       ColorARGB,
+    IN BOOLEAN     FromUser
+);
+
+VOID
+VEAPI
+EngFillDesktopRect(
+    IN LONG  X,
+    IN LONG  Y,
+    IN ULONG Width,
+    IN ULONG Height,
+    IN ULONG ColorARGB
+);
+
+ULONG
+WndGetDesktopBgColor(
+    IN PDESKTOP_OBJECT Desktop
+);
+
+typedef struct _SENT_MESSAGE
+{
+    LIST_ENTRY ListEntry;
+    HWND       hWnd;
+    ULONG      Message;
+    ULONG_PTR  wParam;
+    LONG_PTR   lParam;
+    LRESULT    Result;
+    KEVENT     ReplyEvent;
+    LONG       RefCount;         /* 2 = dipegang sender + target queue (anti use-after-free) */
+    BOOLEAN    Completed;
+} SENT_MESSAGE, *PSENT_MESSAGE;
+
+LRESULT
+MsgSendMessageToThread(
+    IN PETHREAD  TargetThread,
+    IN HWND      hWnd,
+    IN ULONG     Message,
+    IN ULONG_PTR wParam,
+    IN LONG_PTR  lParam
+);
+
+LRESULT
+WndInvokeUserProc(
+    IN PWND_OBJECT Wnd,
+    IN ULONG Msg,
+    IN WPARAM wParam,
+    IN LPARAM lParam
+);
+
+LRESULT
+MsgSendMessageToThread(
+    IN PETHREAD  TargetThread,
+    IN HWND      hWnd,
+    IN ULONG     Message,
+    IN ULONG_PTR wParam,
+    IN LONG_PTR  lParam
+);
+
+VEASTATUS
+VEAPI
+VeaUserBuildHwndList(
+    IN  HDESK   hDesktop,
+    IN  HWND    hwndParent,
+    IN  BOOLEAN bChildren,
+    IN  ULONG   dwThreadId,
+    IN  ULONG   cHwndMax,
+    OUT HWND   *phwndFirst,
+    OUT PULONG  pcHwndNeeded
+);
+
+HWND
+VEAPI
+VeaUserGetWindow(
+    IN HWND hWnd,
+    IN UINT uCmd
+);
+
+HWND
+VEAPI
+VeaUserFindWindowEx(
+    IN HWND        hwndParent,
+    IN HWND        hwndChildAfter,
+    IN CONST CHAR *lpszClass,
+    IN CONST CHAR *lpszWindow
+);
+
+HWND
+VEAPI
+VeaUserGetForegroundWindow(VOID);
+
+BOOLEAN
+VEAPI
+VeaUserSetForegroundWindow(
+    IN HWND hWnd
+);
+
+INT
+VEAPI
+VeaUserGetWindowText(
+    IN  HWND  hWnd,
+    OUT PCHAR lpString,
+    IN  INT   nMaxCount
+);
+
+BOOLEAN
+VEAPI
+VeaUserSetWindowText(
+    IN HWND        hWnd,
+    IN CONST CHAR *lpString
+);
+
+BOOLEAN
+VEAPI
+VeaUserIsWindow(
+    IN HWND hWnd
+);
+
+BOOLEAN
+VEAPI
+VeaUserIsWindowVisible(
+    IN HWND hWnd
+);
+
+BOOLEAN
+VEAPI
+VeaUserGetWindowRect(
+    IN  HWND  hWnd,
+    OUT PRECT lpRect
+);
+
+BOOLEAN
+VEAPI
+VeaUserGetClientRect(
+    IN  HWND  hWnd,
+    OUT PRECT lpRect
+);
+
+BOOLEAN
+VEAPI
+VeaUserClientToScreen(
+    IN     HWND   hWnd,
+    IN OUT PPOINT lpPoint
+);
+
+BOOLEAN
+VEAPI
+VeaUserScreenToClient(
+    IN     HWND   hWnd,
+    IN OUT PPOINT lpPoint
+);
+
+HWND
+VEAPI
+VeaUserWindowFromPoint(
+    IN LONG ScreenX,
+    IN LONG ScreenY
+);
+
+PDESKTOP_OBJECT
+VEAPI
+DskEnsureThreadDesktop(
+    IN PTHREADINFO pti
+);
+
+BOOLEAN
+VEAPI
+WndIsEffectivelyVisible(
+    IN PWND_OBJECT Wnd
+);
+
+BOOLEAN
+VEAPI
+WndIsEffectivelyVisibleLocked(
+    IN PWND_OBJECT Wnd
+);
+
+#define MAX_VISIBLE_CLIP_RECTS 64
+
+ULONG
+VEAPI
+WndComputeVisibleRects(
+    IN  PWND_OBJECT Wnd,
+    IN  CONST RECT *ClipBounds,
+    OUT PRECT       OutRects,
+    IN  ULONG       MaxRects
+);
+
+VOID
+WndDrawTitleBarText(
+    IN PWND_OBJECT Wnd,
+    IN LONG TitleX,
+    IN LONG TitleY,
+    IN ULONG TitleW,
+    IN ULONG TitleH
+);
+
+VOID
+WndFillClippedFrameRect(
+    IN PVEAGDI_SURFACE Target,
+    IN CONST RECT     *VisRects,
+    IN ULONG           VisCount,
+    IN LONG            X,
+    IN LONG            Y,
+    IN ULONG           Width,
+    IN ULONG           Height,
+    IN ULONG           ColorARGB
+);
+
+VOID
+WndDrawLunaWindowFrame(
+    IN PVEAGDI_SURFACE Target,
+    IN PWND_OBJECT     Wnd,
+    IN CONST RECT     *FrameVis,
+    IN ULONG           FrameVisCount,
+    IN LONG            SnapX,
+    IN LONG            SnapY,
+    IN ULONG           SnapW,
+    IN ULONG           SnapH,
+    IN BOOLEAN         IsActive
+);
+
+VOID
+VEAPI
+WndDrawWindowBottomShadow(
+    IN PWND_OBJECT Wnd,
+    IN BOOLEAN     PresentToScreen
+);
+
+VOID
+VEAPI
+WndRestoreWindowBottomShadow(
+    IN PWND_OBJECT Wnd,
+    IN BOOLEAN     PresentToScreen
+);
+
+VOID
+WndReference(
+    IN PWND_OBJECT Wnd
+);
+
+#define CAPTION_BTN_NONE    0
+#define CAPTION_BTN_MIN     1
+#define CAPTION_BTN_MAX     2
+#define CAPTION_BTN_CLOSE   3
+
+#define CAPTION_STATE_NORMAL   0
+#define CAPTION_STATE_HOVER    1
+#define CAPTION_STATE_PRESSED  2
+
+ULONG
+WndHitTestCaptionButton(
+    IN PWND_OBJECT Wnd,
+    IN LONG        ScreenX,
+    IN LONG        ScreenY
+);
+
+VOID
+WndRedrawCaptionButtons(
+    IN PWND_OBJECT Wnd
+);
+
+ULONG
+WndGetCaptionButtonVisualState(
+    IN HWND  hWnd,
+    IN ULONG BtnId
+);
+
+ULONG
+WndLerpColorARGB(
+    IN ULONG C1,
+    IN ULONG C2,
+    IN LONG  Num,
+    IN LONG  Denom
+);
+
+INT
+VEAPI
+VeaUserGetSystemMetrics(
+    IN INT nIndex
+);
+
+LONG
+VEAPI
+VeaUserGetWindowLong(
+    IN HWND hWnd,
+    IN INT nIndex
+);
+
+LONG
+VEAPI
+VeaUserSetWindowLong(
+    IN HWND hWnd,
+    IN INT  nIndex,
+    IN LONG dwNewLong
+);
+
+BOOLEAN
+VEAPI
+VeaUserSetWindowPos(
+    IN HWND hWnd,
+    IN HWND hWndInsertAfter,
+    IN INT  X,
+    IN INT  Y,
+    IN INT  cx,
+    IN INT  cy,
+    IN UINT uFlags
+);
+
+VOID
+WndBringToFront(
+    IN PWND_OBJECT TopWnd
+);
+
+ULONG
+VEAPI
+VeaUserSetClassLong(
+    IN HWND  hWnd,
+    IN INT   nIndex,
+    IN LONG  dwNewLong
+);
+
+ULONG
+VEAPI
+VeaUserGetClassLong(
+    IN HWND hWnd,
+    IN INT  nIndex
 );
 
 #endif

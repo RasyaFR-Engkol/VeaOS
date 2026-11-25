@@ -62,27 +62,21 @@ typedef struct _GDI_DC_OBJECT {
     LONG    PenX;           /* Posisi pena aktif untuk MoveToEx / LineTo */
     LONG    PenY;
     HFONT   hFont;
+    HBRUSH  hBrush;
+    HPEN    hPen;
 } GDI_DC_OBJECT, *PGDI_DC_OBJECT;
 
-#define MAX_GDI_DCS         64
-#define WND_BORDER_WIDTH    2
-#define WND_TITLEBAR_HEIGHT 24
-
-VOID
-VEAPI
-EngFillRect32(
-    IN PVEAGDI_SURFACE Surface,
-    IN ULONG X,
-    IN ULONG Y,
-    IN ULONG Width,
-    IN ULONG Height,
-    IN ULONG ColorARGB
-);
+#define WND_BORDER_WIDTH    3
+#define WND_TITLEBAR_HEIGHT 28
+#define WND_CORNER_RADIUS   6
+#define WND_SHADOW_HEIGHT   6
+#define WND_SHADOW_OFFSET_X 2
 
 HDC  VEAPI GdiCreateWindowDC(IN HWND hWnd, IN LONG OriginX, IN LONG OriginY, IN ULONG Width, IN ULONG Height);
-VOID VEAPI GdiReleaseWindowDC(IN HDC hdc);
+BOOLEAN VEAPI GdiReleaseWindowDC(IN HDC hdc);
 
 BOOLEAN VEAPI VeaGdiFillRect(IN HDC hdc, IN CONST PRECT lprc, IN ULONG ColorARGB);
+BOOLEAN VEAPI VeaGdiFillRectInternal(IN HDC hdc, IN CONST RECT *Rect, IN ULONG ColorARGB);
 ULONG   VEAPI VeaGdiSetPixel(IN HDC hdc, IN INT X, IN INT Y, IN ULONG ColorARGB);
 ULONG   VEAPI VeaGdiGetPixel(IN HDC hdc, IN INT X, IN INT Y);
 BOOLEAN VEAPI VeaGdiLineTo(IN HDC hdc, IN INT X1, IN INT Y1, IN INT X2, IN INT Y2, IN ULONG ColorARGB);
@@ -97,8 +91,8 @@ VOID
 VEAPI
 EngFillRect32(
     IN PVEAGDI_SURFACE Surface,
-    IN ULONG X,
-    IN ULONG Y,
+    IN LONG X,
+    IN LONG Y,
     IN ULONG Width,
     IN ULONG Height,
     IN ULONG ColorARGB
@@ -297,7 +291,14 @@ typedef struct _GDI_LOADED_FACE {
     ULONG       Magic;
     LIST_ENTRY  ListEntry;
     ULONG       RefCount;
+    ULONG       Flags;           
+    BOOLEAN     Registered;        
+    BOOLEAN     IsMemoryFont;     
+    PEPROCESS   OwnerProcess;     
     CHAR        FilePath[256];
+    CHAR        FamilyName[64];   
+    ULONG       Weight;          
+    BOOLEAN     Italic;
     PVOID       FileBuffer;
     ULONG       FileSize;
     FT_Face     Face;
@@ -318,8 +319,10 @@ typedef struct _GDI_FONT_OBJECT {
 HFONT
 VEAPI
 VeaGdiCreateFont(
-    IN CONST CHAR *FontPath,
-    IN ULONG PixelHeight
+    IN INT         nHeight,
+    IN INT         fnWeight,
+    IN BOOLEAN     bItalic,
+    IN CONST CHAR *lpszFace
 );
 
 HFONT
@@ -349,5 +352,294 @@ VeaGdiGetTextExtentFont(
 
 VOID
 GdipInitializeDcManager(VOID);
+
+#define MAX_CURSOR_SIZE 64
+
+typedef struct _GDI_CURSOR_STATE {
+    BOOLEAN HasShape;
+    BOOLEAN DrawnOnScreen;
+    INT     ShowCount;      /* Standar Win32: tampil jika ShowCount >= 0 */
+    LONG    DrawnX;
+    LONG    DrawnY;
+    LONG    HotX;
+    LONG    HotY;
+    ULONG   Width;
+    ULONG   Height;
+    ULONG   Pixels[MAX_CURSOR_SIZE * MAX_CURSOR_SIZE];
+    ULONG   SaveUnder[MAX_CURSOR_SIZE * MAX_CURSOR_SIZE];
+} GDI_CURSOR_STATE;
+
+VOID
+VEAPI
+EngMovePointer(
+    IN LONG NewX,
+    IN LONG NewY
+);
+
+VOID
+VEAPI
+EngShowPointer(VOID);
+
+VOID
+VEAPI
+EngHidePointer(VOID);
+
+typedef struct tagPOINT
+{
+    LONG x;
+    LONG y;
+} POINT, *PPOINT, *LPPOINT;
+
+HDC
+VEAPI
+VeaUserGetDCEx(
+    IN HWND   hWnd,
+    IN HANDLE hrgnClip,
+    IN ULONG  Flags
+);
+
+BOOLEAN
+VEAPI
+VeaGdiDeleteDC(
+    IN HDC hdc
+);
+
+typedef enum _VEA_GDI_BLIT_KIND
+{
+    VeaGdiBlitCopy,
+    VeaGdiBlitTransparent,
+    VeaGdiBlitAlpha
+} VEA_GDI_BLIT_KIND;
+
+static FORCEINLINE PVEAGDI_SURFACE
+EngGetTargetSurface(VOID)
+{
+    return (GpPrimaryDisplay.BackBuffer != NULL)
+           ? GpPrimaryDisplay.BackBuffer
+           : &GpPrimaryDisplay.PrimarySurface;
+}
+
+VOID
+VEAPI
+EngPresentRect(
+    IN LONG X,
+    IN LONG Y,
+    IN ULONG Width,
+    IN ULONG Height
+);
+
+ULONG
+VeaGdiCreateSurfaceViews(
+    IN  PGDI_DC_OBJECT  Dc,
+    OUT PVEAGDI_SURFACE Views,
+    OUT PLONG           ViewOriginsX,
+    OUT PLONG           ViewOriginsY,
+    IN  ULONG           MaxViews
+);
+
+FORCEINLINE ULONG
+WndBlendShadowPixel(
+    IN ULONG BasePixel,
+    IN UCHAR Alpha
+)
+{
+    ULONG Inv = 255 - (ULONG)Alpha;
+    ULONG R = (((BasePixel >> 16) & 0xFF) * Inv + 127) / 255;
+    ULONG G = (((BasePixel >> 8)  & 0xFF) * Inv + 127) / 255;
+    ULONG B = ((BasePixel         & 0xFF) * Inv + 127) / 255;
+    return 0xFF000000 | (R << 16) | (G << 8) | B;
+}
+
+#define MAX_ENUM_WINDOWS    4096
+
+#define WND_CAPBTN_SIZE     21
+#define WND_CAPBTN_GAP      3
+#define WND_CAPBTN_MARGIN_R 6
+#define WND_CAPBTN_TOP      4
+
+#define GDI_BRUSH_MAGIC         0x48524247  /* 'GBRH' */
+#define GDI_PEN_MAGIC           0x4E455047  /* 'GPEN' */
+
+typedef struct _GDI_BRUSH_OBJECT
+{
+    ULONG   Magic;
+    ULONG   Style;          /* BS_SOLID, BS_NULL */
+    ULONG   ColorARGB;
+    BOOLEAN StockObject;
+} GDI_BRUSH_OBJECT, *PGDI_BRUSH_OBJECT;
+
+typedef struct _GDI_PEN_OBJECT
+{
+    ULONG   Magic;
+    ULONG   Style;          /* PS_SOLID, PS_NULL */
+    ULONG   Width;
+    ULONG   ColorARGB;
+    BOOLEAN StockObject;
+} GDI_PEN_OBJECT, *PGDI_PEN_OBJECT;
+
+FORCEINLINE ULONG
+GdipNormalizeArgb(
+    IN ULONG Color
+)
+{
+    /* Convert COLORREF 0x00BBGGRR to opaque ARGB for GDI surfaces. */
+    if ((Color & 0xFF000000) == 0)
+    {
+        ULONG Red   = Color & 0xFF;
+        ULONG Green = (Color >> 8) & 0xFF;
+        ULONG Blue  = (Color >> 16) & 0xFF;
+        return 0xFF000000 | (Red << 16) | (Green << 8) | Blue;
+    }
+    return Color;
+}
+
+HPEN
+VEAPI
+VeaGdiCreatePen(
+    IN INT   fnPenStyle,
+    IN INT   nWidth,
+    IN ULONG crColor
+);
+
+HBRUSH
+VEAPI
+VeaGdiCreateSolidBrush(
+    IN ULONG crColor
+);
+
+HGDIOBJ
+VEAPI
+VeaGdiGetStockObject(
+    IN INT fnObject
+);
+
+VOID
+VEAPI
+GdipInitializeGdiObjects(VOID);
+
+BOOLEAN
+VEAPI
+GdipResolvePenInfo(
+    IN  HPEN   hpen,
+    OUT PULONG OutColorARGB,
+    OUT PULONG OutWidth
+);
+
+BOOLEAN
+VEAPI
+GdipResolveBrushColor(
+    IN  HBRUSH hbr,
+    OUT PULONG OutColorARGB
+);
+
+
+HBRUSH
+VEAPI
+VeaGdiCreateSolidBrush(
+    IN ULONG crColor
+);
+
+HPEN
+VEAPI
+VeaGdiCreatePen(
+    IN INT   fnPenStyle,
+    IN INT   nWidth,
+    IN ULONG crColor
+);
+
+HGDIOBJ
+VEAPI
+VeaGdiGetStockObject(
+    IN INT fnObject
+);
+
+HGDIOBJ
+VEAPI
+VeaGdiSelectObject(
+    IN HDC     hdc,
+    IN HGDIOBJ hgdiobj
+);
+
+BOOLEAN
+VEAPI
+VeaGdiDeleteObject(
+    IN HGDIOBJ hObject
+);
+
+BOOLEAN
+VEAPI
+VeaGdiMoveToEx(
+    IN  HDC     hdc,
+    IN  INT     X,
+    IN  INT     Y,
+    OUT LPPOINT lpPoint OPTIONAL
+);
+
+BOOLEAN
+VEAPI
+VeaGdiLineToCurrent(
+    IN HDC hdc,
+    IN INT nXEnd,
+    IN INT nYEnd
+);
+
+BOOLEAN
+VEAPI
+VeaGdiRectangle(
+    IN HDC hdc,
+    IN INT nLeftRect,
+    IN INT nTopRect,
+    IN INT nRightRect,
+    IN INT nBottomRect
+);
+
+BOOLEAN
+VEAPI
+VeaGdiFillRectBrush(
+    IN HDC         hdc,
+    IN CONST PRECT lprc,
+    IN HBRUSH      hbr
+);
+
+BOOLEAN
+VEAPI
+VeaGdiFrameRect(
+    IN HDC         hdc,
+    IN CONST PRECT lprc,
+    IN HBRUSH      hbr
+);
+
+INT
+VEAPI
+VeaGdiAddFontResourceEx(
+    IN CONST CHAR *FilePath,
+    IN ULONG       Flags,
+    IN PVOID       Reserved OPTIONAL
+);
+
+BOOLEAN
+VEAPI
+VeaGdiRemoveFontResourceEx(
+    IN CONST CHAR *FilePath,
+    IN ULONG       Flags,
+    IN PVOID       Reserved OPTIONAL
+);
+
+HANDLE
+VEAPI
+VeaGdiAddFontMemResourceEx(
+    IN  PVOID  FontData,
+    IN  ULONG  FontSize,
+    IN  PVOID  Reserved OPTIONAL,
+    OUT PULONG OutNumFonts OPTIONAL
+);
+
+BOOLEAN
+VEAPI
+VeaGdiRemoveFontMemResourceEx(
+    IN HANDLE hFontResource
+);
+
+#define FONT_MAX_FILE_SIZE (16 * 1024 * 1024)
 
 /* EOF */
