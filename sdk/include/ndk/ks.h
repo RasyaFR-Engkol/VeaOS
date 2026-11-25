@@ -136,6 +136,7 @@ typedef enum _KWAIT_REASON {
 typedef struct _KQUEUE KQUEUE, *PKQUEUE;
 
 typedef struct _KPROCESS {
+    DISPATCHER_HEADER Dispatcher;
     ULONG_PTR DirectoryTableBase;  
     LIST_ENTRY ThreadListHead;   
     UCHAR State;          
@@ -143,8 +144,10 @@ typedef struct _KPROCESS {
     KSPIN_LOCK ProcessLock; 
     PVEA_TOKEN Token;
     ULONG StackCount;
-    DISPATCHER_HEADER Dispatcher;
 } KPROCESS, *PKPROCESS;
+
+_Static_assert(__builtin_offsetof(KPROCESS, Dispatcher) == 0,
+               "KPROCESS dispatcher must be at offset zero");
 
 //
 // KDPC Routine
@@ -245,6 +248,7 @@ typedef struct _FXSAVE_FORMAT {
 struct _TEB;
 
 typedef struct _KTHREAD {
+    DISPATCHER_HEADER Dispatcher;
     PVOID KernelStack;
     PVOID InitialStack;             // Batas atas stack
     PVOID StackLimit;               // Batas bawah stack (buat deteksi Stack Overflow)
@@ -283,12 +287,20 @@ typedef struct _KTHREAD {
     UCHAR WaitReason;
     struct _TEB *Teb;
     ULONG SuspendCount;
-    DISPATCHER_HEADER Dispatcher;
     KDPC TimerDpc;
     ULONG_PTR CallbackStack;
     PFXSAVE_FORMAT FxSaveArea;
     UCHAR FxSaveBuffer[528];
+    PVOID Win32Thread;
+    BOOLEAN LargeStack;
 } KTHREAD, *PKTHREAD;
+
+_Static_assert(__builtin_offsetof(KTHREAD, Dispatcher) == 0,
+               "KTHREAD dispatcher must be at offset zero");
+_Static_assert(__builtin_offsetof(KTHREAD, KernelStack) == sizeof(DISPATCHER_HEADER),
+               "KTHREAD KernelStack offset changed");
+_Static_assert(__builtin_offsetof(KTHREAD, FxSaveArea) == 0x1AC,
+               "Update the PtSwapContext FXSAVE offset");
 
 typedef enum _KDPC_IMPORTANCE {
   LowImportance,
@@ -611,6 +623,12 @@ VOID
 VEAPI
 KsWaitTest(
     IN PDISPATCHER_HEADER SignaledObject
+);
+
+VOID
+VEAPI
+KsSignalDispatcherObject(
+    IN PDISPATCHER_HEADER Object
 );
 
 VOID
