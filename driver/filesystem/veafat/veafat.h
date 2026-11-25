@@ -4,6 +4,8 @@
 #include <veaddk.h>
 
 #define VEAFAT_POOL_TAG 'taFV'
+#define VEAFAT_MAX_SECTOR_SIZE 4096
+#define VEAFAT_MAX_IO_CHUNK (64 * 1024)
 
 #define VCB_STATE_MOUNTED       0x00000001
 #define VCB_STATE_DIRTY         0x00000002
@@ -36,6 +38,12 @@ typedef struct _FAT32_DEVICE_EXTENSION
     ULONG               FreeClusterCount;   // Cached free cluster count (0xFFFFFFFF kalau belum tau)
     ULONG               NextFreeCluster;    // Hint cluster kosong terakhir buat percepat alokasi
     BOOLEAN             FsInfoDirty;        // TRUE jika info free cluster di RAM berubah & belum sync ke disk
+
+    KSPIN_LOCK          FatSectorCacheLock;
+    ULONGLONG           FatSectorCacheLba;
+    ULONG               FatSectorCacheGeneration;
+    BOOLEAN             FatSectorCacheValid;
+    UCHAR               FatSectorCache[VEAFAT_MAX_SECTOR_SIZE];
 
     LIST_ENTRY          FcbListHead;        // Linked list seluruh FCB (File Control Block) yang aktif
     KSPIN_LOCK          FcbListLock;        // Lock untuk amanin FcbListHead dari interrupt/multithread
@@ -165,6 +173,9 @@ typedef struct _VEAFAT_CCB {
     PVEAFAT_FCB         Fcb;                    // Nunjuk ke FCB utamanya
     ULONG               CurrentByteOffset;      // Current read/write offset
     ANSI_STRING         DirectorySearchFilter;  // Buat OIP_MJ_DIRECTORY_CONTROL (misal "*.*")
+    ULONG               CachedFirstCluster;     // Validasi jika FirstCluster FCB berubah (truncate/overwrite)
+    ULONG               LastClusterIndex;       // Index cluster terakhir yang diakses (0, 1, 2, ...)
+    ULONG               LastClusterNumber;      // Nomor cluster fisik terakhir di FAT
 } VEAFAT_CCB, *PVEAFAT_CCB;
 
 #define EXTENSION_FROM_DEVOBJ(DevObj) (PFAT32_DEVICE_EXTENSION)DevObj->DeviceExtension

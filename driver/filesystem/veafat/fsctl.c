@@ -368,6 +368,7 @@ FatMjFsCtl(
 
             InitializeListHead(&Vcb->FcbListHead);
             KsInitializeSpinlock(&Vcb->FcbListLock);
+            KsInitializeSpinlock(&Vcb->FatSectorCacheLock);
             KsInitializeMutex(&Vcb->VolumeMutex, 0);
 
             Vcb->VolumeFlags = VCB_STATE_MOUNTED;
