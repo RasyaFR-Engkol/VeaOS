@@ -18,9 +18,9 @@
 #define ft_ptrdiff_t   ptrdiff_t
 
 /* 2. Memory Operations -> VeaOS Rtl* */
-#define ft_memcpy(dst, src, len)   RtlCopyMemory((dst), (src), (len))
-#define ft_memmove(dst, src, len)  RtlMoveMemory((dst), (src), (len))
-#define ft_memset(dst, val, len)   RtlFillMemory((dst), (len), (UCHAR)(val))
+#define ft_memcpy(dst, src, len)   RtlCopyMemory((PVOID)(dst), (PVOID)(src), (len))
+#define ft_memmove(dst, src, len)  RtlMoveMemory((PVOID)(dst), (PVOID)(src), (len))
+#define ft_memset(dst, val, len)   RtlFillMemory((PVOID)(dst), (len), (UCHAR)(val))
 
 static inline int ft_memcmp(const void *s1, const void *s2, size_t n)
 {
@@ -176,43 +176,41 @@ static inline void ft_qsort(void *base, size_t nmemb, size_t size,
 /* 5. setjmp / longjmp x86 32-bit (Wajib buat smooth rasterizer ftgrays.c) */
 typedef unsigned long ft_jmp_buf[6]; /* ebx, esi, edi, ebp, esp, eip */
 
-__attribute__((returns_twice))
-static inline int ft_setjmp(ft_jmp_buf env)
+static __attribute__((naked, noinline, returns_twice))
+int ft_setjmp(volatile ft_jmp_buf env)
 {
-    int ret;
     __asm__ __volatile__(
-        "movl %%ebx, 0(%1)\n\t"
-        "movl %%esi, 4(%1)\n\t"
-        "movl %%edi, 8(%1)\n\t"
-        "movl %%ebp, 12(%1)\n\t"
-        "leal 4(%%esp), %%ecx\n\t"
-        "movl %%ecx, 16(%1)\n\t"
-        "movl $1f, 20(%1)\n\t"
-        "xorl %0, %0\n\t"
-        "1:\n\t"
-        : "=&a"(ret)
-        : "d"(env)
-        : "ecx", "memory"
+        "movl 4(%esp), %edx\n\t"     /* edx = env */
+        "movl %ebx, 0(%edx)\n\t"     /* env[0] = ebx */
+        "movl %esi, 4(%edx)\n\t"     /* env[1] = esi */
+        "movl %edi, 8(%edx)\n\t"     /* env[2] = edi */
+        "movl %ebp, 12(%edx)\n\t"    /* env[3] = ebp */
+        "leal 4(%esp), %ecx\n\t"     /* ecx = caller esp sebelum call */
+        "movl %ecx, 16(%edx)\n\t"    /* env[4] = esp */
+        "movl 0(%esp), %ecx\n\t"     /* ecx = return EIP */
+        "movl %ecx, 20(%edx)\n\t"    /* env[5] = eip */
+        "xorl %eax, %eax\n\t"        /* return 0 */
+        "ret\n\t"
     );
-    return ret;
 }
 
-__attribute__((noreturn))
-static inline void ft_longjmp(ft_jmp_buf env, int val)
+static __attribute__((naked, noinline, noreturn))
+void ft_longjmp(volatile ft_jmp_buf env, int val)
 {
-    if (val == 0) val = 1;
     __asm__ __volatile__(
-        "movl 0(%0), %%ebx\n\t"
-        "movl 4(%0), %%esi\n\t"
-        "movl 8(%0), %%edi\n\t"
-        "movl 12(%0), %%ebp\n\t"
-        "movl 16(%0), %%esp\n\t"
-        "jmp *20(%0)\n\t"
-        :
-        : "d"(env), "a"(val)
-        : "memory"
+        "movl 4(%esp), %edx\n\t"     /* edx = env */
+        "movl 8(%esp), %eax\n\t"     /* eax = val */
+        "testl %eax, %eax\n\t"
+        "jnz 1f\n\t"
+        "incl %eax\n\t"              /* standar C: longjmp(env, 0) return 1 */
+        "1:\n\t"
+        "movl 0(%edx), %ebx\n\t"
+        "movl 4(%edx), %esi\n\t"
+        "movl 8(%edx), %edi\n\t"
+        "movl 12(%edx), %ebp\n\t"
+        "movl 16(%edx), %esp\n\t"    /* restore caller esp */
+        "jmp *20(%edx)\n\t"          /* lompat langsung ke return EIP */
     );
-    __builtin_unreachable();
 }
 
 /* 6. Stub sisa macro standar */

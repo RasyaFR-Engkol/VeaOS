@@ -16,6 +16,7 @@
  * --------------------------------------------------------------------- */
 
 BOOLEAN IptRITRunning = FALSE;
+BOOLEAN IptMouseRITRunning = FALSE;
 UCHAR IptAsyncKeyState[256] = {0};
 LONG   gCursorX          = 320;
 LONG   gCursorY          = 240;
@@ -34,6 +35,8 @@ IptUserRawInputThread(
     OBJECT_ATTRIBUTES ObjAttr;
     ANSI_STRING KeyboardName;
     KEYBOARD_INPUT_DATA KeyData[8];
+    ULONG ReadCount = 0;
+    ULONG TotalPackets = 0;
 
     UNREFERENCED_PARAMETER(StartContext);
 
@@ -81,11 +84,15 @@ IptUserRawInputThread(
 
         if (!VEA_SUCCESS(Status))
         {
-            KdPrintf("[VEAPI] RIT VzReadFile error: 0x%08X\n", Status);
+            KdPrintf("[VEAPI-RIT] read=%u error=0x%08X\n",
+                     ReadCount,
+                     Status);
             break;
         }
 
         ULONG PacketCount = (ULONG)(OipInfo.Information / sizeof(KEYBOARD_INPUT_DATA));
+        TotalPackets += PacketCount;
+
         for (ULONG i = 0; i < PacketCount; i++)
         {
             UserProcessKeyPacket(&KeyData[i]);
@@ -96,6 +103,16 @@ IptUserRawInputThread(
     {
         VzClose(hKeyboard);
     }
+}
+
+static SHORT
+IptClampToShort(
+    IN LONG Value
+)
+{
+    if (Value > 32767)  return 32767;
+    if (Value < -32768) return -32768;
+    return (SHORT)Value;
 }
 
 VOID
@@ -136,7 +153,9 @@ IptMouseRawInputThread(
         return;
     }
 
-    while (IptRITRunning)
+    IptMouseRITRunning = TRUE;
+
+    while (IptMouseRITRunning)
     {
         RtlZeroMemory(&OipInfo, sizeof(OipInfo));
 
@@ -159,9 +178,49 @@ IptMouseRawInputThread(
         }
 
         ULONG PacketCount = (ULONG)(OipInfo.Information / sizeof(MOUSE_INPUT_DATA));
+        LONG PrevCursorX = gCursorX;
+        LONG PrevCursorY = gCursorY;
+        LONG AccDx = 0;
+        LONG AccDy = 0;
+
         for (ULONG i = 0; i < PacketCount; i++)
         {
-            UserProcessMousePacket(&MouData[i]);
+            PMOUSE_INPUT_DATA Pkt = &MouData[i];
+
+            /* Gabungkan paket gerak relatif murni agar tidak spam message & VRAM */
+            if (Pkt->ButtonFlags == 0 && !(Pkt->Flags & MOUSE_MOVE_ABSOLUTE))
+            {
+                AccDx += Pkt->LastX;
+                AccDy += Pkt->LastY;
+                continue;
+            }
+
+            /* Jika ada klik/wheel, gabungkan sisa delta sebelumnya dulu agar titik klik akurat */
+            if (!(Pkt->Flags & MOUSE_MOVE_ABSOLUTE))
+            {
+                Pkt->LastX = IptClampToShort((LONG)Pkt->LastX + AccDx);
+                Pkt->LastY = IptClampToShort((LONG)Pkt->LastY + AccDy);
+            }
+            AccDx = 0;
+            AccDy = 0;
+
+            UserProcessMousePacket(Pkt);
+        }
+
+        /* Flush sisa gerakan relatif di akhir batch */
+        if (AccDx != 0 || AccDy != 0)
+        {
+            MOUSE_INPUT_DATA MovePkt;
+            RtlZeroMemory(&MovePkt, sizeof(MovePkt));
+            MovePkt.LastX = IptClampToShort(AccDx);
+            MovePkt.LastY = IptClampToShort(AccDy);
+            UserProcessMousePacket(&MovePkt);
+        }
+
+        /* Gambar kursor di layar cukup 1x setelah seluruh batch selesai diproses */
+        if (gCursorX != PrevCursorX || gCursorY != PrevCursorY)
+        {
+            EngMovePointer(gCursorX, gCursorY);
         }
     }
 

@@ -80,6 +80,17 @@ DriverEntry(
         NULL
     );
 
+    if (!VEA_SUCCESS(Status))
+    {
+        KdPrintf("[VEAPI] Gagal membuat Raw Input Thread: 0x%08X\n", Status);
+        return Status;
+    }
+
+    if (hRitThread)
+    {
+        VzClose(hRitThread);
+    }
+
     Status = PtCreateSystemThread(
         &hRitThread,
         0,

@@ -178,6 +178,19 @@ UserProcessKeyPacket(
     BOOLEAN CtrlDown = (IptAsyncKeyState[VK_CONTROL] & 0x80) != 0;
     ULONG MsgId;
 
+    /* Intercept Secure Attention Sequence (Ctrl + Alt + Del) */
+    if (Vk == VK_DELETE && CtrlDown && AltDown && GpLogonNotifyWindow != NULL)
+    {
+        /* Tembak WM_SAS hanya saat tombol ditekan (Make), bukan saat dilepas (Break) */
+        if (!IsBreak)
+        {
+            MsgPostToWindow(GpLogonNotifyWindow, WM_SAS, 0, 0, FALSE);
+        }
+
+        /* Telan Make maupun Break-nya supaya aplikasi aktif tidak terima keystroke nyasar */
+        return;
+    }
+
     if (AltDown && !CtrlDown)
     {
         MsgId = IsBreak ? WM_SYSKEYUP : WM_SYSKEYDOWN;
@@ -287,7 +300,7 @@ VeaUserTranslateMessage(
     }
 
     ULONG CharMsg = (LocalMsg.message == WM_SYSKEYDOWN) ? WM_SYSCHAR : WM_CHAR;
-    MsgPostInputMessage(CharMsg, (UCHAR)Ch, LocalMsg.lParam);
+    (VOID)MsgPostToWindow(LocalMsg.hwnd, CharMsg, (UCHAR)Ch, LocalMsg.lParam, FALSE);
     return TRUE;
 }
 

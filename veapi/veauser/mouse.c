@@ -25,9 +25,7 @@ MsgPostMouseMessage(
 )
 {
     if (!hWnd) return;
-    MsgEnqueueMessage(hWnd, Message, wParam, lParam, FALSE);
+    MsgPostToWindow(hWnd, Message, wParam, lParam, TRUE);
 }
-
-
 
 /* EOF */
