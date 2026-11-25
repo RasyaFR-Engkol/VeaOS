@@ -32,8 +32,13 @@ LdrpMapModule(
     IN  PCSTR FullPath,
     OUT PLDR_MODULE *OutModule
 );
-VOID
-LdrpRunInitRoutines(VOID);
+VOID LdrpRunInitRoutines(IN PVOID Context);
+VOID VEAPI LdrpRunThreadInitRoutines(VOID);
+VOID VEAPI LdrpRunThreadFiniRoutines(VOID);
+VOID VEAPI LdrpRunFiniRoutines(IN PVOID Context);
+VEASTATUS
+VEAPI
+LdrDisableThreadCalloutsForDll(IN PVOID BaseAddress);
 
 VOID
 LdrpSetModuleName(PLDR_MODULE Mod, PCSTR Name)
@@ -196,7 +201,7 @@ LdrpInitializeProcessMinimal(
     }
 
     /* 5. Jalankan .init / .init_array semua .so setelah semua simbol & GOT ter-resolve */
-    LdrpRunInitRoutines();
+    LdrpRunInitRoutines(ContextFrame);
 
     if (ContextFrame && ContextFrame->Eax != 0)
     {
@@ -214,13 +219,13 @@ LdrpInitializeThreadMinimal(
 {
     PTEB Teb = NtCurrentTeb();
 
-    // Reset LastStatus khusus milik thread baru ini
     if (Teb)
     {
         Teb->LastStatusValue = STATUS_SUCCESS;
     }
 
-    // Untuk thread tambahan (bukan main thread), start routine ada di Context->Eax
+    LdrpRunThreadInitRoutines();
+
     if (Context && Context->Eax != 0)
     {
         Context->Eip = Context->Eax;

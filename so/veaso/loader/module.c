@@ -205,6 +205,12 @@ LdrpParseDynamic(IN PLDR_MODULE Mod)
                 break;
         }
     }
+
+    if (Eh->e_entry != 0)
+    {
+        Mod->EntryPoint = (PLDR_INIT_ROUTINE)((ULONG_PTR)Eh->e_entry + LoadBias);
+    }
+
     return Mod->StrTab ? STATUS_SUCCESS : STATUS_INVALID_IMAGE_FORMAT;
 }
 
@@ -295,33 +301,76 @@ fail:
 }
 
 VOID
-LdrpRunInitRoutines(VOID)
+LdrpRunInitRoutines(IN PVOID Context)
 {
     PLIST_ENTRY E;
     ULONG i;
 
     for (E = LdrpPebLdr.InInitializationOrderModuleList.Flink;
-         E != &LdrpPebLdr.InInitializationOrderModuleList; E = E->Flink)
+         E != &LdrpPebLdr.InInitializationOrderModuleList;
+         E = E->Flink)
     {
         PLDR_MODULE M = CONTAINING_RECORD(E, LDR_MODULE, InInitializationOrderLinks);
         if (M->Flags & LDRP_FLAG_INITED) continue;
         M->Flags |= LDRP_FLAG_INITED;
 
+        /* Runtime C/C++ init jalan duluan (sekali saja) */
         if (M->InitFunction)
             ((VOID (*)(VOID))M->InitFunction)();
 
         for (i = 0; i < M->InitArrayCount; i++)
             ((VOID (*)(VOID))((PVOID *)M->InitArray)[i])();
+
+        /* Baru panggil DllMain(Base, DLL_PROCESS_ATTACH, Context) */
+        if (M->EntryPoint)
+            M->EntryPoint(M->Base, DLL_PROCESS_ATTACH, Context);
     }
 }
 
 VOID
 VEAPI
-LdrpRunFiniRoutines(VOID)
+LdrpRunThreadInitRoutines(VOID)
 {
     PLIST_ENTRY E;
 
-    /* Telusuri InInitializationOrderModuleList secara MUNDUR (Blink) */
+    for (E = LdrpPebLdr.InInitializationOrderModuleList.Flink;
+         E != &LdrpPebLdr.InInitializationOrderModuleList;
+         E = E->Flink)
+    {
+        PLDR_MODULE M = CONTAINING_RECORD(E, LDR_MODULE, InInitializationOrderLinks);
+        if (!(M->Flags & LDRP_FLAG_INITED)) continue;
+        if (M->Flags & LDRP_DONT_CALL_FOR_THREADS) continue;
+
+        if (M->EntryPoint)
+            M->EntryPoint(M->Base, DLL_THREAD_ATTACH, NULL);
+    }
+}
+
+VOID
+VEAPI
+LdrpRunThreadFiniRoutines(VOID)
+{
+    PLIST_ENTRY E;
+
+    for (E = LdrpPebLdr.InInitializationOrderModuleList.Blink;
+         E != &LdrpPebLdr.InInitializationOrderModuleList;
+         E = E->Blink)
+    {
+        PLDR_MODULE M = CONTAINING_RECORD(E, LDR_MODULE, InInitializationOrderLinks);
+        if (!(M->Flags & LDRP_FLAG_INITED) || (M->Flags & LDRP_FLAG_DEINITED)) continue;
+        if (M->Flags & LDRP_DONT_CALL_FOR_THREADS) continue;
+
+        if (M->EntryPoint)
+            M->EntryPoint(M->Base, DLL_THREAD_DETACH, NULL);
+    }
+}
+
+VOID
+VEAPI
+LdrpRunFiniRoutines(IN PVOID Context)
+{
+    PLIST_ENTRY E;
+
     for (E = LdrpPebLdr.InInitializationOrderModuleList.Blink;
          E != &LdrpPebLdr.InInitializationOrderModuleList;
          E = E->Blink)
@@ -333,7 +382,10 @@ LdrpRunFiniRoutines(VOID)
 
         M->Flags |= LDRP_FLAG_DEINITED;
 
-        /* 1. Jalankan .fini_array dari elemen terakhir ke pertama */
+        /* DllMain(DLL_PROCESS_DETACH) jalan SEBELUM .fini biar objek global masih valid */
+        if (M->EntryPoint)
+            M->EntryPoint(M->Base, DLL_PROCESS_DETACH, Context);
+
         if (M->FiniArray && M->FiniArrayCount > 0)
         {
             PVOID *Arr = (PVOID *)M->FiniArray;
@@ -344,10 +396,28 @@ LdrpRunFiniRoutines(VOID)
             }
         }
 
-        /* 2. Jalankan .fini setelah .fini_array selesai */
         if (M->FiniFunction)
             ((VOID (*)(VOID))M->FiniFunction)();
     }
+}
+
+VEASTATUS
+VEAPI
+LdrDisableThreadCalloutsForDll(IN PVOID BaseAddress)
+{
+    PLIST_ENTRY E;
+    for (E = LdrpPebLdr.InLoadOrderModuleList.Flink;
+         E != &LdrpPebLdr.InLoadOrderModuleList;
+         E = E->Flink)
+    {
+        PLDR_MODULE M = CONTAINING_RECORD(E, LDR_MODULE, InLoadOrderLinks);
+        if (M->Base == BaseAddress)
+        {
+            M->Flags |= LDRP_DONT_CALL_FOR_THREADS;
+            return STATUS_SUCCESS;
+        }
+    }
+    return STATUS_DLL_NOT_FOUND;
 }
 
 /* EOF */
