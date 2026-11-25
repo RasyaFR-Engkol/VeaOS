@@ -99,6 +99,7 @@ typedef unsigned char BOOLEAN, *PBOOLEAN;
 
 typedef unsigned long ULONG_PTR, *PULONG_PTR;
 typedef long LONG_PTR, *PLONG_PTR;
+typedef long long INT_PTR, SSIZE_T;
 typedef unsigned long SIZE_T, *PSIZE_T;
 
 typedef long long LONGLONG, *PLONGLONG;

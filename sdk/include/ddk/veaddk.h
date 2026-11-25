@@ -110,7 +110,7 @@ VEA_EXPORT BOOLEAN VEAPI RmAddSystemServiceTable( IN PULONG_PTR Base, IN PULONG 
 VEA_EXPORT NORET VOID VEAPI RiSyscallDispatcherHandler( IN PKTRAP_FRAME TrapFrame, IN PVOID Context );
 VEA_EXPORT VEASTATUS VEAPI PtCreateSystemThread( OUT PHANDLE ThreadHandle, IN ACCESS_MASK DesiredAccess, IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL, IN HANDLE ProcessHandle OPTIONAL, OUT PCLIENT_ID ClientId OPTIONAL, IN PKSTART_ROUTINE StartRoutine, IN PVOID StartContext OPTIONAL );
 VEA_EXPORT VOID VEAPI KsInitializeEvent( IN OUT PKEVENT Event, IN EVENT_TYPE Type, IN BOOLEAN State );
-VEA_EXPORT extern void * memcpy( void *dest, const void *src, SIZE_T count );
+VEA_EXPORT void * memcpy( void *dest, const void *src, SIZE_T count );
 VEA_EXPORT VEASTATUS VEAPI KsWaitForSingleObject( IN PVOID Object );
 VEA_EXPORT VOID RtlCopyMemory(PVOID Dest, PVOID Src, SIZE_T N);
 VEA_EXPORT int __attribute__((regparm(1), returns_twice)) VeaSehRegister(volatile VEA_SEH_FRAME *Frame);
@@ -123,6 +123,7 @@ VEA_EXPORT BOOLEAN VEAPI RtlEqualString(const ANSI_STRING *String1, const ANSI_S
 // WARNING: Prototype/Macro for 'UlDesktopObjectType' was not found in kernel headers!
 VEA_EXPORT VEASTATUS VEAPI ObCreateObject( IN KPROCESSOR_MODE ProcessorMode, IN POBJECT_TYPE ObjectType, IN POBJECT_ATTRIBUTES ObjectAttributes, IN KPROCESSOR_MODE OwnershipMode, IN OUT PVOID ParseContext OPTIONAL, IN ULONG ObjectSize, IN ULONG PagedPoolCharge, IN ULONG NonPagedPoolCharge, OUT PVOID *ReturnedObject );
 VEA_EXPORT VEASTATUS VEAPI ObInsertObject( PVOID Object, IN PACCESS_STATE AccessState, IN ACCESS_MASK DesiredAccess, IN ULONG ObjectPointerBias, OUT PVOID *NewObject OPTIONAL, OUT PHANDLE Handle );
+VEA_EXPORT VEASTATUS VEAPI ObOpenObjectByPointer( PVOID Object, ULONG HandleAttributes, PACCESS_STATE PassedAccessState OPTIONAL, ACCESS_MASK DesiredAccess, POBJECT_TYPE ObjectType OPTIONAL, KPROCESSOR_MODE AccessMode, PHANDLE Handle );
 VEA_EXPORT LONG VEAPI RtlRawStringCompare( IN PCSTR String1, IN PCSTR String2 );
 VEA_EXPORT VOID VEAPI MmUnlockPages( PMDL Mdl );
 VEA_EXPORT VOID VEAPI MmProbeAndLockPages( PMDL Mdl, KPROCESSOR_MODE AccessMode, LOCK_OPERATION Operation );
@@ -131,6 +132,10 @@ VEA_EXPORT VOID RtlMoveMemory( VOID *Destination, const VOID *Source, SIZE_T Len
 VEA_EXPORT VOID RtlFillMemory( PVOID Destination, SIZE_T Length, UCHAR Fill );
 VEA_EXPORT void *memset(void *ptr, int x, size_t n);
 VEA_EXPORT BOOLEAN VEAPI RtlRawStringEqual( IN PCHAR S1, IN PCHAR S2 );
+VEA_EXPORT VOID VEAPI KsClearEvent(PKEVENT Event);
+VEA_EXPORT PVOID VEAPI PtGetCurrentThreadVeapiThread(VOID);
+VEA_EXPORT LONG VEAPI KsReleaseMutex( IN PKMUTEX Mutex, IN BOOLEAN Wait );
+VEA_EXPORT VOID VEAPI KsInitializeMutex( IN PKMUTEX Mutex, IN ULONG Level );
 
 #ifdef __cplusplus
 }

@@ -285,4 +285,16 @@ VeaEnumerateKey(
     OUT PULONG Flags OPTIONAL
 );
 
+VEASTATUS
+VEAPI
+VkpLoadAndMountHiveFromFile(
+    IN PCHAR FilePath,
+    IN PCHAR MountPath,
+    OUT PVK_HIVE *OutHive
+);
+
+VEASTATUS
+VEAPI
+VeaInitializeKey(IN ULONG Flags);
+
 /* EOF */

@@ -794,4 +794,14 @@ typedef ULONG PFN_COUNT;
 
 #define MI_TEMP_ZERO_VA   0xDFFFE000
 
+#ifndef KERNEL_STACK_SIZE
+#define KERNEL_STACK_SIZE       (12 * 1024) /* 12 KB standar x86 */
+#endif
+
+#ifndef KERNEL_LARGE_STACK_SIZE
+#define KERNEL_LARGE_STACK_SIZE (64 * 1024) /* 64 KB GUI / Large Stack */
+#endif
+
+#define KERNEL_STACK_GUARD_PAGES 1
+
 /* EOF */

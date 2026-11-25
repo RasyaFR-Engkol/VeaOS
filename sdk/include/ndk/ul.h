@@ -306,5 +306,54 @@ VeaCreateEvent(
     IN BOOLEAN InitialState
 );
 
+BOOLEAN
+VEAPI
+UlInitializeTimerImplementation(VOID);
+
+VEASTATUS
+VEAPI
+VeaCancelTimer(
+    IN HANDLE TimerHandle,
+    OUT PBOOLEAN CurrentState OPTIONAL
+);
+
+VEASTATUS
+VEAPI
+VeaQueryTimer(
+    IN HANDLE TimerHandle,
+    IN TIMER_INFORMATION_CLASS TimerInformationClass,
+    OUT PVOID TimerInformation,
+    IN ULONG TimerInformationLength,
+    OUT PULONG ReturnLength OPTIONAL
+);
+
+VEASTATUS
+VEAPI
+VeaOpenTimer(
+    OUT PHANDLE TimerHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes
+);
+
+VEASTATUS
+VEAPI
+VeaSetTimer(
+    IN HANDLE TimerHandle,
+    IN PLARGE_INTEGER DueTime,
+    IN PTIMER_APC_ROUTINE TimerApcRoutine OPTIONAL,
+    IN PVOID TimerContext OPTIONAL,
+    IN BOOLEAN WakeTimer,
+    IN LONG Period OPTIONAL,
+    OUT PBOOLEAN PreviousState OPTIONAL
+);
+
+VEASTATUS
+VEAPI
+VeaCreateTimer(
+    OUT PHANDLE TimerHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+    IN TIMER_TYPE TimerType
+);
 
 /* EOF */

@@ -1697,7 +1697,6 @@ typedef VOID
 
 /* LDR Module Flags */
 #define LDRP_DRIVER_LOADED                  0x00000001
-#define LDRP_SYSTEM_MAPPED                  0x00000002
 
 typedef struct _GENERIC_FCB {
     PVOID Vcb;

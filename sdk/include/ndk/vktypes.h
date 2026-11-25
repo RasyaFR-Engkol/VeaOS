@@ -242,4 +242,11 @@ typedef struct _VK_DRIVER_ORDER_ENTRY {
     ULONG GroupIndex; 
 } VK_DRIVER_ORDER_ENTRY, *PVK_DRIVER_ORDER_ENTRY;
 
+#define VK_SAM_HIVE_PATH  "/D1P1:/VeaOS/SystemReserved/Config/SAM.VKEY"
+#define VK_SAM_MOUNT_PATH "/REGISTRY/MACHINE/SAM"
+extern PVK_HIVE VkSamHive;
+
+#define VK_INIT_BOOT_SM         0x0000
+#define VK_INIT_BOOT_ACCEPTED   0x0100
+
 /* EOF */

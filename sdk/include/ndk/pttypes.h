@@ -75,7 +75,7 @@ typedef struct _KRUNQUEUE {
 } KRUNQUEUE, *PKRUNQUEUE;
 
 // defaulted size
-#define PtThreadStackSize 0x2000
+#define PtThreadStackSize KERNEL_STACK_SIZE
 
 extern POBJECT_TYPE PtEthreadType;
 extern POBJECT_TYPE PtEprocessType;
@@ -317,5 +317,12 @@ typedef struct _VEAPI_CALLOUTS_FPNS
 } VEAPI_CALLOUTS_FPNS, *PVEAPI_CALLOUTS_FPNS;
 
 extern VEAPI_CALLOUTS_FPNS PtpVeapiCallouts;
+
+typedef enum _PTVEAPIJOBCALLOUTTYPE
+{
+   PtVEAPIJobCalloutSetInformation = 0,
+   PtVEAPIJobCalloutAddProcess = 1,
+   PtVEAPIJobCalloutTerminate = 2,
+} PTVEAPIJOBCALLOUTTYPE;
 
 /* EOF */

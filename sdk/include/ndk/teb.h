@@ -218,12 +218,17 @@ typedef VEASTATUS
     VOID
 );
 
+typedef BOOLEAN (VEAPI *PLDR_INIT_ROUTINE)(
+    IN PVOID DllHandle,
+    IN ULONG Reason,
+    IN PVOID Context
+);
+
 typedef struct _LDR_MODULE
 {
     LIST_ENTRY InLoadOrderLinks;
     LIST_ENTRY InInitializationOrderLinks;
     PVOID      Base;
-    PVOID      EntryPoint;
     PVOID      InitFunction;
     LONG       LoadCount;
     ULONG      Flags;
@@ -235,6 +240,7 @@ typedef struct _LDR_MODULE
     PVOID       FiniFunction;
     PVOID       FiniArray;
     ULONG       FiniArrayCount;
+    PLDR_INIT_ROUTINE EntryPoint;
 } LDR_MODULE, *PLDR_MODULE;
 
 typedef struct _PEB_LDR_DATA
@@ -365,6 +371,29 @@ typedef struct _PEB
 #define LDRP_FLAG_LOADING    0x00000004   /* untuk deteksi siklus nanti */
 #define LDRP_FLAG_INITED     0x00000008   /* DT_INIT sudah dipanggil */
 #define LDRP_FLAG_DEINITED   0x00000010
+#define LDRP_IMAGE_INTEGRITY_FORCED             0x00000020
+#define LDRP_LOAD_IN_PROGRESS                   0x00001000
+#define LDRP_UNLOAD_IN_PROGRESS                 0x00002000
+#define LDRP_ENTRY_PROCESSED                    0x00004000
+#define LDRP_ENTRY_INSERTED                     0x00008000
+#define LDRP_CURRENT_LOAD                       0x00010000
+#define LDRP_FAILED_BUILTIN_LOAD                0x00020000
+#define LDRP_DONT_CALL_FOR_THREADS              0x00040000
+#define LDRP_PROCESS_ATTACH_CALLED              0x00080000
+#define LDRP_DEBUG_SYMBOLS_LOADED               0x00100000
+#define LDRP_IMAGE_NOT_AT_BASE                  0x00200000
+#define LDRP_COR_IMAGE                          0x00400000
+#define LDR_COR_OWNS_UNMAP                      0x00800000
+#define LDRP_SYSTEM_MAPPED                      0x01000000
+#define LDRP_IMAGE_VERIFYING                    0x02000000
+#define LDRP_DRIVER_DEPENDENT_DLL               0x04000000
+#define LDRP_ENTRY_NATIVE                       0x08000000
+#define LDRP_REDIRECTED                         0x10000000
+#define LDRP_NON_PAGED_DEBUG_INFO               0x20000000
+#define LDRP_MM_LOADED                          0x40000000
+#define LDRP_COMPAT_DATABASE_PROCESSED          0x80000000
 
 #define DLL_PROCESS_DETACH    0
 #define DLL_PROCESS_ATTACH    1
+#define DLL_THREAD_ATTACH     2
+#define DLL_THREAD_DETACH     3

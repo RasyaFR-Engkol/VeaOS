@@ -7,3 +7,9 @@
 #ifndef CW_USEDEFAULT
 #define CW_USEDEFAULT   ((INT)0x80000000)
 #endif
+
+typedef struct tagPOINT
+{
+    LONG x;
+    LONG y;
+} POINT, *PPOINT, *LPPOINT;

@@ -76,6 +76,18 @@ BOOLEAN
 VEAPI 
 MmInitializeVmm(VOID);
 
+BOOLEAN
+VEAPI
+MmInitializeKernelPageDirectory(VOID);
+
+BOOLEAN
+VEAPI
+MmpSynchronizeKernelPageTable(ULONG VirtualAddress);
+
+BOOLEAN
+VEAPI
+MmpCopyKernelPageDirectory(PULONG Destination);
+
 /* EXTERNATION */
 extern PPIP MmPipDatabase;
 extern ULONG MmTotalPages;
@@ -570,5 +582,18 @@ MmUnlockPages(
     PMDL Mdl
 );
 
+PVOID
+VEAPI
+MmCreateKernelStack(
+    IN BOOLEAN GuiStack,
+    IN UCHAR Node
+);
+
+VOID
+VEAPI
+MmDeleteKernelStack(
+    IN PVOID StackBase,
+    IN BOOLEAN GuiStack
+);
 
 /* EOF */

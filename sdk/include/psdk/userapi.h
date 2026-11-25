@@ -13,10 +13,11 @@
 #include <psdk/msg.h>
 #include <psdk/winuser.h>
 #include <psdk/veapi3.h>
+#include "userapi2.h"
 #include "veapi.h"
 #include "veapi2.h"
 #include "veapisyscall.h"
-#include "userapi2.h"
+#include <psdk/virtkey.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,12 +25,12 @@ extern "C" {
 
 typedef USHORT ATOM;
 typedef INT    BOOL;
-
-typedef struct tagPOINT
+typedef struct _SECURITY_ATTRIBUTES
 {
-    LONG x;
-    LONG y;
-} POINT, *PPOINT, *LPPOINT;
+    DWORD nLength;
+    PVOID lpSecurityDescriptor;
+    BOOL bInheritHandle;
+} SECURITY_ATTRIBUTES, *PSECURITY_ATTRIBUTES, *LPSECURITY_ATTRIBUTES;
 
 typedef struct tagWNDCLASSA
 {
@@ -144,9 +145,9 @@ InvalidateRect(
 INT
 WINAPI
 FillRect(
-    IN HDC hDC,
+    IN HDC        hDC,
     IN CONST RECT *lprc,
-    IN ULONG ColorARGB
+    IN HBRUSH     hbr
 );
 
 LRESULT
@@ -314,6 +315,249 @@ ShowWindow(
     IN HWND hWnd,
     IN INT  nCmdShow
 );
+
+HCURSOR WINAPI LoadCursorA(IN HINSTANCE hInstance, IN PSTR lpCursorName);
+HCURSOR WINAPI SetCursor(IN HCURSOR hCursor);
+HCURSOR WINAPI GetCursor(VOID);
+HCURSOR WINAPI CreateCursor(
+    IN HINSTANCE hInst,
+    IN INT xHotSpot,
+    IN INT yHotSpot,
+    IN INT nWidth,
+    IN INT nHeight,
+    IN CONST VOID *pvANDPlane,
+    IN CONST VOID *pvXORPlane
+);
+BOOL    WINAPI DestroyCursor(IN HCURSOR hCursor);
+BOOL    WINAPI GetCursorPos(OUT LPPOINT lpPoint);
+BOOL    WINAPI SetCursorPos(IN INT X, IN INT Y);
+INT     WINAPI ShowCursor(IN BOOL bShow);
+
+HWND
+WINAPI
+WindowFromDC(
+    IN HDC hDC
+);
+
+BOOL
+WINAPI
+DeleteDC(
+    IN HDC hdc
+);
+
+INT
+WINAPI
+ReleaseDC(
+    IN HWND hWnd,
+    IN HDC  hDC
+);
+
+HDC
+WINAPI
+GetWindowDC(
+    IN HWND hWnd
+);
+
+HDC
+WINAPI
+GetDC(
+    IN HWND hWnd
+);
+
+HDC
+WINAPI
+GetDCEx(
+    IN HWND  hWnd,
+    IN HRGN  hrgnClip,
+    IN DWORD flags
+);
+
+HDESK
+WINAPI
+CreateDesktopA(
+    IN PSTR                  lpszDesktop,
+    IN PSTR                  lpszDevice,
+    IN PVOID                 pDevmode,
+    IN DWORD                 dwFlags,
+    IN ACCESS_MASK           dwDesiredAccess,
+    IN LPSECURITY_ATTRIBUTES lpsa
+);
+
+HDESK
+WINAPI
+OpenDesktopA(
+    IN PSTR        lpszDesktop,
+    IN DWORD       dwFlags,
+    IN BOOL        fInherit,
+    IN ACCESS_MASK dwDesiredAccess
+);
+
+BOOL
+WINAPI
+SetThreadDesktop(
+    IN HDESK hDesktop
+);
+
+BOOL
+WINAPI
+SwitchDesktop(
+    IN HDESK hDesktop
+);
+
+BOOL
+WINAPI
+CloseDesktop(
+    IN HDESK hDesktop
+);
+
+BOOL
+WINAPI
+PostMessageA(
+    IN HWND hWnd,
+    IN UINT msg,
+    IN WPARAM wParam,
+    IN LPARAM lParam
+);
+
+BOOL WINAPI SetLogonNotifyWindow(IN HWND hWnd);
+
+#define GW_HWNDFIRST        0
+#define GW_HWNDLAST         1
+#define GW_HWNDNEXT         2
+#define GW_HWNDPREV         3
+#define GW_OWNER            4
+#define GW_CHILD            5
+#define GW_ENABLEDPOPUP     6
+
+#define MAX_ENUM_WINDOWS    4096
+
+typedef BOOLEAN (CALLBACK *WNDENUMPROC)(HWND hwnd, LPARAM lParam);
+
+BOOLEAN WINAPI EnumWindows(IN WNDENUMPROC lpEnumFunc, IN LPARAM lParam);
+BOOLEAN WINAPI EnumChildWindows(IN HWND hWndParent, IN WNDENUMPROC lpEnumFunc, IN LPARAM lParam);
+HWND    WINAPI GetWindow(IN HWND hWnd, IN UINT uCmd);
+HWND    WINAPI GetTopWindow(IN HWND hWnd);
+HWND    WINAPI GetNextWindow(IN HWND hWnd, IN UINT wCmd);
+HWND    WINAPI FindWindowA(IN CONST CHAR *lpClassName, IN CONST CHAR *lpWindowName);
+HWND    WINAPI FindWindowExA(IN HWND hWndParent, IN HWND hWndChildAfter, IN CONST CHAR *lpszClass, IN CONST CHAR *lpszWindow);
+HWND    WINAPI GetForegroundWindow(VOID);
+BOOLEAN WINAPI SetForegroundWindow(IN HWND hWnd);
+INT     WINAPI GetWindowTextA(IN HWND hWnd, OUT PCHAR lpString, IN INT nMaxCount);
+INT     WINAPI GetWindowTextLengthA(IN HWND hWnd);
+BOOLEAN WINAPI IsWindow(IN HWND hWnd);
+BOOLEAN WINAPI IsWindowVisible(IN HWND hWnd);
+BOOLEAN WINAPI GetWindowRect(IN HWND hWnd, OUT PRECT lpRect);
+BOOLEAN WINAPI GetClientRect(IN HWND hWnd, OUT PRECT lpRect);
+BOOLEAN WINAPI ClientToScreen(IN HWND hWnd, IN OUT PPOINT lpPoint);
+BOOLEAN WINAPI ScreenToClient(IN HWND hWnd, IN OUT PPOINT lpPoint);
+INT     WINAPI MapWindowPoints(IN HWND hWndFrom, IN HWND hWndTo, IN OUT PPOINT lpPoints, IN UINT cPoints);
+HWND    WINAPI WindowFromPoint(IN POINT Point);
+
+typedef INT_PTR (WINAPI *FARPROC)();
+typedef INT_PTR (WINAPI *NEARPROC)();
+typedef INT_PTR (WINAPI *PROC)();
+
+FARPROC
+VEAPI
+GetProcAddress(
+    IN HMODULE hModule,
+    IN PCSTR   lpProcName
+);
+
+HRSRC   VEAPI FindResourceExA(IN HMODULE hModule, IN CONST CHAR *lpType, IN CONST CHAR *lpName, IN USHORT wLanguage);
+HRSRC   VEAPI FindResourceA(IN HMODULE hModule, IN CONST CHAR *lpName, IN CONST CHAR *lpType);
+HGLOBAL VEAPI LoadResource(IN HMODULE hModule, IN HRSRC hResInfo);
+PVOID   VEAPI LockResource(IN HGLOBAL hResData);
+ULONG   VEAPI SizeofResource(IN HMODULE hModule, IN HRSRC hResInfo);
+INT     VEAPI LoadStringA(IN HINSTANCE hInstance, IN UINT uID, OUT PSTR lpBuffer, IN INT cchBufferMax);
+
+INT WINAPI GetSystemMetrics(INT nIndex);
+LONG WINAPI GetWindowLongA(HWND hWnd, INT nIndex);
+LONG WINAPI SetWindowLongA(HWND hWnd, INT nIndex, LONG dwNewLong);
+BOOL WINAPI SetWindowPos(
+    HWND hWnd,
+    HWND hWndInsertAfter,
+    INT  X,
+    INT  Y,
+    INT  cx,
+    INT  cy,
+    UINT uFlags
+);
+
+INT
+WINAPI
+FrameRect(
+    IN HDC        hdc,
+    IN CONST RECT *lprc,
+    IN HBRUSH     hbr
+);
+
+BOOL
+WINAPI
+Rectangle(
+    IN HDC hdc,
+    IN INT nLeftRect,
+    IN INT nTopRect,
+    IN INT nRightRect,
+    IN INT nBottomRect
+);
+
+BOOL
+WINAPI
+LineTo(
+    IN HDC hdc,
+    IN INT nXEnd,
+    IN INT nYEnd
+);
+
+BOOL
+WINAPI
+MoveToEx(
+    IN  HDC     hdc,
+    IN  INT     X,
+    IN  INT     Y,
+    OUT LPPOINT lpPoint
+);
+
+HGDIOBJ
+WINAPI
+GetStockObject(
+    IN INT fnObject
+);
+
+HPEN
+WINAPI
+CreatePen(
+    IN INT   fnPenStyle,
+    IN INT   nWidth,
+    IN ULONG crColor
+);
+
+HBRUSH
+WINAPI
+CreateSolidBrush(
+    IN ULONG crColor
+);
+
+DWORD
+WINAPI
+SetClassLongA(
+    IN HWND hWnd,
+    IN INT  nIndex,
+    IN LONG dwNewLong
+);
+
+DWORD
+WINAPI
+GetClassLongA(
+    IN HWND hWnd,
+    IN INT  nIndex
+);
+
+BOOL WINAPI RemoveFontMemResourceEx(HANDLE h);
+HANDLE WINAPI AddFontMemResourceEx(PVOID pFileView, DWORD cjSize, PVOID pvResrved, DWORD *pNumFonts);
+BOOL WINAPI RemoveFontResourceExA(PSTR name, DWORD fl, PVOID res);
+int WINAPI AddFontResourceExA(PSTR name, DWORD fl, PVOID res);
 
 #ifdef __cplusplus
 }

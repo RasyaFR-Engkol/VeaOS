@@ -23,4 +23,45 @@ typedef struct UL_WORK_QUEUE
     UL_QUEUE_WORK_INFO Info;
 } UL_WORK_QUEUE, *PUL_WORK_QUEUE;
 
+#define TIMER_QUERY_STATE                   0x0001
+#define TIMER_MODIFY_STATE                  0x0002
+#define TIMER_ALL_ACCESS                    (VEA_STANDARD_RIGHTS_REQUIRED | \
+                                             VEA_SYNCHRONIZE | \
+                                             TIMER_QUERY_STATE | \
+                                             TIMER_MODIFY_STATE)
+
+typedef struct _ETIMER
+{
+    KTIMER KeTimer;
+    KDPC TimerDpc;
+    KSPIN_LOCK Lock;
+    LIST_ENTRY ActiveTimerListEntry;
+    BOOLEAN ApcAssociated;
+} ETIMER, *PETIMER;
+
+typedef enum _TIMER_TYPE
+{
+    NotificationTimer,
+    SynchronizationTimer
+} TIMER_TYPE;
+
+typedef VOID
+(VEAPI *PTIMER_APC_ROUTINE)
+(
+    IN PVOID TimerContext,
+    IN ULONG TimerLowValue,
+    IN LONG TimerHighValue
+);
+
+typedef struct _TIMER_BASIC_INFORMATION
+{
+    LARGE_INTEGER TimeRemaining;
+    BOOLEAN SignalState;
+} TIMER_BASIC_INFORMATION, *PTIMER_BASIC_INFORMATION;
+
+typedef enum _TIMER_INFORMATION_CLASS
+{
+    TimerBasicInformation
+} TIMER_INFORMATION_CLASS;
+
 /* EOF */

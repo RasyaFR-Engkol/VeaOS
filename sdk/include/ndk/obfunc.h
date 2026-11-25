@@ -314,6 +314,18 @@ ObOpenObjectByName(
     PHANDLE ReturnedHandle
 );
 
+VEASTATUS
+VEAPI
+ObOpenObjectByPointer(
+    PVOID Object,
+    ULONG HandleAttributes,
+    PACCESS_STATE PassedAccessState OPTIONAL,
+    ACCESS_MASK DesiredAccess,
+    POBJECT_TYPE ObjectType OPTIONAL,
+    KPROCESSOR_MODE AccessMode,
+    PHANDLE Handle
+);
+
 BOOLEAN
 VEAPI
 ObioInitSystem1(VOID);
@@ -899,6 +911,16 @@ VeaReadFile(
     IN PLARGE_INTEGER ByteOffset OPTIONAL,
     IN PULONG Key OPTIONAL);
 
+VEASTATUS
+VEAPI
+ObioReadFileKernel(
+    IN HANDLE FileHandle,
+    OUT POIP_INFORMATION IoStatusBlock,
+    OUT PVOID Buffer,
+    IN ULONG Length,
+    IN PLARGE_INTEGER ByteOffset OPTIONAL
+);
+
 VOID
 VEAPI
 ObioReadyDeviceObject(IN PDRIVER_OBJECT DriverObject);
@@ -1041,6 +1063,16 @@ VeaFlushBuffersFile(
 VEASTATUS
 VEAPI
 VeaQueryInformationFile(
+    IN HANDLE FileHandle,
+    OUT POIP_INFORMATION IoStatusBlock,
+    OUT PVOID FileInformation,
+    IN ULONG Length,
+    IN FILE_INFORMATION_CLASS FileInformationClass
+);
+
+VEASTATUS
+VEAPI
+ObioQueryInformationFileKernel(
     IN HANDLE FileHandle,
     OUT POIP_INFORMATION IoStatusBlock,
     OUT PVOID FileInformation,

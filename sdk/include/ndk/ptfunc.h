@@ -255,4 +255,42 @@ PtEstablishVeapiCallouts(
     IN PVEAPI_CALLOUTS_FPNS CalloutData
 );
 
+VEASTATUS
+VEAPI
+PtConvertToGuiThread(VOID);
+
+PVOID
+VEAPI
+PtGetCurrentThreadVeapiThread(VOID);
+
+VOID
+VEAPI
+PtpCatchCriticalBreak(
+    IN PVOID Object,
+    IN BOOLEAN IsProcess,
+    IN VEASTATUS ExitStatus
+);
+
+VEASTATUS
+VEAPI
+PtpTerminateThread(
+    IN PETHREAD Thread,
+    IN VEASTATUS ExitStatus,
+    IN BOOLEAN Direct
+);
+
+VEASTATUS
+VEAPI
+VeaTerminateProcess(
+    IN HANDLE ProcessHandle OPTIONAL,
+    IN VEASTATUS ExitStatus
+);
+
+VEASTATUS
+VEAPI
+VeaTerminateThread(
+    IN HANDLE ThreadHandle,
+    IN VEASTATUS ExitStatus
+);
+
 /* EOF */
