@@ -40,7 +40,6 @@
 #include "internal/x.h" // IWYU pragma: export
 #include "vz_wrappers.h"
 
-extern 
 void *
 memcpy(
     void *dest,
