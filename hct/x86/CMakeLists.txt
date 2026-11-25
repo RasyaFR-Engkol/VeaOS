@@ -4,6 +4,8 @@ file(GLOB_RECURSE HCT_C_SOURCES "*.c")
 # Folder untuk file objek (.o) sementara -> build/hct/x86/
 set(OBJ_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
+file(GLOB_RECURSE HCT_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
+
 set(HCT_OBJS "")
 
 # =============================================================
@@ -37,7 +39,7 @@ foreach(C_FILE ${HCT_C_SOURCES})
                 -I${CMAKE_CURRENT_SOURCE_DIR}/include 
                 ${VEA_INCLUDES} 
             -g -c ${C_FILE} -o ${OBJ_FILE} -fms-extensions
-        DEPENDS ${C_FILE}
+        DEPENDS ${C_FILE} ${HCT_HEADERS}
         COMMENT "Compiling HCT C: ${SAFE_NAME}"
     )
     list(APPEND HCT_OBJS ${OBJ_FILE})
@@ -58,3 +60,17 @@ add_custom_target(build_hct DEPENDS ${OUT_DIR}/hct.so)
 # Export variabel ke parent scope biar bisa dipakai veakrnl
 set(HCT_OBJS ${HCT_OBJS} PARENT_SCOPE)
 set(HCT_C_SOURCES ${HCT_C_SOURCES} PARENT_SCOPE)
+
+add_library(hct_clangd_index OBJECT EXCLUDE_FROM_ALL ${HCT_C_SOURCES})
+target_compile_options(hct_clangd_index PRIVATE
+    --target=i686-pc-none-elf
+    -march=i686
+    -m32
+    -ffreestanding
+    -nostdlib
+    -fno-builtin
+    -fPIC
+    -fms-extensions
+    -I${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${VEA_INCLUDES}
+)
