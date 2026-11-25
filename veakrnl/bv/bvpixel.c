@@ -214,10 +214,7 @@ BvLogoFadeThreadRoutine(IN PVOID Context)
         __YieldProcessor();
     }
 
-    while (1)
-    {
-        __YieldProcessor();
-    }
+    VeaTerminateThread(NtCurrentThread(), STATUS_SUCCESS);
 }
 
 static
