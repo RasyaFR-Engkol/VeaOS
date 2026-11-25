@@ -32,4 +32,4 @@ jobs:
           cmake -B build -G Ninja
 
       - name: Build
-        run: cmake --build build --target <nama_target> -j
+        run: cmake --build build -j
