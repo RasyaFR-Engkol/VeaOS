@@ -28,6 +28,11 @@ UlpInitSystemPhase1(VOID)
         return FALSE;
     }
 
+    if (!UlInitializeTimerImplementation())
+    {
+        return FALSE;
+    }
+
     if (!UlVeapiInit())
     {
         return FALSE;
