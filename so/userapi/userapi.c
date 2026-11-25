@@ -7,6 +7,7 @@
    PURPOSE     : VeaOS User API Shared Library (userapi.so)
  ----- Effective since 11-2026 til FOREVER ------------------------------- */
 
+#include "userapi_priv.h"
 #include <psdk/userapi.h>
 
 /* Revision History ------------------------------------------------------
@@ -16,9 +17,21 @@
 - --------------------------------------------------------------------- */
 
 static HINSTANCE ghUserApiInstance = NULL;
+HMODULE gUserApiModule = NULL;
 
 extern VOID
 UserapiRegisterSystemControls(VOID);
+
+VOID
+UserapiResetDcAttr(
+    IN HDC hdc
+);
+
+VOID
+UserapiInitDcAttr(
+    IN HDC  hdc,
+    IN HWND hWnd
+);
 
 HWND
 WINAPI
@@ -50,6 +63,23 @@ CreateWindowExA(
         hMenu,
         hInstance,
         lpParam
+    );
+}
+
+BOOL
+WINAPI
+PostMessageA(
+    IN HWND hWnd,
+    IN UINT msg,
+    IN WPARAM wParam,
+    IN LPARAM lParam
+)
+{
+    return VeaUserPostMessage(
+        hWnd,
+        msg,
+        wParam,
+        lParam
     );
 }
 
@@ -158,7 +188,13 @@ BeginPaint(
         return NULL;
     }
 
-    return VeaUserBeginPaint(hWnd, lpPaint);
+    HDC hdc = VeaUserBeginPaint(hWnd, lpPaint);
+    if (hdc)
+    {
+        UserapiInitDcAttr(hdc, hWnd);
+    }
+
+    return hdc;
 }
 
 BOOL
@@ -173,6 +209,7 @@ EndPaint(
         return FALSE;
     }
 
+    UserapiResetDcAttr(lpPaint->hdc);
     return VeaUserEndPaint(hWnd, lpPaint) ? TRUE : FALSE;
 }
 
@@ -195,17 +232,17 @@ InvalidateRect(
 INT
 WINAPI
 FillRect(
-    IN HDC hDC,
+    IN HDC        hDC,
     IN CONST RECT *lprc,
-    IN ULONG ColorARGB
+    IN HBRUSH     hbr
 )
 {
-    if (!hDC || !lprc)
+    if (!hDC || !lprc || !hbr)
     {
         return 0;
     }
 
-    return VeaGdiFillRect(hDC, (PRECT)lprc, ColorARGB) ? 1 : 0;
+    return VeaGdiFillRectBrush(hDC, (PRECT)lprc, hbr) ? 1 : 0;
 }
 
 LRESULT
@@ -217,11 +254,24 @@ DefWindowProcA(
     IN LPARAM lParam
 )
 {
-    UNREFERENCED_PARAMETER(wParam);
-    UNREFERENCED_PARAMETER(lParam);
-
     switch (Msg)
     {
+        case WM_SETTEXT:
+            return VeaUserSetWindowText(hWnd, (CONST CHAR *)lParam) ? TRUE : FALSE;
+
+        case WM_GETTEXT:
+            if (!lParam || (INT)wParam <= 0)
+            {
+                return 0;
+            }
+            return (LRESULT)VeaUserGetWindowText(hWnd, (PCHAR)lParam, (INT)wParam);
+
+        case WM_GETTEXTLENGTH:
+        {
+            CHAR Temp[64];
+            return (LRESULT)VeaUserGetWindowText(hWnd, Temp, sizeof(Temp));
+        }
+
         case WM_PAINT:
         {
             PAINTSTRUCT ps;
@@ -240,19 +290,56 @@ DefWindowProcA(
             return 0;
 
         case WM_SYSCOMMAND:
-            if ((wParam & 0xFFF0) == SC_CLOSE)
+            switch (wParam & 0xFFF0)
             {
-                SendMessageA(hWnd, WM_CLOSE, 0, 0);
+                case SC_MINIMIZE:
+                    ShowWindow(hWnd, SW_MINIMIZE);
+                    break;
+
+                case SC_MAXIMIZE:
+                    ShowWindow(hWnd, SW_MAXIMIZE);
+                    break;
+
+                case SC_RESTORE:
+                    ShowWindow(hWnd, SW_RESTORE);
+                    break;
+
+                case SC_CLOSE:
+                    SendMessageA(hWnd, WM_CLOSE, 0, 0);
+                    break;
             }
             return 0;
 
         case WM_ERASEBKGND:
+        {
+            HDC hdc = (HDC)wParam;
+            HBRUSH hbr = (HBRUSH)(ULONG_PTR)GetClassLongA(hWnd, GCL_HBRBACKGROUND);
+            if (!hdc || !hbr)
+            {
+                return 0;
+            }
+
+            RECT rcClient;
+            if (GetClientRect(hWnd, &rcClient))
+            {
+                FillRect(hdc, &rcClient, hbr);
+            }
             return 1;
+        }
 
         case WM_CLOSE:
             DestroyWindow(hWnd);
+            return 0;
+
+        case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
+
+        case WM_CTLCOLORSTATIC:
+        {
+            HBRUSH hBrush = (HBRUSH)(ULONG_PTR)GetClassLongA(hWnd, GCL_HBRBACKGROUND);
+            return (LRESULT)(hBrush ? hBrush : (HBRUSH)(COLOR_BTNFACE + 1));
+        }
 
         default:
             return 0;
@@ -269,28 +356,6 @@ SendMessageA(
 )
 {
     return VeaUserSendMessage(hWnd, Msg, wParam, lParam);
-}
-
-BOOL
-WINAPI
-SetWindowTextA(
-    IN HWND   hWnd,
-    IN PSTR lpString
-)
-{
-    return (SendMessageA(hWnd, WM_SETTEXT, 0, (LPARAM)lpString) != 0);
-}
-
-INT
-WINAPI
-GetWindowTextA(
-    IN HWND  hWnd,
-    IN PSTR lpString,
-    IN INT   nMaxCount
-)
-{
-    if (!lpString || nMaxCount <= 0) return 0;
-    return (INT)SendMessageA(hWnd, WM_GETTEXT, (WPARAM)nMaxCount, (LPARAM)lpString);
 }
 
 HWND
@@ -315,75 +380,12 @@ CreateFontIndirectA(
         return NULL;
     }
 
-    /* Di Win32, cHeight negatif (-16) = character height dalam pixel,
-       cHeight positif (16) = cell height, 0 = ukuran default (14px) */
-    LONG RawHeight = lplf->lfHeight;
-    ULONG PixelHeight = 14;
-    if (RawHeight < 0)
-    {
-        PixelHeight = (ULONG)(-RawHeight);
-    }
-    else if (RawHeight > 0)
-    {
-        PixelHeight = (ULONG)RawHeight;
-    }
-
-    HFONT hFont = VeaGdiCreateFont(NULL, PixelHeight);
-
-    /* Jika varian Bold.ttf tidak ada di disk, otomatis fallback ke file default */
-    if (!hFont)
-    {
-        hFont = VeaGdiCreateFont("D1P1:/VeaOS/Fonts/VerdanaNow.ttf", PixelHeight);
-    }
-
-    return hFont;
-}
-
-HFONT
-WINAPI
-CreateFontA(
-    IN INT    cHeight,
-    IN INT    cWidth,
-    IN INT    cEscapement,
-    IN INT    cOrientation,
-    IN INT    cWeight,
-    IN DWORD  bItalic,
-    IN DWORD  bUnderline,
-    IN DWORD  bStrikeOut,
-    IN DWORD  iCharSet,
-    IN DWORD  iOutPrecision,
-    IN DWORD  iClipPrecision,
-    IN DWORD  iQuality,
-    IN DWORD  iPitchAndFamily,
-    IN PSTR pszFaceName
-)
-{
-    LOGFONTA lf;
-    RtlZeroMemory(&lf, sizeof(lf));
-
-    lf.lfHeight         = cHeight;
-    lf.lfWidth          = cWidth;
-    lf.lfEscapement     = cEscapement;
-    lf.lfOrientation    = cOrientation;
-    lf.lfWeight         = cWeight;
-    lf.lfItalic         = (BYTE)(bItalic != 0);
-    lf.lfUnderline      = (BYTE)(bUnderline != 0);
-    lf.lfStrikeOut      = (BYTE)(bStrikeOut != 0);
-    lf.lfCharSet        = (BYTE)iCharSet;
-    lf.lfOutPrecision   = (BYTE)iOutPrecision;
-    lf.lfClipPrecision  = (BYTE)iClipPrecision;
-    lf.lfQuality        = (BYTE)iQuality;
-    lf.lfPitchAndFamily = (BYTE)iPitchAndFamily;
-
-    if (pszFaceName)
-    {
-        for (ULONG i = 0; i < (LF_FACESIZE - 1) && pszFaceName[i] != '\0'; i++)
-        {
-            lf.lfFaceName[i] = pszFaceName[i];
-        }
-    }
-
-    return CreateFontIndirectA(&lf);
+    return VeaGdiCreateFont(
+        lplf->lfHeight,
+        lplf->lfWeight,
+        (lplf->lfItalic != 0),
+        (lplf->lfFaceName[0] != '\0') ? lplf->lfFaceName : NULL
+    );
 }
 
 HFONT
@@ -423,7 +425,18 @@ SelectObject(
     IN HGDIOBJ h
 )
 {
-    return (HGDIOBJ)SelectFont(hdc, (HFONT)h);
+    if (!hdc)
+    {
+        return NULL;
+    }
+
+    /* h == NULL diizinkan untuk reset font ke default sistem */
+    if (h == NULL)
+    {
+        return (HGDIOBJ)VeaGdiSelectFont(hdc, NULL);
+    }
+
+    return VeaGdiSelectObject(hdc, h);
 }
 
 BOOL
@@ -432,7 +445,17 @@ DeleteObject(
     IN HGDIOBJ ho
 )
 {
-    return DeleteFont((HFONT)ho);
+    if (!ho)
+    {
+        return FALSE;
+    }
+
+    if (VeaGdiDeleteObject(ho))
+    {
+        return TRUE;
+    }
+
+    return VeaGdiDeleteFont((HFONT)ho) ? TRUE : FALSE;
 }
 
 BOOL
@@ -472,11 +495,151 @@ GetTextExtentPoint32A(
 typedef struct _USER_DC_ATTR {
     BOOLEAN Used;
     HDC     hDC;
+    HWND    hWnd;
     ULONG   TextColor;
 } USER_DC_ATTR;
 
-#define MAX_USER_DC_ATTRS 32
+#define MAX_USER_DC_ATTRS 128
 static USER_DC_ATTR gUserDcAttrs[MAX_USER_DC_ATTRS];
+
+VOID
+UserapiInitDcAttr(
+    IN HDC  hdc,
+    IN HWND hWnd
+)
+{
+    if (!hdc) return;
+
+    /* Reuse kalau slot dengan HDC yang sama masih ada */
+    for (ULONG i = 0; i < MAX_USER_DC_ATTRS; i++)
+    {
+        if (gUserDcAttrs[i].Used && gUserDcAttrs[i].hDC == hdc)
+        {
+            gUserDcAttrs[i].hWnd      = hWnd;
+            gUserDcAttrs[i].TextColor = 0xFF000000;
+            return;
+        }
+    }
+
+    for (ULONG i = 0; i < MAX_USER_DC_ATTRS; i++)
+    {
+        if (!gUserDcAttrs[i].Used)
+        {
+            gUserDcAttrs[i].Used      = TRUE;
+            gUserDcAttrs[i].hDC       = hdc;
+            gUserDcAttrs[i].hWnd      = hWnd;
+            gUserDcAttrs[i].TextColor = 0xFF000000;
+            return;
+        }
+    }
+}
+
+VOID
+UserapiResetDcAttr(
+    IN HDC hdc
+)
+{
+    if (!hdc) return;
+
+    for (ULONG i = 0; i < MAX_USER_DC_ATTRS; i++)
+    {
+        if (gUserDcAttrs[i].Used && gUserDcAttrs[i].hDC == hdc)
+        {
+            gUserDcAttrs[i].Used      = FALSE;
+            gUserDcAttrs[i].hDC       = NULL;
+            gUserDcAttrs[i].hWnd      = NULL;
+            gUserDcAttrs[i].TextColor = 0xFF000000;
+            break;
+        }
+    }
+}
+
+HDC
+WINAPI
+GetDCEx(
+    IN HWND  hWnd,
+    IN HRGN  hrgnClip,
+    IN DWORD flags
+)
+{
+    DWORD CleanFlags = flags & ~DCX_INTERNAL_RELEASE;
+    HDC hDC = VeaUserGetDCEx(hWnd, (HANDLE)hrgnClip, CleanFlags);
+    if (hDC)
+    {
+        UserapiInitDcAttr(hDC, hWnd);
+    }
+    return hDC;
+}
+
+HDC
+WINAPI
+GetDC(
+    IN HWND hWnd
+)
+{
+    DWORD Flags = (hWnd != NULL) ? (DCX_CACHE | DCX_USESTYLE) : (DCX_CACHE | DCX_WINDOW);
+    return GetDCEx(hWnd, NULL, Flags);
+}
+
+HDC
+WINAPI
+GetWindowDC(
+    IN HWND hWnd
+)
+{
+    DWORD Flags = DCX_WINDOW | ((hWnd != NULL) ? DCX_USESTYLE : DCX_CACHE);
+    return GetDCEx(hWnd, NULL, Flags);
+}
+
+INT
+WINAPI
+ReleaseDC(
+    IN HWND hWnd,
+    IN HDC  hDC
+)
+{
+    if (!hDC)
+    {
+        return 0;
+    }
+
+    UserapiResetDcAttr(hDC);
+    return (VeaUserGetDCEx(hWnd, (HANDLE)hDC, DCX_INTERNAL_RELEASE) != NULL) ? 1 : 0;
+}
+
+BOOL
+WINAPI
+DeleteDC(
+    IN HDC hdc
+)
+{
+    if (!hdc)
+    {
+        return FALSE;
+    }
+
+    UserapiResetDcAttr(hdc);
+    return VeaGdiDeleteDC(hdc) ? TRUE : FALSE;
+}
+
+HWND
+WINAPI
+WindowFromDC(
+    IN HDC hDC
+)
+{
+    if (!hDC) return NULL;
+
+    for (ULONG i = 0; i < MAX_USER_DC_ATTRS; i++)
+    {
+        if (gUserDcAttrs[i].Used && gUserDcAttrs[i].hDC == hDC)
+        {
+            return gUserDcAttrs[i].hWnd;
+        }
+    }
+
+    return NULL;
+}
 
 ULONG
 WINAPI
@@ -669,34 +832,23 @@ DllMain(
     UNREFERENCED_PARAMETER(lpvReserved);
 
     KdPrintf("DllMain of USERAPI\n");
-    UserapiRegisterSystemControls();
 
     switch (fdwReason)
     {
         case DLL_PROCESS_ATTACH:
             ghUserApiInstance = hinstDLL;
+            gUserApiModule = (HMODULE)hinstDLL;
+            UserapiRegisterSystemControls();
+            UserapiInitDefaultCursor();
             break;
 
         case DLL_PROCESS_DETACH:
             ghUserApiInstance = NULL;
+            gUserApiModule = NULL;
             break;
     }
 
     return TRUE;
-}
-
-__attribute__((constructor))
-static VOID
-UserapiElfInit(VOID)
-{
-    DllMain((HINSTANCE)&DllMain, DLL_PROCESS_ATTACH, NULL);
-}
-
-__attribute__((destructor))
-static VOID
-UserapiElfFini(VOID)
-{
-    DllMain((HINSTANCE)&DllMain, DLL_PROCESS_DETACH, NULL);
 }
 
 /* EOF */

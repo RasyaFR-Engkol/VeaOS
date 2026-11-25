@@ -2,6 +2,16 @@ add_library(userapi SHARED
     userapi.c
     class.c
     uiprotocol.c
+    cursor.c
+    desktop.c
+    wnd.c
+    resources/userapi.rc
+    resource.c
+    gdi.c
+)
+
+set_source_files_properties(resources/icon.asm PROPERTIES
+    COMPILE_FLAGS "-I${CMAKE_CURRENT_SOURCE_DIR}/resources"
 )
 
 target_include_directories(userapi PRIVATE

@@ -7,7 +7,8 @@
    PURPOSE     : UI Window Proc
  ----- Effective since 11-2026 til FOREVER ------------------------------- */
 
-#include  <psdk/userapi.h>
+#include <psdk/userapi.h>
+#include "userapi_priv.h"
 
 /* Revision History ------------------------------------------------------
  * DATE       : 21-11-2026
@@ -15,68 +16,40 @@
  * REVISION   : Creating file uiprotocol.c
  * --------------------------------------------------------------------- */
 
-#define MAX_CTRL_STATES 64
-#define MAX_CTRL_TEXT   128
+static LIST_ENTRY gCtrlListHead;
+static BOOLEAN    gCtrlListInitialized = FALSE;
 
-typedef struct _CTRL_STATE {
-    BOOLEAN Used;
-    HWND    hWnd;
-    HWND    hParent;
-    USHORT  CtrlId;
-    ULONG   Style;
-    BOOLEAN IsPressed;
-    BOOLEAN IsFocused;
-    ULONG   TextLen;
-    CHAR    Text[MAX_CTRL_TEXT];
-} CTRL_STATE, *PCTRL_STATE;
-
-static CTRL_STATE gCtrlStates[MAX_CTRL_STATES];
+static VOID
+CtrlEnsureListInitialized(VOID)
+{
+    if (!gCtrlListInitialized)
+    {
+        InitializeListHead(&gCtrlListHead);
+        gCtrlListInitialized = TRUE;
+    }
+}
 
 static PCTRL_STATE
-CtrlGetOrCreateState(
-    IN HWND hWnd,
-    IN LPARAM lParamCreate
+CtrlFindState(
+    IN HWND hWnd
 )
 {
-    /* Cari jika sudah ada */
-    for (ULONG i = 0; i < MAX_CTRL_STATES; i++)
+    PLIST_ENTRY Entry;
+
+    if (!hWnd)
     {
-        if (gCtrlStates[i].Used && gCtrlStates[i].hWnd == hWnd)
-        {
-            return &gCtrlStates[i];
-        }
+        return NULL;
     }
 
-    /* Alokasi slot baru */
-    for (ULONG i = 0; i < MAX_CTRL_STATES; i++)
+    CtrlEnsureListInitialized();
+
+    for (Entry = gCtrlListHead.Flink;
+         Entry != &gCtrlListHead;
+         Entry = Entry->Flink)
     {
-        if (!gCtrlStates[i].Used)
+        PCTRL_STATE St = CONTAINING_RECORD(Entry, CTRL_STATE, ListEntry);
+        if (St->hWnd == hWnd)
         {
-            PCTRL_STATE St = &gCtrlStates[i];
-            RtlZeroMemory(St, sizeof(CTRL_STATE));
-            St->Used = TRUE;
-            St->hWnd = hWnd;
-
-            /* Jika kernel mengirim CREATESTRUCT lewat lParam saat WM_CREATE */
-            if (lParamCreate != 0)
-            {
-                LPCREATESTRUCTA cs = (LPCREATESTRUCTA)lParamCreate;
-                St->hParent = cs->hwndParent;
-                St->CtrlId  = (USHORT)(ULONG_PTR)cs->hMenu;
-                St->Style   = (ULONG)cs->style;
-
-                if (cs->lpszName)
-                {
-                    ULONG Len = 0;
-                    while (cs->lpszName[Len] != '\0' && Len < (MAX_CTRL_TEXT - 1))
-                    {
-                        St->Text[Len] = cs->lpszName[Len];
-                        Len++;
-                    }
-                    St->Text[Len] = '\0';
-                    St->TextLen   = Len;
-                }
-            }
             return St;
         }
     }
@@ -84,25 +57,143 @@ CtrlGetOrCreateState(
     return NULL;
 }
 
+static BOOLEAN
+CtrlEnsureCapacity(
+    IN PCTRL_STATE St,
+    IN ULONG       NeededBytes
+)
+{
+    if (!St)
+    {
+        return FALSE;
+    }
+
+    if (NeededBytes <= St->TextCapacity && St->Text != NULL)
+    {
+        return TRUE;
+    }
+
+    ULONG NewCap = (NeededBytes + 63) & ~63U;
+    PSTR NewBuf = (PSTR)CTRL_ALLOC(NewCap);
+    if (!NewBuf)
+    {
+        return FALSE;
+    }
+
+    if (St->Text && St->TextLen > 0)
+    {
+        RtlCopyMemory(NewBuf, St->Text, St->TextLen);
+    }
+    NewBuf[St->TextLen] = '\0';
+
+    if (St->Text)
+    {
+        CTRL_FREE(St->Text);
+    }
+
+    St->Text         = NewBuf;
+    St->TextCapacity = NewCap;
+    return TRUE;
+}
+
 static VOID
 CtrlSetText(
     IN PCTRL_STATE St,
-    IN PSTR NewText
+    IN CONST CHAR *NewText
 )
 {
-    if (!St) return;
-
     ULONG Len = 0;
+
+    if (!St)
+    {
+        return;
+    }
+
     if (NewText)
     {
-        while (NewText[Len] != '\0' && Len < (MAX_CTRL_TEXT - 1))
+        while (NewText[Len] != '\0')
         {
-            St->Text[Len] = NewText[Len];
             Len++;
         }
     }
+
+    if (Len == 0)
+    {
+        if (St->Text && St->TextCapacity > 0)
+        {
+            St->Text[0] = '\0';
+        }
+        St->TextLen = 0;
+        return;
+    }
+
+    if (!CtrlEnsureCapacity(St, Len + 1))
+    {
+        return;
+    }
+
+    RtlCopyMemory(St->Text, (PVOID)NewText, Len);
     St->Text[Len] = '\0';
     St->TextLen   = Len;
+}
+
+static PCTRL_STATE
+CtrlCreateState(
+    IN HWND   hWnd,
+    IN LPARAM lParamCreate
+)
+{
+    PCTRL_STATE Existing = CtrlFindState(hWnd);
+    if (Existing)
+    {
+        return Existing;
+    }
+
+    PCTRL_STATE St = (PCTRL_STATE)CTRL_ALLOC(sizeof(CTRL_STATE));
+    if (!St)
+    {
+        return NULL;
+    }
+
+    RtlZeroMemory(St, sizeof(CTRL_STATE));
+    St->hWnd = hWnd;
+
+    if (lParamCreate != 0)
+    {
+        LPCREATESTRUCTA cs = (LPCREATESTRUCTA)lParamCreate;
+        St->hParent = cs->hwndParent;
+        St->CtrlId  = (USHORT)(ULONG_PTR)cs->hMenu;
+        St->Style   = (ULONG)cs->style;
+
+        if (cs->lpszName)
+        {
+            CtrlSetText(St, cs->lpszName);
+        }
+    }
+
+    InsertTailList(&gCtrlListHead, &St->ListEntry);
+    return St;
+}
+
+static VOID
+CtrlFreeState(
+    IN HWND hWnd
+)
+{
+    PCTRL_STATE St = CtrlFindState(hWnd);
+    if (!St)
+    {
+        return;
+    }
+
+    RemoveEntryList(&St->ListEntry);
+
+    if (St->Text)
+    {
+        CTRL_FREE(St->Text);
+    }
+
+    CTRL_FREE(St);
 }
 
 LRESULT
@@ -114,19 +205,21 @@ StaticWndProc(
     LPARAM lParam
 )
 {
-    PCTRL_STATE St = CtrlGetOrCreateState(hWnd, (Msg == WM_CREATE) ? lParam : 0);
+    PCTRL_STATE St = (Msg == WM_CREATE)
+                     ? CtrlCreateState(hWnd, lParam)
+                     : CtrlFindState(hWnd);
 
     switch (Msg)
     {
         case WM_CREATE:
             KdPrintf("[STATIC] Created hWnd=%p text='%s'\n\r",
-                     hWnd, St ? St->Text : "");
+                     hWnd, (St && St->Text) ? St->Text : "");
             return 0;
 
         case WM_SETTEXT:
             CtrlSetText(St, (PSTR)lParam);
             KdPrintf("[STATIC] WM_SETTEXT hWnd=%p -> '%s'\n\r",
-                     hWnd, St ? St->Text : "");
+                     hWnd, (St && St->Text) ? St->Text : "");
             InvalidateRect(hWnd, NULL, TRUE);
             return TRUE;
 
@@ -149,18 +242,50 @@ StaticWndProc(
             HDC hdc = BeginPaint(hWnd, &ps);
             if (hdc)
             {
-                /* Clear background klasik supaya WM_SETTEXT tidak menumpuk teks lama */
-                FillRect(hdc, &ps.rcPaint, 0xFFC0C0C0);
+                HWND hParent = (HWND)GetWindowLongA(hWnd, GWL_HWNDPARENT);
+                HBRUSH hBgBrush;
+
+                if (hParent)
+                {
+                    hBgBrush = (HBRUSH)SendMessageA(
+                        hParent,
+                        WM_CTLCOLORSTATIC,
+                        (WPARAM)hdc,
+                        (LPARAM)hWnd
+                    );
+
+                    if (!hBgBrush)
+                    {
+                        hBgBrush = (HBRUSH)(ULONG_PTR)GetClassLongA(hParent, GCL_HBRBACKGROUND);
+                    }
+                }
+
+                if (!hBgBrush)
+                {
+                    hBgBrush = (HBRUSH)GetStockObject(WHITE_BRUSH);
+                }
+
+                FillRect(hdc, &ps.rcPaint, hBgBrush);
 
                 if (St && St->TextLen > 0)
                 {
-                    VeaGdiDrawText(hdc, 0, 2, St->Text, 0xFF000000);
+                    COLORREF Cr = GetTextColor(hdc);
+                    ULONG TextColorARGB = 0xFF000000 |
+                                          ((Cr & 0x0000FF) << 16) |
+                                          (Cr & 0x00FF00) |
+                                          ((Cr & 0xFF0000) >> 16);
+
+                    VeaGdiDrawText(hdc, 0, 2, St->Text, TextColorARGB);
                 }
 
                 EndPaint(hWnd, &ps);
             }
             return 0;
         }
+
+        case WM_NCDESTROY:
+            CtrlFreeState(hWnd);
+            return 0;
     }
 
     return DefWindowProcA(hWnd, Msg, wParam, lParam);
@@ -175,13 +300,14 @@ ButtonWndProc(
     LPARAM lParam
 )
 {
-    PCTRL_STATE St = CtrlGetOrCreateState(hWnd, (Msg == WM_CREATE) ? lParam : 0);
-
+    PCTRL_STATE St = (Msg == WM_CREATE)
+                     ? CtrlCreateState(hWnd, lParam)
+                     : CtrlFindState(hWnd);
     switch (Msg)
     {
         case WM_CREATE:
             KdPrintf("[BUTTON] Created hWnd=%p id=%u caption='%s'\n\r",
-                     hWnd, St ? St->CtrlId : 0, St ? St->Text : "");
+                     hWnd, St ? St->CtrlId : 0, (St && St->Text) ? St->Text : "");
             return 0;
 
         case WM_SETTEXT:
@@ -276,6 +402,9 @@ ButtonWndProc(
             }
             return 0;
         }
+        case WM_NCDESTROY:
+            CtrlFreeState(hWnd);
+            return 0;
     }
 
     return DefWindowProcA(hWnd, Msg, wParam, lParam);
@@ -290,13 +419,14 @@ EditWndProc(
     LPARAM lParam
 )
 {
-    PCTRL_STATE St = CtrlGetOrCreateState(hWnd, (Msg == WM_CREATE) ? lParam : 0);
-
+    PCTRL_STATE St = (Msg == WM_CREATE)
+                     ? CtrlCreateState(hWnd, lParam)
+                     : CtrlFindState(hWnd);
     switch (Msg)
     {
         case WM_CREATE:
             KdPrintf("[EDIT] Created hWnd=%p id=%u initial='%s'\n\r",
-                     hWnd, St ? St->CtrlId : 0, St ? St->Text : "");
+                     hWnd, St ? St->CtrlId : 0, (St && St->Text) ? St->Text : "");
             return 0;
 
         case WM_SETTEXT:
@@ -312,7 +442,10 @@ EditWndProc(
 
             INT CopyLen = (INT)St->TextLen;
             if (CopyLen >= MaxCount) CopyLen = MaxCount - 1;
-            RtlCopyMemory(Dst, St->Text, (SIZE_T)CopyLen);
+            if (CopyLen > 0 && St->Text)
+            {
+                RtlCopyMemory(Dst, St->Text, (SIZE_T)CopyLen);
+            }
             Dst[CopyLen] = '\0';
             return CopyLen;
         }
@@ -348,7 +481,7 @@ EditWndProc(
             if (Ch == '\b' || Ch == 0x08)
             {
                 /* Backspace */
-                if (St->TextLen > 0)
+                if (St->Text && St->TextLen > 0)
                 {
                     St->TextLen--;
                     St->Text[St->TextLen] = '\0';
@@ -358,8 +491,8 @@ EditWndProc(
             }
             else if (Ch >= 32 && Ch <= 126)
             {
-                /* Karakter ASCII printable */
-                if (St->TextLen < (MAX_CTRL_TEXT - 1))
+                /* Alokasikan / perbesar buffer secara dinamis sebelum menulis */
+                if (CtrlEnsureCapacity(St, St->TextLen + 2))
                 {
                     St->Text[St->TextLen++] = Ch;
                     St->Text[St->TextLen]   = '\0';
@@ -380,7 +513,7 @@ EditWndProc(
                 INT B = ps.rcPaint.bottom - 1;
 
                 /* 1. Latar belakang putih TextBox */
-                FillRect(hdc, &ps.rcPaint, 0xFFFFFFFF);
+                FillRect(hdc, &ps.rcPaint, (HBRUSH)GetStockObject(WHITE_BRUSH));
 
                 /* 2. Sunken 3D Border (gelap di atas/kiri, terang di bawah/kanan) */
                 ULONG TopLeftCol = (St && St->IsFocused) ? 0xFF3D7BAD : 0xFF7A7A7A;
@@ -394,16 +527,23 @@ EditWndProc(
                 DisplayBuf[0] = '\0';
                 ULONG TextW = 0, TextH = 0;
 
-                if (St && St->TextLen > 0)
+                if (St && St->Text && St->TextLen > 0)
                 {
+                    ULONG DispLen = St->TextLen;
+                    if (DispLen >= MAX_CTRL_TEXT)
+                    {
+                        DispLen = MAX_CTRL_TEXT - 1;
+                    }
+
                     if (St->Style & ES_PASSWORD)
                     {
-                        for (ULONG i = 0; i < St->TextLen; i++) DisplayBuf[i] = '*';
-                        DisplayBuf[St->TextLen] = '\0';
+                        for (ULONG i = 0; i < DispLen; i++) DisplayBuf[i] = '*';
+                        DisplayBuf[DispLen] = '\0';
                     }
                     else
                     {
-                        RtlCopyMemory(DisplayBuf, St->Text, St->TextLen + 1);
+                        RtlCopyMemory(DisplayBuf, St->Text, DispLen);
+                        DisplayBuf[DispLen] = '\0';
                     }
 
                     VeaGdiGetTextExtent(DisplayBuf, &TextW, &TextH);
@@ -414,17 +554,24 @@ EditWndProc(
                     VeaGdiDrawText(hdc, 6, TextY, DisplayBuf, 0xFF000000);
                 }
 
-                /* 4. Gambar garis kursor ketik (caret) tepat di ujung lebar pixel asli */
-                INT CaretX = 6 + (INT)TextW;
-                if (CaretX < R - 4 && B > 8)
+                /* 4. Gambar garis kursor ketik (caret) hanya saat fokus aktif */
+                if (St && St->IsFocused)
                 {
-                    VeaGdiLineTo(hdc, CaretX, 4, CaretX, B - 4, 0xFF000000);
+                    INT CaretX = 6 + (INT)TextW;
+                    if (CaretX < R - 4 && B > 8)
+                    {
+                        VeaGdiLineTo(hdc, CaretX, 4, CaretX, B - 4, 0xFF000000);
+                    }
                 }
 
                 EndPaint(hWnd, &ps);
             }
             return 0;
         }
+
+        case WM_NCDESTROY:
+            CtrlFreeState(hWnd);
+            return 0;
     }
 
     return DefWindowProcA(hWnd, Msg, wParam, lParam);
