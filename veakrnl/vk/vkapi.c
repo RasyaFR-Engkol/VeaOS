@@ -1177,4 +1177,36 @@ VeaEnumerateValueKey(
     return Status;
 }
 
+VEASTATUS
+VEAPI
+VeaInitializeKey(IN ULONG Flags)
+{
+    KdPrintf("[Vk] VeaInitializeKey: Flags=0x%X SamHive=%p\n", Flags, VkSamHive);
+
+    if (Flags == VK_INIT_BOOT_SM)
+    {
+        if (VkSamHive != NULL)
+        {
+            return STATUS_SUCCESS;
+        }
+
+        VEASTATUS Status = VkpLoadAndMountHiveFromFile(
+            VK_SAM_HIVE_PATH,
+            VK_SAM_MOUNT_PATH,
+            &VkSamHive
+        );
+        KdPrintf("[Vk] VeaInitializeKey: SAM load returned 0x%X (Hive=%p)\n",
+                 Status, VkSamHive);
+        return Status;
+    }
+
+    if (Flags >= VK_INIT_BOOT_ACCEPTED)
+    {
+        // Placeholder kalau nanti mau bikin backup LastKnownGood
+        return STATUS_SUCCESS;
+    }
+
+    return STATUS_INVALID_PARAMETER;
+}
+
 /* EOF */

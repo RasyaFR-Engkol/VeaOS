@@ -16,6 +16,7 @@
 * --------------------------------------------------------------------- */
 
 PVK_HIVE VkSystemHive = NULL;
+PVK_HIVE VkSamHive    = NULL;
 
 VOID
 VEAPI
@@ -149,3 +150,307 @@ VkpFindValueNode(
 
     return NULL; // Value not found
 }
+
+BOOLEAN
+VEAPI
+VkpInitializeHiveFromBuffer(
+    IN PVOID HiveBuffer,
+    IN ULONG HiveLength,
+    IN PCHAR HiveFilePath OPTIONAL,
+    OUT PVK_HIVE *OutHive
+)
+{
+    PKEY_FILE_HEADER Header;
+    PKEY_BASE_BLOCK  BaseBlock;
+    PKEY_DIRECTORY_NODE RootNode;
+
+    if (!HiveBuffer || HiveLength < (0x1000 + sizeof(KEY_BASE_BLOCK) + sizeof(KEY_DIRECTORY_NODE)) || !OutHive)
+    {
+        return FALSE;
+    }
+
+    *OutHive = NULL;
+    Header = (PKEY_FILE_HEADER)HiveBuffer;
+
+    if (Header->Signature != KEY_HEADER_SIG)
+    {
+        KdPrintf("[Vk] ERROR: Hive corrupted. Header mismatch (Expected 'KEY1')\n");
+        return FALSE;
+    }
+
+    if (Header->PrimarySequence != Header->SecondarySequence)
+    {
+        KdPrintf("[Vk] ERROR: Hive corrupted. PrimarySequence != SecondarySequence\n");
+        return FALSE;
+    }
+
+    BaseBlock = (PKEY_BASE_BLOCK)((PUCHAR)HiveBuffer + 0x1000);
+    if (BaseBlock->Signature != KEY_BIN_SIG)
+    {
+        KdPrintf("[Vk] ERROR: Hive corrupted. First BIN1 block mismatch\n");
+        return FALSE;
+    }
+
+    PVOID KernelPoolHive = UlAllocatePoolWithTag(NonPagedPool, HiveLength, 'VkHv');
+    if (!KernelPoolHive)
+    {
+        KdPrintf("[Vk] ERROR: Failed to allocate NonPagedPool for Hive (%u bytes)\n", HiveLength);
+        return FALSE;
+    }
+
+    RtlCopyMemory(KernelPoolHive, HiveBuffer, HiveLength);
+
+    PVK_HIVE NewHive = (PVK_HIVE)UlAllocatePoolWithTag(NonPagedPool, sizeof(VK_HIVE), 'VkHv');
+    if (!NewHive)
+    {
+        UlFreePoolWithTag(KernelPoolHive, 'VkHv');
+        return FALSE;
+    }
+
+    RtlZeroMemory(NewHive, sizeof(VK_HIVE));
+
+    NewHive->Signature   = VKHIVE_SIG;
+    NewHive->Length      = HiveLength;
+    NewHive->BaseAddress = KernelPoolHive;
+    NewHive->Header      = (PKEY_FILE_HEADER)KernelPoolHive;
+    NewHive->BaseBlock   = (PKEY_BASE_BLOCK)((PUCHAR)KernelPoolHive + 0x1000);
+    NewHive->FreeOffset  = HiveLength;
+
+    NewHive->StableBins[0].BinBase       = KernelPoolHive;
+    NewHive->StableBins[0].BinSize       = HiveLength;
+    NewHive->StableBins[0].BinBaseOffset = 0;
+    NewHive->StableBinCount              = 1;
+
+    if (HiveFilePath != NULL)
+    {
+        ULONG PathLen = (ULONG)RtlRawStringLength(HiveFilePath);
+        PCHAR PathCopy = (PCHAR)UlAllocatePoolWithTag(NonPagedPool, PathLen + 1, 'VkHv');
+        if (PathCopy)
+        {
+            RtlCopyMemory(PathCopy, HiveFilePath, PathLen);
+            PathCopy[PathLen] = '\0';
+            NewHive->HiveFilePath.Buffer        = PathCopy;
+            NewHive->HiveFilePath.Length        = (USHORT)PathLen;
+            NewHive->HiveFilePath.MaximumLength = (USHORT)(PathLen + 1);
+        }
+    }
+
+    ULONG TotalBlocks = HiveLength / 0x1000;
+    NewHive->DirtyVectorSize = (TotalBlocks / 32) + 1;
+    NewHive->DirtyVector = (PULONG)UlAllocatePoolWithTag(
+        NonPagedPool,
+        NewHive->DirtyVectorSize * sizeof(ULONG),
+        'VkDv'
+    );
+
+    if (!NewHive->DirtyVector)
+    {
+        if (NewHive->HiveFilePath.Buffer) UlFreePoolWithTag(NewHive->HiveFilePath.Buffer, 'VkHv');
+        UlFreePoolWithTag(NewHive, 'VkHv');
+        UlFreePoolWithTag(KernelPoolHive, 'VkHv');
+        return FALSE;
+    }
+
+    RtlZeroMemory(NewHive->DirtyVector, NewHive->DirtyVectorSize * sizeof(ULONG));
+
+    RootNode = (PKEY_DIRECTORY_NODE)((PUCHAR)NewHive->BaseBlock + sizeof(KEY_BASE_BLOCK));
+    if (RootNode->Signature != KEY_DIR_SIG)
+    {
+        KdPrintf("[Vk] ERROR: Root node signature mismatch! Expected 'DN'\n");
+        UlFreePoolWithTag(NewHive->DirtyVector, 'VkDv');
+        if (NewHive->HiveFilePath.Buffer) UlFreePoolWithTag(NewHive->HiveFilePath.Buffer, 'VkHv');
+        UlFreePoolWithTag(NewHive, 'VkHv');
+        UlFreePoolWithTag(KernelPoolHive, 'VkHv');
+        return FALSE;
+    }
+
+    *OutHive = NewHive;
+    return TRUE;
+}
+
+BOOLEAN
+VEAPI
+VkpMountHive(
+    IN PVK_HIVE Hive,
+    IN PCHAR MountPath
+)
+{
+    VEASTATUS Status;
+    OBJECT_ATTRIBUTES ObjAttr;
+    ANSI_STRING KeyPath;
+    PVK_KEY_OBJECT KeyObject = NULL;
+
+    if (!Hive || !Hive->BaseBlock || !MountPath)
+    {
+        return FALSE;
+    }
+
+    PKEY_DIRECTORY_NODE RootNode = (PKEY_DIRECTORY_NODE)(
+        (PUCHAR)Hive->BaseBlock + sizeof(KEY_BASE_BLOCK)
+    );
+
+    if (RootNode->Signature != KEY_DIR_SIG)
+    {
+        KdPrintf("[Vk] ERROR: Root node signature mismatch for %s\n", MountPath);
+        return FALSE;
+    }
+
+    RtlInitAnsiString(&KeyPath, MountPath);
+
+    RtlZeroMemory(&ObjAttr, sizeof(OBJECT_ATTRIBUTES));
+    ObjAttr.ObjectName = &KeyPath;
+    ObjAttr.Attributes = OBJ_PERMANENT;
+
+    Status = ObCreateObject(
+        KernelMode,
+        VkKeyObjectType,
+        &ObjAttr,
+        KernelMode,
+        NULL,
+        sizeof(VK_KEY_OBJECT),
+        0,
+        0,
+        (PVOID*)&KeyObject
+    );
+
+    if (!VEA_SUCCESS(Status))
+    {
+        KdPrintf("[Vk] ERROR: Failed to create KeyObject for %s (Status: 0x%X)\n", MountPath, Status);
+        return FALSE;
+    }
+
+    RtlZeroMemory(KeyObject, sizeof(VK_KEY_OBJECT));
+    KeyObject->HiveBase  = Hive;
+    KeyObject->KeyNode   = RootNode;
+    KeyObject->KeyOffset = (ULONG)((PUCHAR)RootNode - (PUCHAR)Hive->BaseAddress);
+    RtlInitAnsiString(&KeyObject->FullKeyPath, MountPath);
+
+    Status = ObInsertObject(
+        KeyObject,
+        NULL,
+        0,
+        0,
+        NULL,
+        NULL
+    );
+
+    if (!VEA_SUCCESS(Status))
+    {
+        KdPrintf("[Vk] ERROR: Failed to insert %s into Object Namespace (Status: 0x%X)\n", MountPath, Status);
+        return FALSE;
+    }
+
+    KdPrintf("[Vk] Hive successfully mounted to %s\n", MountPath);
+    return TRUE;
+}
+
+VEASTATUS
+VEAPI
+VkpLoadAndMountHiveFromFile(
+    IN PCHAR FilePath,
+    IN PCHAR MountPath,
+    OUT PVK_HIVE *OutHive
+)
+{
+    HANDLE FileHandle = NULL;
+    OBJECT_ATTRIBUTES ObjAttr;
+    OIP_INFORMATION IoStatus;
+    ANSI_STRING FilePathStr;
+    FILE_STANDARD_INFORMATION FileInfo;
+    VEASTATUS Status;
+
+    KdPrintf("[Vk] Loading hive '%s' -> '%s'\n", FilePath, MountPath);
+
+    RtlInitAnsiString(&FilePathStr, FilePath);
+    RtlZeroMemory(&ObjAttr, sizeof(OBJECT_ATTRIBUTES));
+    RtlZeroMemory(&IoStatus, sizeof(IoStatus));
+    ObjAttr.ObjectName = &FilePathStr;
+
+    // 1. Buka file SAM.VKEY dari disk (sesuaikan nama syscall VFS kernel lu bila berbeda)
+    Status = VeaOpenFile(
+        &FileHandle,
+        FILE_GENERIC_READ | VEA_SYNCHRONIZE,
+        &ObjAttr,
+        &IoStatus,
+        FILE_SHARE_READ,
+        FILE_SYNCHRONOUS_IO_NONALERT
+    );
+    KdPrintf("[Vk] VeaOpenFile: status=0x%X ioStatus=0x%X information=%u handle=%p\n",
+             Status, IoStatus.Status, IoStatus.Information, FileHandle);
+    if (!VEA_SUCCESS(Status))
+    {
+        KdPrintf("[Vk] ERROR: Failed to open hive file %s (Status: 0x%X)\n", FilePath, Status);
+        return Status;
+    }
+
+    // 2. Ambil ukuran file
+    RtlZeroMemory(&FileInfo, sizeof(FileInfo));
+    RtlZeroMemory(&IoStatus, sizeof(IoStatus));
+    Status = ObioQueryInformationFileKernel(
+        FileHandle,
+        &IoStatus,
+        &FileInfo,
+        sizeof(FileInfo),
+        FileStandardInformation
+    );
+    KdPrintf("[Vk] ObioQueryInformationFileKernel: status=0x%X ioStatus=0x%X information=%u eof=%u\n",
+             Status, IoStatus.Status, IoStatus.Information, FileInfo.EndOfFile.LowPart);
+    if (!VEA_SUCCESS(Status) || FileInfo.EndOfFile.LowPart == 0)
+    {
+        VeaClose(FileHandle);
+        return Status;
+    }
+
+    ULONG FileSize = FileInfo.EndOfFile.LowPart;
+    PVOID TempBuf = UlAllocatePoolWithTag(NonPagedPool, FileSize, 'VkTp');
+    if (!TempBuf)
+    {
+        VeaClose(FileHandle);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    // 3. Baca seluruh isi SAM.VKEY ke buffer
+    LARGE_INTEGER ByteOffset;
+    ByteOffset.QuadPart = 0;
+    RtlZeroMemory(&IoStatus, sizeof(IoStatus));
+
+    Status = ObioReadFileKernel(
+        FileHandle,
+        &IoStatus,
+        TempBuf,
+        FileSize,
+        &ByteOffset
+    );
+    KdPrintf("[Vk] ObioReadFileKernel: status=0x%X ioStatus=0x%X information=%u requested=%u\n",
+             Status, IoStatus.Status, IoStatus.Information, FileSize);
+    VeaClose(FileHandle);
+
+    if (!VEA_SUCCESS(Status))
+    {
+        UlFreePoolWithTag(TempBuf, 'VkTp');
+        return Status;
+    }
+
+    // 4. Validasi header & buat struktur PVK_HIVE
+    if (!VkpInitializeHiveFromBuffer(TempBuf, FileSize, FilePath, OutHive))
+    {
+        KdPrintf("[Vk] VkpInitializeHiveFromBuffer failed for '%s' (%u bytes)\n",
+                 FilePath, FileSize);
+        UlFreePoolWithTag(TempBuf, 'VkTp');
+        return STATUS_REGISTRY_CORRUPT;
+    }
+
+    UlFreePoolWithTag(TempBuf, 'VkTp');
+    KdPrintf("[Vk] Hive validated: %p (%u bytes)\n", *OutHive, FileSize);
+
+    // 5. Mount ke Object Manager Namespace (/REGISTRY/MACHINE/SAM)
+    if (!VkpMountHive(*OutHive, MountPath))
+    {
+        KdPrintf("[Vk] VkpMountHive failed for '%s'\n", MountPath);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/* EOF */

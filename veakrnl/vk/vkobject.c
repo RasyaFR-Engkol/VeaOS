@@ -32,8 +32,9 @@ VkpInitializeKeyObjectPath(
     IN PVK_KEY_OBJECT KeyObject
 )
 {
-    static const CHAR RegistryPrefix[] =
-        "/REGISTRY/MACHINE/SYSTEM";
+    const CHAR *RegistryPrefix = (KeyObject->HiveBase == VkSamHive)
+        ? "/REGISTRY/MACHINE/SAM"
+        : "/REGISTRY/MACHINE/SYSTEM";
     PKEY_DIRECTORY_NODE RootNode;
     PKEY_DIRECTORY_NODE CurrentNode;
     PKEY_DIRECTORY_NODE Components[64];
