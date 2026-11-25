@@ -1,27 +1,20 @@
-# =============================================================
+# =====================================================================
 # VeaOS KERNEL EXECUTABLE (veakrnl.elf)
-# =============================================================
-
+# =====================================================================
 file(GLOB_RECURSE KERNEL_ASM_SOURCES CONFIGURE_DEPENDS "*.asm")
 file(GLOB_RECURSE KERNEL_C_SOURCES CONFIGURE_DEPENDS "*.c")
-file(GLOB_RECURSE RTL_SOURCES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/sdk/lib/rtl/*.c")
 
-list(APPEND KERNEL_C_SOURCES ${RTL_SOURCES})
+list(APPEND KERNEL_C_SOURCES ${RTL_SOURCES} ${AUTEXP_C_FILE})
+list(APPEND KERNEL_ASM_SOURCES ${VZ_WRAPPERS_ASM_FILE})
 
-if(EXISTS ${AUTEXP_C_FILE})
-    list(APPEND KERNEL_C_SOURCES ${AUTEXP_C_FILE})
-endif()
-
-if(EXISTS ${VZ_WRAPPERS_ASM_FILE})
-    list(APPEND KERNEL_ASM_SOURCES ${VZ_WRAPPERS_ASM_FILE})
-endif()
+set_source_files_properties(${AUTEXP_C_FILE} ${VZ_WRAPPERS_ASM_FILE} PROPERTIES GENERATED TRUE)
 
 add_executable(veakrnl
     ${KERNEL_C_SOURCES}
     ${KERNEL_ASM_SOURCES}
 )
 
-# Otomatis menyertakan seluruh .o hasil kompilasi library 'hct'
+add_dependencies(veakrnl veakrnl_codegen)
 target_link_libraries(veakrnl PRIVATE hct)
 
 set_target_properties(veakrnl PROPERTIES
@@ -37,9 +30,9 @@ target_compile_definitions(veakrnl PRIVATE BUILDING_VEAKRNL)
 target_include_directories(veakrnl PRIVATE
     ${KERNEL_INCLUDE_DIR}
     ${SDK_INCLUDE_DIR}
-    ${SDK_INCLUDE_DIR}/ndk
-    ${SDK_INCLUDE_DIR}/ddk
-    ${SDK_INCLUDE_DIR}/psdk
+    ${NDK_INCLUDE_DIR}
+    ${DDK_INCLUDE_DIR}
+    ${PSDK_INCLUDE_DIR}
 )
 
 target_compile_options(veakrnl PRIVATE
@@ -71,11 +64,9 @@ target_compile_options(veakrnl PRIVATE
     >
 )
 
+set(CMAKE_C_LINK_EXECUTABLE "ld.lld <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>")
+
 target_link_options(veakrnl PRIVATE
-    --target=i686-pc-none-elf
-    -fuse-ld=lld
-    -nostdlib
-    -no-pie
-    -Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/linker.ld
-    -Wl,-m,elf_i386
+    "SHELL:-T ${CMAKE_CURRENT_SOURCE_DIR}/linker.ld"
+    "SHELL:-m elf_i386"
 )
