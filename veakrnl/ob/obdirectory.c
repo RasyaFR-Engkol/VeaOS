@@ -409,7 +409,6 @@ ObCreateSymbolicLink(
     }
 
     POBJECT_HEADER Header = OBJECT_TO_OBJECT_HEADER(SymlinkObject);
-    Header->Flags |= OB_FLAG_PERMANENT; // Pastikan flag terpasang di Header
 
     POBJECT_SYMBOLIC_LINK SymlinkBody = (POBJECT_SYMBOLIC_LINK)SymlinkObject;
     SymlinkBody->LinkTarget.Length = PathLength;
@@ -450,10 +449,12 @@ ObCreateSymbolicLink(
     Status = ObpInsertDirectory(ParentDirectory, SymlinkObject);
     if (!VEA_SUCCESS(Status))
     {
+        OBJECT_HEADER_TO_NAME_INFO(Header)->Directory = NULL;
         ObDereferenceObject(SymlinkObject);
         return Status;
     }
 
+    Header->Flags |= OB_FLAG_PERMANENT;
     ObDereferenceObject(SymlinkObject);
     return STATUS_SUCCESS;
 }
@@ -485,7 +486,7 @@ ObCreateSymbolicLinkToObject(
         return STATUS_INVALID_PARAMETER;
     }
 
-    // FIX 1: Set OBJ_PERMANENT
+    // Permanence is set only after the object is successfully inserted.
     InitializeObjectAttributes(&Attributes, &Name, OBJ_PERMANENT, NULL, NULL);
     Status = ObAllocateObject(ObpSymbolicLinkObjectType,
                               &Attributes,
@@ -497,7 +498,6 @@ ObCreateSymbolicLinkToObject(
     }
 
     Header = OBJECT_TO_OBJECT_HEADER(LinkObject);
-    Header->Flags |= OB_FLAG_PERMANENT; // Pastikan flag permanent aktif di Header
 
     if (!(Header->Flags & OB_FLAG_HAS_NAME_INFO))
     {
@@ -526,6 +526,14 @@ ObCreateSymbolicLinkToObject(
     ObReferenceObject(TargetObject);
 
     Status = ObpInsertDirectory(ParentDirectory, LinkObject);
+    if (!VEA_SUCCESS(Status))
+    {
+        NameInfo->Directory = NULL;
+        ObDereferenceObject(LinkObject);
+        return Status;
+    }
+
+    Header->Flags |= OB_FLAG_PERMANENT;
     ObDereferenceObject(LinkObject);
     return Status;
 }
@@ -1128,13 +1136,23 @@ VEAPI
 ObMakeTemporaryObject(IN PVOID Object)
 {
     POBJECT_HEADER Header;
+    BOOLEAN HadDirectoryReference = FALSE;
 
     if (!Object) return;
 
     Header = OBJECT_TO_OBJECT_HEADER(Object);
+    if (Header->Flags & OB_FLAG_HAS_NAME_INFO)
+    {
+        HadDirectoryReference =
+            OBJECT_HEADER_TO_NAME_INFO(Header)->Directory != NULL;
+    }
     Header->Flags &= ~OB_FLAG_PERMANENT;
 
     ObpDeleteNameCheck(Object);
+    if (HadDirectoryReference)
+    {
+        ObDereferenceObject(Object);
+    }
 }
 
 VEASTATUS

@@ -230,8 +230,19 @@ ObioCompleteRequest(
             Oip->UserBuffer, RequestMajor, Oip->Flags, Oip->StatusInformation.Information);
     }
 
-    if (Oip->RequestorThread == NULL ||
-        (Oip->RequestorThread == CurrentThread && KeGetCurrentIrql() < DISPATCH_LEVEL))
+    /* Cek apakah target buffer & IoStatusBlock berada di kernel space */
+    BOOLEAN IsKernelTarget =
+        ((Oip->UserBuffer == NULL ||
+          (ULONG_PTR)Oip->UserBuffer >= 0x80000000UL) &&
+         (Oip->UserInfoBlock == NULL ||
+          (ULONG_PTR)Oip->UserInfoBlock >= 0x80000000UL));
+
+    CanRunInline =
+        (Oip->RequestorThread == NULL) ||
+        IsKernelTarget ||
+        (Oip->RequestorThread == CurrentThread && KeGetCurrentIrql() < DISPATCH_LEVEL);
+
+    if (CanRunInline)
     {
         PVOID Arg1 = (PVOID)(ULONG_PTR)RequestMajor;
         ObiopCompleteRequestApc(&Oip->Apc, NULL, NULL, &Arg1, NULL);

@@ -797,9 +797,8 @@ VeaCreateFile(
     );
 }
 
-VEASTATUS
-VEAPI
-VeaReadFile(
+static VEASTATUS
+ObioReadFileWithMode(
     IN HANDLE FileHandle,
     IN HANDLE Event OPTIONAL,
     IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
@@ -808,7 +807,9 @@ VeaReadFile(
     OUT PVOID Buffer,
     IN ULONG Length,
     IN PLARGE_INTEGER ByteOffset OPTIONAL,
-    IN PULONG Key OPTIONAL)
+    IN PULONG Key OPTIONAL,
+    IN KPROCESSOR_MODE AccessMode
+)
 {
     PFILE_OBJECT FileObject = NULL;
     PDEVICE_OBJECT DeviceObject = NULL;
@@ -817,7 +818,6 @@ VeaReadFile(
     POIP Oip = NULL;
     POIP_STACK StackPtr = NULL;
     VEASTATUS Status;
-    KPROCESSOR_MODE AccessMode = KeGetPreviousMode();
     LARGE_INTEGER LocalByteOffset;
 
     if (!IoStatusBlock || !Buffer)
@@ -915,6 +915,58 @@ VeaReadFile(
     ObDereferenceObject(FileObject);
 
     return Status;
+}
+
+VEASTATUS
+VEAPI
+VeaReadFile(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+    IN PVOID ApcContext OPTIONAL,
+    OUT POIP_INFORMATION IoStatusBlock,
+    OUT PVOID Buffer,
+    IN ULONG Length,
+    IN PLARGE_INTEGER ByteOffset OPTIONAL,
+    IN PULONG Key OPTIONAL
+)
+{
+    return ObioReadFileWithMode(
+        FileHandle,
+        Event,
+        ApcRoutine,
+        ApcContext,
+        IoStatusBlock,
+        Buffer,
+        Length,
+        ByteOffset,
+        Key,
+        KeGetPreviousMode()
+    );
+}
+
+VEASTATUS
+VEAPI
+ObioReadFileKernel(
+    IN HANDLE FileHandle,
+    OUT POIP_INFORMATION IoStatusBlock,
+    OUT PVOID Buffer,
+    IN ULONG Length,
+    IN PLARGE_INTEGER ByteOffset OPTIONAL
+)
+{
+    return ObioReadFileWithMode(
+        FileHandle,
+        NULL,
+        NULL,
+        NULL,
+        IoStatusBlock,
+        Buffer,
+        Length,
+        ByteOffset,
+        NULL,
+        KernelMode
+    );
 }
 
 VEASTATUS
@@ -1301,18 +1353,17 @@ VeaFlushBuffersFile(
     return Status;
 }
 
-VEASTATUS
-VEAPI
-VeaQueryInformationFile(
+static VEASTATUS
+ObioQueryInformationFileWithMode(
     IN HANDLE FileHandle,
     OUT POIP_INFORMATION IoStatusBlock,
     OUT PVOID FileInformation,
     IN ULONG Length,
-    IN FILE_INFORMATION_CLASS FileInformationClass
+    IN FILE_INFORMATION_CLASS FileInformationClass,
+    IN KPROCESSOR_MODE PreviousMode
 )
 {
     VEASTATUS Status;
-    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
     PFILE_OBJECT FileObject = NULL;
     PDEVICE_OBJECT DeviceObject = NULL;
     POIP Oip = NULL;
@@ -1433,6 +1484,46 @@ VeaQueryInformationFile(
 
     ObDereferenceObject(FileObject);
     return Status;
+}
+
+VEASTATUS
+VEAPI
+VeaQueryInformationFile(
+    IN HANDLE FileHandle,
+    OUT POIP_INFORMATION IoStatusBlock,
+    OUT PVOID FileInformation,
+    IN ULONG Length,
+    IN FILE_INFORMATION_CLASS FileInformationClass
+)
+{
+    return ObioQueryInformationFileWithMode(
+        FileHandle,
+        IoStatusBlock,
+        FileInformation,
+        Length,
+        FileInformationClass,
+        KeGetPreviousMode()
+    );
+}
+
+VEASTATUS
+VEAPI
+ObioQueryInformationFileKernel(
+    IN HANDLE FileHandle,
+    OUT POIP_INFORMATION IoStatusBlock,
+    OUT PVOID FileInformation,
+    IN ULONG Length,
+    IN FILE_INFORMATION_CLASS FileInformationClass
+)
+{
+    return ObioQueryInformationFileWithMode(
+        FileHandle,
+        IoStatusBlock,
+        FileInformation,
+        Length,
+        FileInformationClass,
+        KernelMode
+    );
 }
 
 VEASTATUS

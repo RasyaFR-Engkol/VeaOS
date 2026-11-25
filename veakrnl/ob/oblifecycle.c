@@ -140,6 +140,7 @@ ObDereferenceObject(
     if (NewRefCount == 0) {
         if (Header->Flags & OB_FLAG_PERMANENT) {
             DPRINT("[OB] CRITICAL ERROR: Permanent object reference hit 0! Object: %p\n", Object);
+            DPRINT("[OB] CALLER AT %p\n", __GetReturnAddress());
             return NewRefCount; 
         }
 
@@ -319,11 +320,6 @@ ObInsertObject(
     Info   = Header->CreateInfo;
     Attr   = Info ? Info->Attributes.Attributes : 0;
 
-    if (Attr & OBJ_PERMANENT)
-    {
-        Header->Flags |= OB_FLAG_PERMANENT;
-    }
-
     AccessMode = Info ? Info->ProcessorMode : KernelMode;
     Named = (Info && Info->Name.Buffer && Info->Name.Length != 0);
 
@@ -385,6 +381,10 @@ ObInsertObject(
         }
 
         ObpRootDirectoryObject = Object;
+        if (Attr & OBJ_PERMANENT)
+        {
+            Header->Flags |= OB_FLAG_PERMANENT;
+        }
     }
     else if (Named)
     {
@@ -475,6 +475,10 @@ ObInsertObject(
             {
                 DPRINT("[OB] ObInsertObject FAIL: ObpInsertDirectory failed: 0x%X\n", Status);
                 goto fail;
+            }
+            if (Attr & OBJ_PERMANENT)
+            {
+                Header->Flags |= OB_FLAG_PERMANENT;
             }
         }
     }
@@ -667,6 +671,56 @@ ObOpenObjectByName(
     ObDereferenceObject(FoundObject);
 
     return Status;
+}
+
+VEASTATUS
+VEAPI
+ObOpenObjectByPointer(
+    PVOID Object,
+    ULONG HandleAttributes,
+    PACCESS_STATE PassedAccessState OPTIONAL,
+    ACCESS_MASK DesiredAccess,
+    POBJECT_TYPE ObjectType OPTIONAL,
+    KPROCESSOR_MODE AccessMode,
+    PHANDLE Handle
+)
+{
+    POBJECT_HEADER Header;
+    ACCESS_MASK GrantedAccess = 0;
+    VEASTATUS Status;
+
+    if (!Handle)
+        return STATUS_INVALID_PARAMETER;
+
+    *Handle = NULL;
+
+    if (!Object)
+        return STATUS_INVALID_PARAMETER;
+
+    if (AccessMode == UserMode && (ULONG_PTR)Object < 0xC0000000)
+        return STATUS_ACCESS_VIOLATION;
+
+    Header = OBJECT_TO_OBJECT_HEADER(Object);
+    if (ObjectType && Header->Type != ObjectType)
+        return STATUS_OBJECT_TYPE_MISMATCH;
+
+    Status = ObpCheckAccess(
+        Header,
+        AccessMode,
+        PassedAccessState ? PassedAccessState->Token : NULL,
+        DesiredAccess,
+        &GrantedAccess
+    );
+    if (!VEA_SUCCESS(Status))
+        return Status;
+
+    return ObpCreateHandle(
+        Object,
+        HandleAttributes,
+        AccessMode,
+        GrantedAccess,
+        Handle
+    );
 }
 
 VOID 
