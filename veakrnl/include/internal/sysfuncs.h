@@ -51,6 +51,13 @@ SVC_(EnumerateKey, 7)                 /* SSN 49 */
 SVC_(EnumerateValueKey, 9)            /* SSN 50 */
 SVC_(SetSystemInformation, 3)         /* SSN 51 */
 SVC_(CallbackReturn, 3)               /* SSN 52 */
-SVC_(CreateEvent, 5)                 /* SSN 53 */
-SVC_(WaitForSingleObject, 3)         /* SSN 54 */
-SVC_(SetEvent, 2)                    /* SSN 55 */
+SVC_(CreateEvent, 5)                  /* SSN 53 */
+SVC_(WaitForSingleObject, 3)          /* SSN 54 */
+SVC_(SetEvent, 2)                     /* SSN 55 */
+SVC_(TerminateThread, 2)              /* SSN 56 */
+SVC_(InitializeKey, 1)                /* SSN 57 */
+SVC_(CancelTimer, 2)                  /* SSN 58 */
+SVC_(QueryTimer, 5)                   /* SSN 59 */
+SVC_(OpenTimer, 3)                    /* SSN 60 */
+SVC_(SetTimer, 7)                     /* SSN 61 */
+SVC_(CreateTimer, 4)                  /* SSN 62 */
