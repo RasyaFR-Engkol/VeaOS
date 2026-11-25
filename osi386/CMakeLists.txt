@@ -34,7 +34,10 @@ target_include_directories(osi386 PRIVATE
     ${LOADER_INCLUDE_DIR}
     ${SDK_GCC_INCLUDE_DIR}
     ${SDK_INCLUDE_DIR}
-    ${VEA_INCLUDES}
+    ${SDK_INCLUDE_DIR}/ndk
+    ${SDK_INCLUDE_DIR}/ddk
+    ${SDK_INCLUDE_DIR}/psdk
+    ${CMAKE_SOURCE_DIR}/veakrnl/include
 )
 
 target_compile_options(osi386 PRIVATE
