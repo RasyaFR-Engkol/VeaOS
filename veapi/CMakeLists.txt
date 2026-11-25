@@ -123,6 +123,8 @@ target_compile_options(veapi PRIVATE
     -mno-sse2
     -mno-mmx
     -msoft-float
+    -fms-extensions
+    -Wno-microsoft-anon-tag
     ${VEA_INCLUDES}
 )
 
