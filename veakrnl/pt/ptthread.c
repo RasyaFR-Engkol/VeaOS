@@ -40,6 +40,29 @@ PtpInitializeThreadFpuState(
 
 VOID
 VEAPI
+PtpTerminateThreadApc(
+    IN PKAPC Apc,
+    IN OUT PKNORMAL_ROUTINE *NormalRoutine,
+    IN OUT PVOID *NormalContext,
+    IN OUT PVOID *SystemArgument1,
+    IN OUT PVOID *SystemArgument2
+)
+{
+    VEASTATUS ExitStatus = (VEASTATUS)(ULONG_PTR)(*SystemArgument1);
+
+    UNREFERENCED_PARAMETER(NormalRoutine);
+    UNREFERENCED_PARAMETER(NormalContext);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    /* Bebaskan struktur KAPC yang dialokasikan saat antre */
+    UlFreePool(Apc);
+
+    /* Sekarang kita sudah berada di konteks thread target, aman untuk exit! */
+    PtpExitThread(ExitStatus);
+}
+
+VOID
+VEAPI
 PiThreadStartup(VOID)
 {
     PKTHREAD Thread = PtGetCurrentThread();
@@ -152,7 +175,7 @@ PtpUserThreadStartup(
     }
     else
     {
-        // PtpTerminateThread(Thread, STATUS_THREAD_IS_TERMINATING, TRUE);
+        PtpTerminateThread(Thread, STATUS_THREAD_IS_TERMINATING, TRUE);
     }
 
     // WAJIB: Terjun ke Ring 3 via KsiFastCallExitHandler (jangan return ke PiThreadStartup!)
@@ -174,6 +197,8 @@ PtpExitThread(
     }
 
     PETHREAD CurrentThread = CONTAINING_RECORD(KThread, ETHREAD, Tcb);
+    PEPROCESS ParentProcess = NULL;
+    BOOLEAN ProcessExiting = FALSE;
     ULONG_PTR Flags = PtpSaveAndDisableInterrupts();
 
     CurrentThread->ExitStatus = ExitStatus;
@@ -181,25 +206,66 @@ PtpExitThread(
 
     DPRINT("%p Thread exit with status: 0x%x\n", CurrentThread, CurrentThread->ExitStatus);
 
-    if (!IsListEmpty(&CurrentThread->ThreadListEntry))
+    BOOLEAN WasInProcessList = !IsListEmpty(&CurrentThread->ThreadListEntry);
+    if (WasInProcessList)
     {
         RemoveEntryList(&CurrentThread->ThreadListEntry);
         InitializeListHead(&CurrentThread->ThreadListEntry);
     }
 
+    KsSignalDispatcherObject(&CurrentThread->Tcb.Dispatcher);
+
     if (CurrentThread->Tcb.ApcState.Process)
     {
-        PEPROCESS ParentProcess = CONTAINING_RECORD(
+        ParentProcess = CONTAINING_RECORD(
             CurrentThread->Tcb.ApcState.Process,
             EPROCESS,
             Pcb
         );
-        ObDereferenceObject(ParentProcess);
+
+        if (WasInProcessList &&
+            InterlockedDecrement((PLONG)&ParentProcess->ActiveThreads) == 0)
+        {
+            if (ParentProcess->ExitStatus == STATUS_PENDING)
+            {
+                ParentProcess->ExitStatus = ExitStatus;
+            }
+            ParentProcess->Settings.ProcessDelete = TRUE;
+            ProcessExiting = TRUE;
+        }
+    }
+
+    if ((ULONG_PTR)CurrentThread->Tcb.ServiceTable == (ULONG_PTR)KsServiceTableDescriptorShadow &&
+        PtpVeapiCallouts.ThreadCallout != NULL)
+    {
+        PtpVeapiCallouts.ThreadCallout((PETHREAD)CurrentThread, VeapiThreadCalloutExit);
     }
 
     InsertTailList(&PtDeadThreadListHead, &CurrentThread->ThreadListEntry);
 
     PtpRestoreInterrupts(Flags);
+
+    if (ProcessExiting &&
+        ParentProcess != PtSystemProcess &&
+        PtpVeapiCallouts.ProcessCallout != NULL)
+    {
+        VEASTATUS CalloutStatus = PtpVeapiCallouts.ProcessCallout(ParentProcess, FALSE);
+        if (!VEA_SUCCESS(CalloutStatus))
+        {
+            DPRINT("Process exit callout failed for %p: 0x%x\n", ParentProcess, CalloutStatus);
+        }
+    }
+
+    if (ProcessExiting)
+    {
+        KsSignalDispatcherObject(&ParentProcess->Pcb.Dispatcher);
+    }
+
+    if (ParentProcess != NULL)
+    {
+        ObDereferenceObject(ParentProcess);
+    }
+
     PtYieldThread();
 
     for (;;)
@@ -220,11 +286,17 @@ PiInitializeThread(
 {
     RtlZeroMemory(Thread, sizeof(KTHREAD));
 
+    Thread->Dispatcher.Type = ThreadObject;
+    Thread->Dispatcher.Size = sizeof(KTHREAD) / sizeof(ULONG);
+    Thread->Dispatcher.SignalState = 0;
+    InitializeListHead(&Thread->Dispatcher.WaitListHead);
+
     Thread->KernelStack = KernelStack;
     Thread->InitialStack = InitialStack;
     Thread->StackLimit = StackLimit;
     Thread->Priority = Priority;
     Thread->State = Initialized;
+    Thread->LargeStack = FALSE;
 
     Thread->ApcStatePointer[OriginalApcEnvironment] = &Thread->ApcState;
     Thread->ApcStatePointer[AttachedApcEnvironment] = &Thread->SavedApcState;
@@ -475,7 +547,7 @@ PtpReaperThreadRoutine(
             // Bebaskan Kernel Stack (Aman karena CPU udah gak pake stack ini)
             if (DeadThread->Tcb.StackLimit)
             {
-                UlFreePool(DeadThread->Tcb.StackLimit);
+                MmDeleteKernelStack(DeadThread->Tcb.InitialStack, DeadThread->Tcb.LargeStack);
                 DeadThread->Tcb.StackLimit = NULL;
                 DeadThread->Tcb.KernelStack = NULL;
             }
@@ -516,16 +588,15 @@ PtpInitThread(
     UNREFERENCED_PARAMETER(Environment);
 
     //
-    // 1. Alokasikan Kernel Stack (NonPagedPool) berukuran PtThreadStackSize (8KB)
+    // 1. Alokasikan Kernel Stack standar (12 KB + 1 Guard Page unmapped di dasar stack)
     //
-    StackBase = UlAllocatePoolWithTag(NonPagedPool, PtThreadStackSize, 'Pt  ');
-    if (!StackBase)
+    InitialStack = MmCreateKernelStack(FALSE, 0);
+    if (!InitialStack)
     {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    InitialStack = (PVOID)((ULONG_PTR)StackBase + PtThreadStackSize);
-    StackLimit = StackBase;
+    StackLimit = (PVOID)((ULONG_PTR)InitialStack - KERNEL_STACK_SIZE);
 
     //
     // 2. Inisialisasi struktur dasar KTHREAD (List, Spinlock, APC State, IRQL)
@@ -1251,6 +1322,79 @@ PtResumeThread(
 
 VEASTATUS
 VEAPI
+PtpTerminateThread(
+    IN PETHREAD Thread,
+    IN VEASTATUS ExitStatus,
+    IN BOOLEAN Direct
+)
+{
+    PKAPC Apc;
+    PETHREAD CurrentThread = CONTAINING_RECORD(PtGetCurrentThread(), ETHREAD, Tcb);
+
+    if (!Thread)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Cek apakah thread ini critical (BreakOnTermination) */
+    PtpCatchCriticalBreak(Thread, FALSE, ExitStatus);
+
+    /* Tandai DeadThread agar tidak menerima APC baru atau batal saat startup */
+    Thread->Settings.DeadThread = TRUE;
+
+    /* Jika mematikan diri sendiri (atau dipanggil langsung dari thread ybs) */
+    if (Direct || Thread == CurrentThread)
+    {
+        PtpExitThread(ExitStatus);
+        /* Unreachable */
+        return STATUS_SUCCESS;
+    }
+
+    /* Jangan inject APC ke System Thread kernel */
+    if (Thread->Tcb.PreviousMode == KernelMode)
+    {
+        return STATUS_ACCESS_DENIED;
+    }
+
+    /* Alokasi Special Kernel APC untuk memaksa thread target memanggil PtpExitThread */
+    Apc = (PKAPC)UlAllocatePoolWithTag(NonPagedPool, sizeof(KAPC), 'cpAP');
+    if (!Apc)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    KsInitializeApc(
+        Apc,
+        &Thread->Tcb,
+        OriginalApcEnvironment,
+        PtpTerminateThreadApc,
+        NULL,
+        NULL,
+        KernelMode,
+        NULL
+    );
+
+    /* Pastikan thread tidak tertahan dalam kondisi Suspended */
+    while (Thread->Tcb.SuspendCount > 0)
+    {
+        PtResumeThread(&Thread->Tcb, NULL);
+    }
+
+    if (!KsInsertQueueApc(Apc, (PVOID)(ULONG_PTR)ExitStatus, NULL))
+    {
+        /* Thread sudah terlanjur Terminated */
+        UlFreePool(Apc);
+        return STATUS_THREAD_IS_TERMINATING;
+    }
+
+    /* Bangunkan thread jika sedang tidur di Wait / DelayExecution */
+    PtWakeThreadEx(&Thread->Tcb, STATUS_ALERTED);
+
+    return STATUS_SUCCESS;
+}
+
+VEASTATUS
+VEAPI
 VeaResumeThread(
     IN HANDLE ThreadHandle,
     OUT PULONG PreviousSuspendCount OPTIONAL
@@ -1296,6 +1440,64 @@ VeaResumeThread(
         }
     }
 
+    ObDereferenceObject(Thread);
+    return Status;
+}
+
+VEASTATUS
+VEAPI
+VeaTerminateThread(
+    IN HANDLE ThreadHandle,
+    IN VEASTATUS ExitStatus
+)
+{
+    VEASTATUS Status;
+    PETHREAD Thread;
+    PETHREAD CurrentThread = CONTAINING_RECORD(PtGetCurrentThread(), ETHREAD, Tcb);
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+
+    /* Di ReactOS/Windows, ThreadHandle == NULL dianggap invalid parameter */
+    if (!ThreadHandle)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Handle pseudo-handle NtCurrentThread() / (HANDLE)-2 */
+    if (ThreadHandle == NtCurrentThread())
+    {
+        Thread = CurrentThread;
+        ObReferenceObject(Thread);
+    }
+    else
+    {
+        Status = ObReferenceObjectByHandle(
+            ThreadHandle,
+            THREAD_TERMINATE,
+            PtEthreadType,
+            PreviousMode,
+            (PVOID*)&Thread
+        );
+        if (!VEA_SUCCESS(Status))
+        {
+            return Status;
+        }
+    }
+
+    /* Proteksi: UserMode tidak boleh mematikan thread milik PtSystemProcess */
+    if (PreviousMode != KernelMode && Thread->ThreadProcess == PtSystemProcess)
+    {
+        ObDereferenceObject(Thread);
+        return STATUS_ACCESS_DENIED;
+    }
+
+    if (Thread == CurrentThread)
+    {
+        /* Drop reference sebelum exit karena PtpExitThread tidak pernah return */
+        ObDereferenceObject(Thread);
+        return PtpTerminateThread(Thread, ExitStatus, TRUE);
+    }
+
+    Status = PtpTerminateThread(Thread, ExitStatus, FALSE);
     ObDereferenceObject(Thread);
     return Status;
 }

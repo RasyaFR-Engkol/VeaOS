@@ -46,3 +46,63 @@ PtEstablishVeapiCallouts(
            CalloutData->WindowStationObjectSize,
            CalloutData->DesktopObjectSize);
 }
+
+VEASTATUS
+VEAPI
+PtConvertToGuiThread(VOID)
+{
+    PKTHREAD  CurrentThread  = PtGetCurrentThread();
+    PEPROCESS CurrentProcess = (PEPROCESS)PtGetCurrentProcess();
+    VEASTATUS Status;
+
+    /* Hanya valid dipanggil dari UserMode */
+    if (CurrentThread->PreviousMode == KernelMode)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Pastikan veapi.ko sudah mendaftarkan callout-nya */
+    if (!PtpVeapiCallouts.ProcessCallout || !PtpVeapiCallouts.ThreadCallout)
+    {
+        return STATUS_ACCESS_DENIED;
+    }
+
+    /* Jika ServiceTable sudah menunjuk Shadow SSDT, thread ini sudah GUI thread */
+    if ((ULONG_PTR)CurrentThread->ServiceTable == (ULONG_PTR)KsServiceTableDescriptorShadow)
+    {
+        return STATUS_ALREADY_WIN32;
+    }
+
+    /* 1. Selalu panggil ProcessCallout (veapi.ko yang cek/init PROCESSINFO) */
+    Status = PtpVeapiCallouts.ProcessCallout(CurrentProcess, TRUE);
+    if (!VEA_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    /* 2. Pindahkan ServiceTable thread ke Shadow SSDT */
+    CurrentThread->ServiceTable = KsServiceTableDescriptorShadow;
+
+    /* 3. Alokasi & inisialisasi THREADINFO (rpdesk, dll.) via ThreadCallout */
+    Status = PtpVeapiCallouts.ThreadCallout(
+        (PETHREAD)CurrentThread,
+        VeapiThreadCalloutInitialize
+    );
+    if (!VEA_SUCCESS(Status))
+    {
+        /* Rollback ke SSDT standar jika inisialisasi THREADINFO gagal */
+        CurrentThread->ServiceTable = KsServiceTableDescriptor;
+        return Status;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+PVOID
+VEAPI
+PtGetCurrentThreadVeapiThread(VOID)
+{
+    return ((PKTHREAD)PtGetCurrentThread())->Win32Thread;
+}
+
+/* EOF */

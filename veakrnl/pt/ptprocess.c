@@ -25,6 +25,11 @@ PiInitializeProcess(
 {
     RtlZeroMemory(Process, sizeof(KPROCESS));
 
+    Process->Dispatcher.Type = ProcessObject;
+    Process->Dispatcher.Size = sizeof(KPROCESS) / sizeof(ULONG);
+    Process->Dispatcher.SignalState = 0;
+    InitializeListHead(&Process->Dispatcher.WaitListHead);
+
     if (DirectoryTableBase)
     {
         Process->DirectoryTableBase = DirectoryTableBase[0];
@@ -464,6 +469,95 @@ PtDetachProcess(VOID)
 
 VEASTATUS
 VEAPI
+PtpTerminateProcess(
+    IN PEPROCESS Process,
+    IN VEASTATUS ExitStatus
+)
+{
+    PLIST_ENTRY NextEntry;
+    PETHREAD Thread;
+    PETHREAD CurrentThread = CONTAINING_RECORD(PtGetCurrentThread(), ETHREAD, Tcb);
+    PEPROCESS CurrentProcess = CONTAINING_RECORD(PtGetCurrentProcess(), EPROCESS, Pcb);
+    BOOLEAN KillCurrentThread = FALSE;
+    KIRQL OldIrql;
+
+    if (!Process)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Lindungi System Process agar tidak bisa dimatikan */
+    if (Process == PtSystemProcess)
+    {
+        return STATUS_ACCESS_DENIED;
+    }
+
+    /* Cek apakah proses ini punya flag BreakOnTermination */
+    PtpCatchCriticalBreak(Process, TRUE, ExitStatus);
+
+    /* Kunci ProcessLock saat menelusuri ThreadListHead */
+    KsAcquireSpinLock(&Process->Pcb.ProcessLock, &OldIrql);
+
+    /* Set flag ProcessDelete agar PtpCreateThread menolak thread baru (QuickWayHereBro) */
+    Process->Settings.ProcessDelete = TRUE;
+    if (Process->ExitStatus == STATUS_PENDING)
+    {
+        Process->ExitStatus = ExitStatus;
+    }
+
+    NextEntry = Process->ThreadListHead.Flink;
+    while (NextEntry != &Process->ThreadListHead)
+    {
+        Thread = CONTAINING_RECORD(NextEntry, ETHREAD, ThreadListEntry);
+        NextEntry = NextEntry->Flink;
+
+        if (Thread == CurrentThread)
+        {
+            /* Tunda terminasi diri sendiri sampai semua sibling thread selesai ditembak */
+            KillCurrentThread = TRUE;
+            continue;
+        }
+
+        /* Tahan referensi sebentar sebelum melepas spinlock agar object tidak hilang */
+        ObReferenceObject(Thread);
+        KsReleaseSpinLock(&Process->Pcb.ProcessLock, OldIrql);
+
+        PtpTerminateThread(Thread, ExitStatus, FALSE);
+
+        ObDereferenceObject(Thread);
+        KsAcquireSpinLock(&Process->Pcb.ProcessLock, &OldIrql);
+
+        /* Reset iterasi dari head karena list bisa berubah saat lock dilepas */
+        NextEntry = Process->ThreadListHead.Flink;
+        while (NextEntry != &Process->ThreadListHead)
+        {
+            PETHREAD Candidate = CONTAINING_RECORD(NextEntry, ETHREAD, ThreadListEntry);
+            if (!Candidate->Settings.DeadThread && Candidate != CurrentThread)
+            {
+                break;
+            }
+            NextEntry = NextEntry->Flink;
+        }
+    }
+
+    KsReleaseSpinLock(&Process->Pcb.ProcessLock, OldIrql);
+
+    if (Process->ActiveThreads == 0)
+    {
+        KsSignalDispatcherObject(&Process->Pcb.Dispatcher);
+    }
+
+    /* Jika proses yang dimatikan adalah proses kita sendiri, bunuh CurrentThread terakhir */
+    if (KillCurrentThread || Process == CurrentProcess)
+    {
+        PtpTerminateThread(CurrentThread, ExitStatus, TRUE);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+VEASTATUS
+VEAPI
 VeaCreateProcess(
     OUT PHANDLE ProcessHandle,
     IN ACCESS_MASK DesiredAccess,
@@ -815,34 +909,84 @@ VeaQueryInformationProcess(
 VEASTATUS
 VEAPI
 VeaTerminateProcess(
-    IN HANDLE ProcessHandle,
+    IN HANDLE ProcessHandle OPTIONAL,
     IN VEASTATUS ExitStatus
 )
 {
-    // TODO:
-    // IMPLEMENT THIS
-
-    /* Print and loop */
-    PEPROCESS Process;
     VEASTATUS Status;
+    PEPROCESS Process;
+    PEPROCESS CurrentProcess = CONTAINING_RECORD(PtGetCurrentProcess(), EPROCESS, Pcb);
+    PETHREAD CurrentThread = CONTAINING_RECORD(PtGetCurrentThread(), ETHREAD, Tcb);
     KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
 
-    Status = ObReferenceObjectByHandle(
-        ProcessHandle,
-        PROCESS_ALL_ACCESS,
-        PtEprocessType,
-        PreviousMode,
-        (PVOID*)&Process
-    );
-
-    if (!VEA_SUCCESS(Status)) return Status;
-    
-    DPRINT("Process stopped: %p with status 0x%x\n", Process, Status);
-
-    while (1)
+    /*
+     * KASUS KHUSUS REACTOS / WINDOWS:
+     * Jika ProcessHandle == NULL, matikan semua thread lain di CurrentProcess
+     * KECUALI CurrentThread (dipakai oleh ExitProcess di Ring 3).
+     */
+    if (ProcessHandle == NULL)
     {
-        __YieldProcessor();
+        PLIST_ENTRY NextEntry;
+        PETHREAD Thread;
+        KIRQL OldIrql;
+
+        KsAcquireSpinLock(&CurrentProcess->Pcb.ProcessLock, &OldIrql);
+        CurrentProcess->ExitStatus = ExitStatus;
+
+        NextEntry = CurrentProcess->ThreadListHead.Flink;
+        while (NextEntry != &CurrentProcess->ThreadListHead)
+        {
+            Thread = CONTAINING_RECORD(NextEntry, ETHREAD, ThreadListEntry);
+            NextEntry = NextEntry->Flink;
+
+            if (Thread != CurrentThread && !Thread->Settings.DeadThread)
+            {
+                ObReferenceObject(Thread);
+                KsReleaseSpinLock(&CurrentProcess->Pcb.ProcessLock, OldIrql);
+
+                PtpTerminateThread(Thread, ExitStatus, FALSE);
+
+                ObDereferenceObject(Thread);
+                KsAcquireSpinLock(&CurrentProcess->Pcb.ProcessLock, &OldIrql);
+                NextEntry = CurrentProcess->ThreadListHead.Flink;
+            }
+        }
+
+        KsReleaseSpinLock(&CurrentProcess->Pcb.ProcessLock, OldIrql);
+        return STATUS_SUCCESS;
     }
+
+    /* Handle pseudo-handle NtCurrentProcess() / (HANDLE)-1 */
+    if (ProcessHandle == NtCurrentProcess())
+    {
+        Process = CurrentProcess;
+        ObReferenceObject(Process);
+    }
+    else
+    {
+        Status = ObReferenceObjectByHandle(
+            ProcessHandle,
+            PROCESS_TERMINATE,
+            PtEprocessType,
+            PreviousMode,
+            (PVOID*)&Process
+        );
+        if (!VEA_SUCCESS(Status))
+        {
+            return Status;
+        }
+    }
+
+    /* Jika mematikan proses sendiri, lepas ref object dulu karena tidak akan return */
+    if (Process == CurrentProcess)
+    {
+        ObDereferenceObject(Process);
+        return PtpTerminateProcess(Process, ExitStatus);
+    }
+
+    Status = PtpTerminateProcess(Process, ExitStatus);
+    ObDereferenceObject(Process);
+    return Status;
 }
 
 /* EOF */
