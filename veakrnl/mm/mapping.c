@@ -2,6 +2,17 @@
 
 KSPIN_LOCK MmpTempMapLock;
 
+#define MI_KERNEL_PDE_FIRST 768
+#define MI_KERNEL_PDE_COUNT 255
+
+static ULONG MmKernelPageDirectory[MI_KERNEL_PDE_COUNT];
+static KSPIN_LOCK MmKernelPageDirectoryLock;
+static BOOLEAN MmKernelPageDirectoryInitialized;
+
+LONG 
+VEAPI
+MmpCompareVad(PRTL_BALANCED_NODE NodeA, PRTL_BALANCED_NODE NodeB);
+
 PHYSICAL_ADDRESS
 VEAPI
 MmGetPhysicalAddress(
@@ -72,34 +83,14 @@ MmMapIoSpace(
     CurrentPhys = AlignedPhys;
  
     for (ULONG i = 0; i < PageCount; i++) {
-        PMMPDE Pde = MiAddressToPde(CurrentVa);
- 
-        if (!Pde->Hard.Valid) {
-            ULONG NewPtPhys = MmAllocatePhysicalPage();
-            if (NewPtPhys == 0) {
-                kdp_print("MM: MmMapIoSpace OOM creating Page Table!\n\r");
- 
-                /*
-                 * i == 0: belum ada PTE yang dipasang, cukup lepas VAD-nya.
-                 * MmUnmapIoSpace dengan 0 byte langsung return dan akan
-                 * membocorkan VAD.
-                 * i > 0: PTE yang sudah dipasang harus dihapus lewat
-                 * MmUnmapIoSpace (bukan MmFreeVirtualRange langsung), supaya
-                 * frame IO tidak dimasukkan ke free list fisik.
-                 */
-                if (i != 0) {
-                    MmUnmapIoSpace((PVOID)BaseVa, i * PAGE_SIZE);
-                } else {
-                    MmFreeVirtualRange(BaseVa);
-                }
-                return NULL;
+        if (!MmpEnsurePageTable(CurrentVa)) {
+            kdp_print("MM: MmMapIoSpace failed to ensure Page Table!\n\r");
+            if (i != 0) {
+                MmUnmapIoSpace((PVOID)BaseVa, i * PAGE_SIZE);
+            } else {
+                MmFreeVirtualRange(BaseVa);
             }
- 
-            MI_WRITE_PDE_VALID(Pde, NewPtPhys >> 12);   /* VA kernel: user=0 */
- 
-            PVOID PtVirtualAddr = (PVOID)((ULONG)MiAddressToPte(CurrentVa) & 0xFFFFF000);
-            MMI_INVALIDATE_TLB(PtVirtualAddr);
-            RtlZeroMemory(PtVirtualAddr, PAGE_SIZE);
+            return NULL;
         }
  
         PMMPTE Pte = MiAddressToPte(CurrentVa);
@@ -191,6 +182,103 @@ MiGetSystemPageDirectoryTableBase(VOID)
 
     return (PVOID)Cr3;
 }   
+
+BOOLEAN
+VEAPI
+MmInitializeKernelPageDirectory(VOID)
+{
+    PULONG PageDirectory = (PULONG)MM_GET_PD();
+
+    KsInitializeSpinlock(&MmKernelPageDirectoryLock);
+
+    for (ULONG i = 0; i < MI_KERNEL_PDE_COUNT; i++)
+    {
+        ULONG PdeIndex = MI_KERNEL_PDE_FIRST + i;
+
+        /* Index 1023 adalah recursive mapping milik masing-masing proses */
+        if (PdeIndex != 1023 && (PageDirectory[PdeIndex] & 0x1) == 0)
+        {
+            ULONG PtPhys = MmAllocatePhysicalPage();
+            if (PtPhys == 0)
+            {
+                return FALSE;
+            }
+
+            PVOID PtVa = MmMapIoSpace(PtPhys, PAGE_SIZE, MmCached);
+            if (!PtVa)
+            {
+                MmFreePhysicalPage(PtPhys);
+                return FALSE;
+            }
+
+            RtlZeroMemory(PtVa, PAGE_SIZE);
+            MmUnmapIoSpace(PtVa, PAGE_SIZE);
+
+            /* Present (0x1) | Read/Write (0x2), Supervisor-only */
+            PageDirectory[PdeIndex] = PtPhys | 0x03;
+        }
+
+        MmKernelPageDirectory[i] = PageDirectory[PdeIndex];
+    }
+
+    MmKernelPageDirectoryInitialized = TRUE;
+    return TRUE;
+}
+
+BOOLEAN
+VEAPI
+MmpCopyKernelPageDirectory(PULONG Destination)
+{
+    KIRQL OldIrql;
+
+    if (!Destination || !MmKernelPageDirectoryInitialized)
+    {
+        return FALSE;
+    }
+
+    KsAcquireSpinLock(&MmKernelPageDirectoryLock, &OldIrql);
+    for (ULONG i = 0; i < MI_KERNEL_PDE_COUNT; i++)
+    {
+        Destination[MI_KERNEL_PDE_FIRST + i] = MmKernelPageDirectory[i];
+    }
+    KsReleaseSpinLock(&MmKernelPageDirectoryLock, OldIrql);
+
+    return TRUE;
+}
+
+BOOLEAN
+VEAPI
+MmpSynchronizeKernelPageTable(ULONG VirtualAddress)
+{
+    ULONG PdeIndex = VirtualAddress >> 22;
+    PMMPDE Pde = MiAddressToPde(VirtualAddress);
+    KIRQL OldIrql;
+    ULONG MasterPde;
+
+    if (MI_IS_USER_ADDRESS(VirtualAddress) ||
+        PdeIndex < MI_KERNEL_PDE_FIRST ||
+        PdeIndex >= 1023)
+    {
+        return Pde->Hard.Valid;
+    }
+
+    if (Pde->Hard.Valid || !MmKernelPageDirectoryInitialized)
+    {
+        return Pde->Hard.Valid;
+    }
+
+    KsAcquireSpinLock(&MmKernelPageDirectoryLock, &OldIrql);
+    MasterPde = MmKernelPageDirectory[PdeIndex - MI_KERNEL_PDE_FIRST];
+    if (MasterPde != 0)
+    {
+        Pde->Long = MasterPde;
+        MMI_INVALIDATE_TLB((ULONG)MiAddressToPte(VirtualAddress) & ~(PAGE_SIZE - 1));
+        MMI_INVALIDATE_TLB(VirtualAddress);
+    }
+    KsReleaseSpinLock(&MmKernelPageDirectoryLock, OldIrql);
+
+    return MasterPde != 0;
+}
 
 VOID
 VEAPI
@@ -290,20 +378,80 @@ MiMapTempPhysicalPage(
     /* Pastikan Page Table untuk MI_TEMP_ZERO_VA (0xDFC00000) sudah ada di CR3 aktif */
     if (!TempPde->Hard.Valid)
     {
-        ULONG PtPhys = MmAllocatePhysicalPage();
-        if (PtPhys == 0)
+        ULONG PdeIndex = (ULONG)((ULONG_PTR)MI_TEMP_ZERO_VA >> 22);
+        ULONG PtPhys = 0;
+        KIRQL PdeIrql;
+
+        if (MmKernelPageDirectoryInitialized)
         {
-            KsReleaseSpinLock(&MmpTempMapLock, *OldIrql);
-            return NULL;
+            KsAcquireSpinLock(&MmKernelPageDirectoryLock, &PdeIrql);
+            ULONG MasterPde = MmKernelPageDirectory[PdeIndex - MI_KERNEL_PDE_FIRST];
+            if (MasterPde != 0)
+            {
+                TempPde->Long = MasterPde;
+                PVOID PtVirtualPage =
+                    (PVOID)((ULONG_PTR)TempPte & ~(PAGE_SIZE - 1));
+                MMI_INVALIDATE_TLB(PtVirtualPage);
+            }
+            KsReleaseSpinLock(&MmKernelPageDirectoryLock, PdeIrql);
+
+            if (MasterPde == 0)
+            {
+                PtPhys = MmAllocatePhysicalPage();
+                if (PtPhys == 0)
+                {
+                    KsReleaseSpinLock(&MmpTempMapLock, *OldIrql);
+                    return NULL;
+                }
+
+                KsAcquireSpinLock(&MmKernelPageDirectoryLock, &PdeIrql);
+                MasterPde = MmKernelPageDirectory[PdeIndex - MI_KERNEL_PDE_FIRST];
+                if (MasterPde == 0)
+                {
+                    MMPTE NewPde;
+                    MI_MAKE_VALID_PTE(NewPde, PtPhys >> 12, 0, 1);
+                    TempPde->Long = NewPde.Long;
+                    MmKernelPageDirectory[PdeIndex - MI_KERNEL_PDE_FIRST] =
+                        NewPde.Long;
+
+                    PVOID PtVirtualPage =
+                        (PVOID)((ULONG_PTR)TempPte & ~(PAGE_SIZE - 1));
+                    MMI_INVALIDATE_TLB(PtVirtualPage);
+                    RtlZeroMemory(PtVirtualPage, PAGE_SIZE);
+                    PtPhys = 0;
+                }
+                else
+                {
+                    TempPde->Long = MasterPde;
+                    PVOID PtVirtualPage =
+                        (PVOID)((ULONG_PTR)TempPte & ~(PAGE_SIZE - 1));
+                    MMI_INVALIDATE_TLB(PtVirtualPage);
+                }
+                KsReleaseSpinLock(&MmKernelPageDirectoryLock, PdeIrql);
+
+                if (PtPhys != 0)
+                {
+                    MmFreePhysicalPage(PtPhys);
+                }
+            }
         }
+        else
+        {
+            PtPhys = MmAllocatePhysicalPage();
+            if (PtPhys == 0)
+            {
+                KsReleaseSpinLock(&MmpTempMapLock, *OldIrql);
+                return NULL;
+            }
 
-        MI_MAKE_VALID_PTE(NewEntry, PtPhys >> 12, 0, 1); // KernelMode, ReadWrite
-        TempPde->Long = NewEntry.Long;
+            MI_MAKE_VALID_PTE(NewEntry, PtPhys >> 12, 0, 1);
+            TempPde->Long = NewEntry.Long;
 
-        /* Invalidate halaman recursive PT (0xfff7f000) lalu nol-kan isinya */
-        PVOID PtVirtualPage = (PVOID)((ULONG_PTR)TempPte & ~(PAGE_SIZE - 1));
-        MMI_INVALIDATE_TLB(PtVirtualPage);
-        RtlZeroMemory(PtVirtualPage, PAGE_SIZE);
+            PVOID PtVirtualPage =
+                (PVOID)((ULONG_PTR)TempPte & ~(PAGE_SIZE - 1));
+            MMI_INVALIDATE_TLB(PtVirtualPage);
+            RtlZeroMemory(PtVirtualPage, PAGE_SIZE);
+        }
     }
 
     /* Map halaman fisik target ke MI_TEMP_ZERO_VA */
@@ -338,6 +486,38 @@ MmpEnsurePageTable(ULONG VirtualAddress)
     ULONG NewPtPhys;
     KIRQL OldIrql;
 
+    if (!MI_IS_USER_ADDRESS(VirtualAddress) &&
+        ((ULONG_PTR)VirtualAddress >> 22) >= MI_KERNEL_PDE_FIRST &&
+        ((ULONG_PTR)VirtualAddress >> 22) < 1023 &&
+        MmKernelPageDirectoryInitialized)
+    {
+        ULONG PdeIndex = VirtualAddress >> 22;
+        ULONG MasterPde;
+
+        KsAcquireSpinLock(&MmKernelPageDirectoryLock, &OldIrql);
+        MasterPde = MmKernelPageDirectory[PdeIndex - MI_KERNEL_PDE_FIRST];
+        if (MasterPde != 0)
+        {
+            if (!Pde->Hard.Valid)
+            {
+                Pde->Long = MasterPde;
+                MMI_INVALIDATE_TLB((ULONG)MiAddressToPte(VirtualAddress) &
+                                   ~(PAGE_SIZE - 1));
+                MMI_INVALIDATE_TLB(VirtualAddress);
+            }
+            KsReleaseSpinLock(&MmKernelPageDirectoryLock, OldIrql);
+            return Pde->Hard.Valid;
+        }
+
+        if (Pde->Hard.Valid)
+        {
+            MmKernelPageDirectory[PdeIndex - MI_KERNEL_PDE_FIRST] = Pde->Long;
+            KsReleaseSpinLock(&MmKernelPageDirectoryLock, OldIrql);
+            return TRUE;
+        }
+        KsReleaseSpinLock(&MmKernelPageDirectoryLock, OldIrql);
+    }
+
     if (Pde->Hard.Valid)
     {
         return TRUE;
@@ -352,12 +532,64 @@ MmpEnsurePageTable(ULONG VirtualAddress)
 
     /* Nol-kan lewat Temp/Hyperspace PTE SEBELUM PDE dipublikasikan */
     PVOID TempPtVa = MiMapTempPhysicalPage(NewPtPhys, &OldIrql);
+    if (!TempPtVa)
+    {
+        MmFreePhysicalPage(NewPtPhys);
+        return FALSE;
+    }
     RtlZeroMemory(TempPtVa, PAGE_SIZE);
     MiUnmapTempPhysicalPage(OldIrql);
 
     /* VA user wajib dapat PDE dengan Owner (user) = 1, VA kernel = 0 */
     MI_MAKE_VALID_PTE(TempPde, NewPtPhys >> 12,
                       MI_IS_USER_ADDRESS(VirtualAddress), 1);
+
+    if (!MI_IS_USER_ADDRESS(VirtualAddress) &&
+        ((ULONG_PTR)VirtualAddress >> 22) >= MI_KERNEL_PDE_FIRST &&
+        ((ULONG_PTR)VirtualAddress >> 22) < 1023 &&
+        MmKernelPageDirectoryInitialized)
+    {
+        ULONG PdeIndex = VirtualAddress >> 22;
+        ULONG MasterPde;
+        BOOLEAN InstalledNewPde = FALSE;
+
+        KsAcquireSpinLock(&MmKernelPageDirectoryLock, &OldIrql);
+        MasterPde = MmKernelPageDirectory[PdeIndex - MI_KERNEL_PDE_FIRST];
+        if (MasterPde != 0)
+        {
+            if (!Pde->Hard.Valid)
+            {
+                Pde->Long = MasterPde;
+                MMI_INVALIDATE_TLB((ULONG)MiAddressToPte(VirtualAddress) &
+                                   ~(PAGE_SIZE - 1));
+                MMI_INVALIDATE_TLB(VirtualAddress);
+            }
+            KsReleaseSpinLock(&MmKernelPageDirectoryLock, OldIrql);
+            MmFreePhysicalPage(NewPtPhys);
+            return Pde->Hard.Valid;
+        }
+
+        if (!Pde->Hard.Valid)
+        {
+            Pde->Long = TempPde.Long;
+            MmKernelPageDirectory[PdeIndex - MI_KERNEL_PDE_FIRST] =
+                TempPde.Long;
+            InstalledNewPde = TRUE;
+        }
+        else
+        {
+            MmKernelPageDirectory[PdeIndex - MI_KERNEL_PDE_FIRST] = Pde->Long;
+        }
+        KsReleaseSpinLock(&MmKernelPageDirectoryLock, OldIrql);
+        if (!InstalledNewPde)
+        {
+            MmFreePhysicalPage(NewPtPhys);
+        }
+        MMI_INVALIDATE_TLB((ULONG)MiAddressToPte(VirtualAddress) &
+                           ~(PAGE_SIZE - 1));
+        MMI_INVALIDATE_TLB(VirtualAddress);
+        return TRUE;
+    }
 
     /* Publikasikan PDE secara atomik */
     if (!__sync_bool_compare_and_swap((volatile ULONG *)&Pde->Long, 0, TempPde.Long))

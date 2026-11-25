@@ -60,22 +60,16 @@ PMM_VAD VEAPI MmpAllocateVadNode(VOID)
             ULONG CurrentVa = BootstrapVa + (i * PAGE_SIZE);
             ULONG CurrentPhys = PhysPage + (i * PAGE_SIZE);
 
-            // Cek apakah Page Directory Entry (PDE) sudah ada
-            PMMPDE pde = MM_GET_PDE(CurrentVa);
-            if (!pde->Hard.Valid) {
-                // Alokasikan Page Table fisik baru jika belum ada PDE
-                ULONG NewPtPhys = MmAllocatePhysicalPage();
-                if (NewPtPhys == 0) {
-                    kdp_print("VMM FATAL: Out of memory for Bootstrap Page Table!\n\r");
-                    return NULL;
+            if (!MmpEnsurePageTable(CurrentVa)) {
+                kdp_print("VMM FATAL: Failed to ensure Bootstrap Page Table!\n\r");
+                for (ULONG j = 0; j < i; j++) {
+                    ULONG MappedVa = BootstrapVa + (j * PAGE_SIZE);
+                    PMMPTE MappedPte = MiAddressToPte(MappedVa);
+                    MI_ERASE_PTE(MappedPte);
+                    MMI_INVALIDATE_TLB(MappedVa);
                 }
-
-                MI_WRITE_PDE_VALID(pde, NewPtPhys >> 12);
-
-                // Zeroing Page Table baru tersebut
-                PVOID PtVirtualAddr = (PVOID)((ULONG)MM_GET_PTE(CurrentVa) & 0xFFFFF000);
-                MMI_INVALIDATE_TLB((ULONG)PtVirtualAddr);
-                RtlZeroMemory(PtVirtualAddr, PAGE_SIZE);
+                MmFreeContiguousPhysicalPages(PhysPage, 16);
+                return NULL;
             }
 
             // Map PTE ke Alamat Fisik Bootstrap Pool
@@ -156,33 +150,43 @@ MmpFindVadByVpn(PRTL_BALANCED_NODE Node, ULONG Vpn)
     return NULL;
 }
 
+static
+PRTL_BALANCED_NODE
+VEAPI
+MmpGetFirstAvlNode(IN PRTL_AVL_TREE Tree)
+{
+    PRTL_BALANCED_NODE Node = Tree ? Tree->Root : NULL;
+    while (Node && Node->Left)
+    {
+        Node = Node->Left;
+    }
+    return Node;
+}
+
 static 
 ULONG 
 VEAPI
 MmpFindFreeVirtualGap(ULONG PageCount, ULONG* LastVpnChecked)
 {
-    // Mulai dari node dengan alamat virtual terendah (Cached Leftmost)
-    PRTL_BALANCED_NODE CurrentNode = MmKernelVadTree.Leftmost;
+    ULONG Candidate = *LastVpnChecked;
+    PRTL_BALANCED_NODE CurrentNode = MmpGetFirstAvlNode(&MmKernelVadTree);
     
     while (CurrentNode != NULL) {
         PMM_VAD Vad = (PMM_VAD)CurrentNode;
         
-        // Hitung celah antara batas terakhir dan awal VAD saat ini
-        ULONG GapPages = Vad->StartingVpn - *LastVpnChecked;
-        
-        if (GapPages >= PageCount) {
-            // Celah ditemukan!
-            return (*LastVpnChecked) << 12; 
+        if (Vad->EndingVpn >= Candidate) {
+            /* Wajib cek Vad->StartingVpn > Candidate agar tidak unsigned underflow */
+            if (Vad->StartingVpn > Candidate &&
+                (Vad->StartingVpn - Candidate) >= PageCount) {
+                *LastVpnChecked = Candidate;
+                return Candidate << 12;
+            }
+            Candidate = Vad->EndingVpn + 1;
         }
-        
-        // Geser batas pengecekan ke akhir VAD ini
-        *LastVpnChecked = Vad->EndingVpn + 1;
-        
-        // Maju ke node VAD berikutnya secara berurutan (In-Order)
         CurrentNode = RtlGetNextNodeAvl(CurrentNode);
     }
     
-    // Jika loop selesai dan tidak ketemu celah, berarti taruh di ujung kanan
+    *LastVpnChecked = Candidate;
     return 0;
 }
 
@@ -216,15 +220,25 @@ MmAllocateVirtualRange(ULONG PageCount)
         if (AllocatedVa == 0) AllocatedVa = LastVpnChecked << 12;
     }
 
-    if (AllocatedVa + (PageCount * 4096) >= 0xFFC00000) {
+    if (AllocatedVa < StartingKva ||
+        (AllocatedVa + (PageCount * PAGE_SIZE)) <= AllocatedVa ||
+        (AllocatedVa + (PageCount * PAGE_SIZE)) >= 0xFFC00000) {
         kdp_print("VMM FATAL: Kernel Virtual Space Exhausted!\n\r");
         KsReleaseSpinLock(&MmVmmLock, OldIrql);
-        MmpFreeVadNode(NewVad); // Free di luar lock
+        MmpFreeVadNode(NewVad);
         return 0;
     }
 
     NewVad->StartingVpn = AllocatedVa >> 12;
     NewVad->EndingVpn = NewVad->StartingVpn + PageCount - 1;
+
+    if (MmpFindOverlappingVad(&MmKernelVadTree, NewVad->StartingVpn, NewVad->EndingVpn)) {
+        DPRINT("VMM FATAL: Overlapping kernel VAD [%05X..%05X]!\n",
+               NewVad->StartingVpn, NewVad->EndingVpn);
+        KsReleaseSpinLock(&MmVmmLock, OldIrql);
+        MmpFreeVadNode(NewVad);
+        return 0;
+    }
 
     RtlInsertElementAvl(&MmKernelVadTree, (PRTL_BALANCED_NODE)NewVad);
     MmVadRoot = (PMM_VAD)MmKernelVadTree.Root;
@@ -447,7 +461,7 @@ MmpFindGapInTree(IN PRTL_AVL_TREE Tree, IN ULONG PageCount,
                  IN ULONG LowVpn, IN ULONG HighVpnExclusive, IN ULONG AlignPages)
 {
     ULONG Candidate = (LowVpn + AlignPages - 1) & ~(AlignPages - 1);
-    PRTL_BALANCED_NODE Node = Tree->Leftmost;
+    PRTL_BALANCED_NODE Node = MmpGetFirstAvlNode(Tree);
  
     while (Node)
     {

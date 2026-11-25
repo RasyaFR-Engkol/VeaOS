@@ -673,6 +673,31 @@ UlFreePoolWithTag(PVOID P, ULONG Tag)
     PPOOL_HEADER Header = (PPOOL_HEADER)P - 1;
     UCHAR PoolIndex = Header->PoolType;
     if (PoolIndex == 0 || PoolIndex > MaxPoolType) {
+        ULONG RawTag = Header->PoolTag;
+        CHAR TagStr[5];
+        TagStr[0] = (CHAR)(RawTag & 0xFF);
+        TagStr[1] = (CHAR)((RawTag >> 8) & 0xFF);
+        TagStr[2] = (CHAR)((RawTag >> 16) & 0xFF);
+        TagStr[3] = (CHAR)((RawTag >> 24) & 0xFF);
+        TagStr[4] = '\0';
+        for (int j = 0; j < 4; j++) {
+            if (TagStr[j] < 32 || TagStr[j] > 126) TagStr[j] = '.';
+        }
+
+        PULONG Dump = (PULONG)((ULONG_PTR)Header - 16);
+        DPRINT("ULPOOL BAD FREE: P=%08X Hdr=%08X Type=%u Blk=%u Prev=%u Tag=%s (%08X) Caller=%08X\n",
+               (ULONG_PTR)P,
+               (ULONG_PTR)Header,
+               PoolIndex,
+               Header->BlockSize,
+               Header->PreviousSize,
+               TagStr,
+               RawTag,
+               (ULONG_PTR)__builtin_return_address(0));
+        DPRINT("  MEM[-16..+12]: %08X %08X %08X %08X | %08X %08X %08X %08X\n",
+               Dump[0], Dump[1], Dump[2], Dump[3],
+               Dump[4], Dump[5], Dump[6], Dump[7]);
+
         KsBugCheckEx(BAD_POOL_CALLER, 4, (ULONG_PTR)Header,
                      PoolIndex, MaxPoolType);
         return;

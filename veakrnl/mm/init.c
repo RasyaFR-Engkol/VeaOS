@@ -14,9 +14,15 @@ MmInitialize(PBLOCK_BOOT_2 BlockBoot)
         {
             return FALSE;
         }
+        if (!MmInitializeKernelPageDirectory())
+        {
+            DPRINT("MM FATAL: Failed to initialize kernel page directory master\n");
+            return FALSE;
+        }
         MmInitializeVmm();
 
         UlInitializePools();
+        MmpInitializePageFaultReadAhead();
 
         if (!MiInitializePipBitmap())
         {

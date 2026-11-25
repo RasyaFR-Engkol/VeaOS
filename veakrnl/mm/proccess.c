@@ -425,7 +425,6 @@ MmCreateProcessAddressSpace(
     PULONG PageDirVa;
     PULONG SystemPageDir;
     ULONG Flags;
-    ULONG i;
 
     PageDirPhys = MmAllocatePhysicalPage();
     if (PageDirPhys == 0)
@@ -454,9 +453,13 @@ MmCreateProcessAddressSpace(
     RtlZeroMemory(PageDirVa, PAGE_SIZE);
 
     SystemPageDir = (PULONG)MM_GET_PD();
-    for (i = 768; i < 1024; i++)
+    if (!MmpCopyKernelPageDirectory(PageDirVa))
     {
-        PageDirVa[i] = SystemPageDir[i];
+        DPRINT("[MM/SPACE] ERROR: Kernel page directory master is not initialized!\n");
+        MmUnmapIoSpace(PageDirVa, PAGE_SIZE);
+        MmFreePhysicalPage(HyperPhys);
+        MmFreePhysicalPage(PageDirPhys);
+        return FALSE;
     }
 
     Flags = SystemPageDir[1023] & 0xFFF;

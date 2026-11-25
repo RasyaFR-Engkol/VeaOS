@@ -33,19 +33,9 @@ MmAllocatePoolPages(POOL_TYPE PoolType, ULONG NumberOfPages)
             goto Failure;
         }
  
-        PMMPDE Pde = MiAddressToPde(CurrentVa);
-        if (!Pde->Hard.Valid) {
-            ULONG NewPtPhys = MmAllocatePhysicalPage();
-            if (NewPtPhys == 0) {
-                MmFreePhysicalPage(PhysPage);
-                goto Failure;
-            }
- 
-            MI_WRITE_PDE_VALID(Pde, NewPtPhys >> 12); 
- 
-            PVOID PtVirtualAddr = (PVOID)((ULONG)MiAddressToPte(CurrentVa) & 0xFFFFF000);
-            MMI_INVALIDATE_TLB(PtVirtualAddr);
-            RtlZeroMemory(PtVirtualAddr, PAGE_SIZE);
+        if (!MmpEnsurePageTable(CurrentVa)) {
+            MmFreePhysicalPage(PhysPage);
+            goto Failure;
         }
  
         PMMPTE Pte = MiAddressToPte(CurrentVa);

@@ -15,16 +15,9 @@ MmpInitializeCowScratch(VOID)
 
     ULONG Vas[2] = { MmScratchSrcVa, MmScratchDstVa };
     for (int i = 0; i < 2; i++) {
-        PMMPDE pde = MM_GET_PDE(Vas[i]);
-        if (!pde->Hard.Valid) {
-            ULONG NewPtPhys = MmAllocatePhysicalPage();
-            if (NewPtPhys != 0) {
-                MI_WRITE_PDE_VALID(pde, NewPtPhys >> 12);
-                PVOID PtVirtualAddr = (PVOID)((ULONG)MM_GET_PTE(Vas[i]) & 0xFFFFF000);
-                MMI_INVALIDATE_TLB((ULONG)PtVirtualAddr);
-
-                RtlZeroMemory(PtVirtualAddr, 4096);
-            }
+        if (!MmpEnsurePageTable(Vas[i])) {
+            DPRINT("[MM/COW] Failed to ensure scratch page table for 0x%08X\n",
+                   Vas[i]);
         }
     }
 }
