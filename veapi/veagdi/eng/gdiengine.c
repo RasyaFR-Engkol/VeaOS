@@ -19,13 +19,6 @@ static LIST_ENTRY       gDcListHead;
 static KSPIN_LOCK       gDcListLock;
 static PGDI_DC_OBJECT   gScreenDc = NULL;
 
-typedef enum _VEA_GDI_BLIT_KIND
-{
-    VeaGdiBlitCopy,
-    VeaGdiBlitTransparent,
-    VeaGdiBlitAlpha
-} VEA_GDI_BLIT_KIND;
-
 PGDI_DC_OBJECT
 VEAPI
 GdipAllocateDc(VOID)
@@ -40,6 +33,10 @@ GdipAllocateDc(VOID)
     RtlZeroMemory(Dc, sizeof(GDI_DC_OBJECT));
     Dc->Magic = GDI_DC_MAGIC;
     Dc->hFont = NULL;
+    Dc->hBrush = (HBRUSH)VeaGdiGetStockObject(WHITE_BRUSH);
+    Dc->hPen   = (HPEN)VeaGdiGetStockObject(BLACK_PEN);
+    Dc->PenX   = 0;
+    Dc->PenY   = 0;
 
     KsAcquireSpinLock(&gDcListLock, &OldIrql);
     InsertTailList(&gDcListHead, &Dc->ListEntry);
@@ -157,6 +154,91 @@ VeaGdiCopyFromCaller(
     return TRUE;
 }
 
+ULONG
+VeaGdiCreateSurfaceViews(
+    IN  PGDI_DC_OBJECT  Dc,
+    OUT PVEAGDI_SURFACE Views,
+    OUT PLONG           ViewOriginsX,
+    OUT PLONG           ViewOriginsY,
+    IN  ULONG           MaxViews
+)
+{
+    PVEAGDI_SURFACE Primary = EngGetTargetSurface();
+
+    if (!Dc || !Views || !ViewOriginsX || !ViewOriginsY || MaxViews == 0 ||
+        !Primary || !Primary->Scan0 || Primary->BytesPerPixel != sizeof(ULONG) ||
+        Primary->Pitch < Primary->Width * sizeof(ULONG))
+    {
+        return 0;
+    }
+
+    RECT ClipRect;
+    ClipRect.left   = Dc->ClipLeft;
+    ClipRect.top    = Dc->ClipTop;
+    ClipRect.right  = Dc->ClipRight;
+    ClipRect.bottom = Dc->ClipBottom;
+
+    RECT VisRects[MAX_VISIBLE_CLIP_RECTS];
+    ULONG VisCount = 0;
+
+    if (Dc->hWnd != NULL)
+    {
+        PWND_OBJECT Wnd = WndLookupHandle(Dc->hWnd);
+        if (!Wnd)
+        {
+            return 0;
+        }
+
+        BOOLEAN Allowed = WndIsEffectivelyVisible(Wnd) &&
+                          (GpActiveDesktop == NULL || Wnd->Desktop == GpActiveDesktop);
+        if (Allowed)
+        {
+            ULONG Cap = (MaxViews < MAX_VISIBLE_CLIP_RECTS) ? MaxViews : MAX_VISIBLE_CLIP_RECTS;
+            VisCount = WndComputeVisibleRects(Wnd, &ClipRect, VisRects, Cap);
+        }
+        WndDereference(Wnd);
+
+        if (!Allowed || VisCount == 0)
+        {
+            return 0;
+        }
+    }
+    else
+    {
+        if (ClipRect.left < 0) ClipRect.left = 0;
+        if (ClipRect.top < 0)  ClipRect.top  = 0;
+        if (ClipRect.right > (LONG)Primary->Width)   ClipRect.right  = (LONG)Primary->Width;
+        if (ClipRect.bottom > (LONG)Primary->Height) ClipRect.bottom = (LONG)Primary->Height;
+
+        if (ClipRect.left >= ClipRect.right || ClipRect.top >= ClipRect.bottom)
+        {
+            return 0;
+        }
+
+        VisRects[0] = ClipRect;
+        VisCount = 1;
+    }
+
+    for (ULONG i = 0; i < VisCount; i++)
+    {
+        LONG L = VisRects[i].left;
+        LONG T = VisRects[i].top;
+        LONG R = VisRects[i].right;
+        LONG B = VisRects[i].bottom;
+
+        Views[i] = *Primary;
+        Views[i].Scan0      = (PUCHAR)Primary->Scan0 + (SIZE_T)T * Primary->Pitch + (SIZE_T)L * sizeof(ULONG);
+        Views[i].Width      = (ULONG)(R - L);
+        Views[i].Height     = (ULONG)(B - T);
+        Views[i].BufferSize = (SIZE_T)(Views[i].Height - 1) * Views[i].Pitch +
+                              (SIZE_T)Views[i].Width * sizeof(ULONG);
+        ViewOriginsX[i] = L;
+        ViewOriginsY[i] = T;
+    }
+
+    return VisCount;
+}
+
 BOOLEAN
 VeaGdiCreateSurfaceView(
     IN PGDI_DC_OBJECT Dc,
@@ -165,7 +247,7 @@ VeaGdiCreateSurfaceView(
     OUT PLONG ViewOriginY
 )
 {
-    PVEAGDI_SURFACE Primary = &GpPrimaryDisplay.PrimarySurface;
+    PVEAGDI_SURFACE Primary = EngGetTargetSurface();
     LONGLONG Left;
     LONGLONG Top;
     LONGLONG Right;
@@ -175,6 +257,25 @@ VeaGdiCreateSurfaceView(
         Primary->Pitch < Primary->Width * sizeof(ULONG))
     {
         return FALSE;
+    }
+
+    /* Cegah window di desktop non-aktif / hidden menggambar ke layar aktif */
+    if (Dc->hWnd != NULL)
+    {
+        PWND_OBJECT Wnd = WndLookupHandle(Dc->hWnd);
+        if (!Wnd)
+        {
+            return FALSE;
+        }
+
+        BOOLEAN Allowed = WndIsEffectivelyVisible(Wnd) &&
+                  (GpActiveDesktop == NULL || Wnd->Desktop == GpActiveDesktop);
+        WndDereference(Wnd);
+
+        if (!Allowed)
+        {
+            return FALSE;
+        }
     }
 
     Left = Dc->ClipLeft > 0 ? Dc->ClipLeft : 0;
@@ -201,21 +302,22 @@ VeaGdiCreateSurfaceView(
 static
 BOOLEAN
 VeaGdiMapPoint(
-    IN PGDI_DC_OBJECT Dc,
-    IN LONG ViewOriginX,
-    IN LONG ViewOriginY,
-    IN INT X,
-    IN INT Y,
-    OUT PLONG ViewX,
-    OUT PLONG ViewY
+    IN  PGDI_DC_OBJECT  Dc,
+    IN  PVEAGDI_SURFACE View,
+    IN  LONG            ViewOriginX,
+    IN  LONG            ViewOriginY,
+    IN  INT             X,
+    IN  INT             Y,
+    OUT PLONG           ViewX,
+    OUT PLONG           ViewY
 )
 {
     LONGLONG MappedX = (LONGLONG)Dc->OriginX + X - ViewOriginX;
     LONGLONG MappedY = (LONGLONG)Dc->OriginY + Y - ViewOriginY;
 
     if (MappedX < 0 || MappedY < 0 ||
-        MappedX >= GpPrimaryDisplay.PrimarySurface.Width ||
-        MappedY >= GpPrimaryDisplay.PrimarySurface.Height)
+        MappedX >= (LONG)View->Width ||
+        MappedY >= (LONG)View->Height)
     {
         return FALSE;
     }
@@ -316,6 +418,32 @@ VeaGdiCreateSourceSurface(
 }
 
 static
+ULONG
+VeaGdiInterpolateColor(
+    IN ULONG ColorStartARGB,
+    IN ULONG ColorEndARGB,
+    IN LONG  Num,
+    IN LONG  Denom
+)
+{
+    if (Denom <= 0 || Num <= 0) return ColorStartARGB;
+    if (Num >= Denom) return ColorEndARGB;
+
+    LONG A1 = (ColorStartARGB >> 24) & 0xFF, R1 = (ColorStartARGB >> 16) & 0xFF;
+    LONG G1 = (ColorStartARGB >> 8)  & 0xFF, B1 = (ColorStartARGB)       & 0xFF;
+
+    LONG A2 = (ColorEndARGB >> 24) & 0xFF, R2 = (ColorEndARGB >> 16) & 0xFF;
+    LONG G2 = (ColorEndARGB >> 8)  & 0xFF, B2 = (ColorEndARGB)       & 0xFF;
+
+    ULONG A = (ULONG)(A1 + ((A2 - A1) * Num) / Denom);
+    ULONG R = (ULONG)(R1 + ((R2 - R1) * Num) / Denom);
+    ULONG G = (ULONG)(G1 + ((G2 - G1) * Num) / Denom);
+    ULONG B = (ULONG)(B1 + ((B2 - B1) * Num) / Denom);
+
+    return (A << 24) | (R << 16) | (G << 8) | B;
+}
+
+static
 BOOLEAN
 VeaGdiBlit(
     IN HDC hdc,
@@ -333,50 +461,62 @@ VeaGdiBlit(
 )
 {
     PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
-    VEAGDI_SURFACE DstView;
+    VEAGDI_SURFACE Views[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsX[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsY[MAX_VISIBLE_CLIP_RECTS];
     VEAGDI_SURFACE SrcView;
-    LONG ViewOriginX;
-    LONG ViewOriginY;
-    LONGLONG ViewX;
-    LONGLONG ViewY;
 
     if (!Dc || Width == 0 || Height == 0 ||
         Width > 1920 || Height > 1080 ||
-        !VeaGdiCreateSourceSurface(Pixels, SourceWidth, SourceHeight, &SrcView) ||
-        !VeaGdiCreateSurfaceView(Dc, &DstView, &ViewOriginX, &ViewOriginY))
+        !VeaGdiCreateSourceSurface(Pixels, SourceWidth, SourceHeight, &SrcView))
     {
         return FALSE;
     }
 
-    ViewX = (LONGLONG)Dc->OriginX + DstX - ViewOriginX;
-    ViewY = (LONGLONG)Dc->OriginY + DstY - ViewOriginY;
-
-    if (ViewX >= DstView.Width || ViewY >= DstView.Height ||
-        ViewX + Width <= 0 || ViewY + Height <= 0 ||
-        (LONGLONG)SrcX >= SourceWidth || (LONGLONG)SrcY >= SourceHeight ||
-        (LONGLONG)SrcX + Width <= 0 || (LONGLONG)SrcY + Height <= 0)
+    if ((LONGLONG)SrcX >= (LONGLONG)SourceWidth || (LONGLONG)SrcY >= (LONGLONG)SourceHeight ||
+        (LONGLONG)SrcX + (LONGLONG)Width <= 0 || (LONGLONG)SrcY + (LONGLONG)Height <= 0)
     {
         return TRUE;
     }
 
+    ULONG ViewCount = VeaGdiCreateSurfaceViews(
+        Dc, Views, OriginsX, OriginsY, MAX_VISIBLE_CLIP_RECTS
+    );
+    if (ViewCount == 0)
+    {
+        return (Dc->hWnd != NULL);
+    }
+
     _VEA_TRY
     {
-        switch (Kind)
+        for (ULONG i = 0; i < ViewCount; i++)
         {
-            case VeaGdiBlitCopy:
-                EngBitBlt32(&DstView, (LONG)ViewX, (LONG)ViewY, Width, Height,
-                            &SrcView, SrcX, SrcY);
-                break;
+            LONGLONG ViewX = (LONGLONG)Dc->OriginX + DstX - OriginsX[i];
+            LONGLONG ViewY = (LONGLONG)Dc->OriginY + DstY - OriginsY[i];
 
-            case VeaGdiBlitTransparent:
-                EngTransparentBlt32(&DstView, (LONG)ViewX, (LONG)ViewY, Width, Height,
-                                    &SrcView, SrcX, SrcY, Value);
-                break;
+            if (ViewX >= (LONGLONG)Views[i].Width || ViewY >= (LONGLONG)Views[i].Height ||
+                ViewX + (LONGLONG)Width <= 0 || ViewY + (LONGLONG)Height <= 0)
+            {
+                continue;
+            }
 
-            case VeaGdiBlitAlpha:
-                EngAlphaBlend32(&DstView, (LONG)ViewX, (LONG)ViewY, Width, Height,
-                                &SrcView, SrcX, SrcY, (UCHAR)Value);
-                break;
+            switch (Kind)
+            {
+                case VeaGdiBlitCopy:
+                    EngBitBlt32(&Views[i], (LONG)ViewX, (LONG)ViewY, Width, Height,
+                                &SrcView, SrcX, SrcY);
+                    break;
+
+                case VeaGdiBlitTransparent:
+                    EngTransparentBlt32(&Views[i], (LONG)ViewX, (LONG)ViewY, Width, Height,
+                                        &SrcView, SrcX, SrcY, Value);
+                    break;
+
+                case VeaGdiBlitAlpha:
+                    EngAlphaBlend32(&Views[i], (LONG)ViewX, (LONG)ViewY, Width, Height,
+                                    &SrcView, SrcX, SrcY, (UCHAR)Value);
+                    break;
+            }
         }
     }
     _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
@@ -398,15 +538,11 @@ GdiCreateWindowDC(
     IN ULONG Height
 )
 {
-    KIRQL OldIrql;
-
     PGDI_DC_OBJECT Dc = GdipAllocateDc();
     if (!Dc)
     {
         return NULL;
     }
-
-    RtlZeroMemory(Dc, sizeof(GDI_DC_OBJECT));
 
     Dc->Magic      = GDI_DC_MAGIC;
     Dc->Used       = TRUE;
@@ -422,27 +558,78 @@ GdiCreateWindowDC(
     Dc->TextColor  = 0xFF000000;
     Dc->BkColor    = 0xFFFFFFFF;
 
-    KsAcquireSpinLock(&gDcListLock, &OldIrql);
-    InsertTailList(&gDcListHead, &Dc->ListEntry);
-    KsReleaseSpinLock(&gDcListLock, OldIrql);
-
     return Dc->hDC;
 }
 
-VOID
+BOOLEAN
 VEAPI
 GdiReleaseWindowDC(
     IN HDC hdc
 )
 {
-    KIRQL OldIrql;
-
-    if (!hdc || MI_IS_USER_ADDRESS((ULONG_PTR)hdc))
+    PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
+    if (!Dc || Dc == gScreenDc)
     {
-        return;
+        return FALSE;
     }
 
-    GdipFreeDc(hdc);
+    return GdipFreeDc(hdc);
+}
+
+BOOLEAN
+VEAPI
+VeaGdiFillRectInternal(
+    IN HDC hdc,
+    IN CONST RECT *Rect,
+    IN ULONG ColorARGB
+)
+{
+    PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
+    VEAGDI_SURFACE Views[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsX[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsY[MAX_VISIBLE_CLIP_RECTS];
+
+    if (!Dc || !Rect)
+    {
+        return FALSE;
+    }
+
+    if (Rect->left > Rect->right || Rect->top > Rect->bottom)
+    {
+        return FALSE;
+    }
+
+    ULONG ViewCount = VeaGdiCreateSurfaceViews(
+        Dc, Views, OriginsX, OriginsY, MAX_VISIBLE_CLIP_RECTS
+    );
+    if (ViewCount == 0)
+    {
+        return (Dc->hWnd != NULL);
+    }
+
+    for (ULONG i = 0; i < ViewCount; i++)
+    {
+        LONG X, Y;
+        ULONG Width, Height;
+        if (!VeaGdiMapRect(Dc, OriginsX[i], OriginsY[i], Rect, &Views[i],
+                           &X, &Y, &Width, &Height))
+        {
+            return FALSE;
+        }
+
+        if (Width != 0 && Height != 0)
+        {
+            EngFillRect32(&Views[i], (ULONG)X, (ULONG)Y, Width, Height, ColorARGB);
+            EngPresentRect(
+                OriginsX[i] + X,
+                OriginsY[i] + Y,
+                Width,
+                Height
+            );
+        }
+    }
+
+    return TRUE;
 }
 
 BOOLEAN
@@ -453,30 +640,15 @@ VeaGdiFillRect(
     IN ULONG ColorARGB
 )
 {
-    PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
-    VEAGDI_SURFACE View;
     RECT LocalRect;
-    LONG ViewOriginX;
-    LONG ViewOriginY;
-    LONG X;
-    LONG Y;
-    ULONG Width;
-    ULONG Height;
 
-    if (!Dc || !VeaGdiCopyFromCaller(&LocalRect, lprc, sizeof(LocalRect)) ||
-        !VeaGdiCreateSurfaceView(Dc, &View, &ViewOriginX, &ViewOriginY) ||
-        !VeaGdiMapRect(Dc, ViewOriginX, ViewOriginY, &LocalRect, &View,
-                       &X, &Y, &Width, &Height))
+    if (!VeaGdiGetDc(hdc) ||
+        !VeaGdiCopyFromCaller(&LocalRect, lprc, sizeof(LocalRect)))
     {
         return FALSE;
     }
 
-    if (Width != 0 && Height != 0)
-    {
-        EngFillRect32(&View, (ULONG)X, (ULONG)Y, Width, Height, ColorARGB);
-    }
-
-    return TRUE;
+    return VeaGdiFillRectInternal(hdc, &LocalRect, ColorARGB);
 }
 
 ULONG
@@ -489,21 +661,30 @@ VeaGdiSetPixel(
 )
 {
     PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
-    VEAGDI_SURFACE View;
-    LONG ViewOriginX;
-    LONG ViewOriginY;
-    LONG ViewX;
-    LONG ViewY;
+    VEAGDI_SURFACE Views[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsX[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsY[MAX_VISIBLE_CLIP_RECTS];
 
-    if (!Dc || !VeaGdiCreateSurfaceView(Dc, &View, &ViewOriginX, &ViewOriginY) ||
-        !VeaGdiMapPoint(Dc, ViewOriginX, ViewOriginY, X, Y, &ViewX, &ViewY) ||
-        ViewX >= (LONG)View.Width || ViewY >= (LONG)View.Height)
+    if (!Dc)
     {
         return 0;
     }
 
-    EngSetPixel32(&View, ViewX, ViewY, ColorARGB);
-    return ColorARGB;
+    ULONG ViewCount = VeaGdiCreateSurfaceViews(
+        Dc, Views, OriginsX, OriginsY, MAX_VISIBLE_CLIP_RECTS
+    );
+
+    for (ULONG i = 0; i < ViewCount; i++)
+    {
+        LONG ViewX, ViewY;
+        if (VeaGdiMapPoint(Dc, &Views[i], OriginsX[i], OriginsY[i], X, Y, &ViewX, &ViewY))
+        {
+            EngSetPixel32(&Views[i], ViewX, ViewY, ColorARGB);
+            return ColorARGB;
+        }
+    }
+
+    return 0;
 }
 
 ULONG
@@ -515,20 +696,29 @@ VeaGdiGetPixel(
 )
 {
     PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
-    VEAGDI_SURFACE View;
-    LONG ViewOriginX;
-    LONG ViewOriginY;
-    LONG ViewX;
-    LONG ViewY;
+    VEAGDI_SURFACE Views[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsX[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsY[MAX_VISIBLE_CLIP_RECTS];
 
-    if (!Dc || !VeaGdiCreateSurfaceView(Dc, &View, &ViewOriginX, &ViewOriginY) ||
-        !VeaGdiMapPoint(Dc, ViewOriginX, ViewOriginY, X, Y, &ViewX, &ViewY) ||
-        ViewX >= (LONG)View.Width || ViewY >= (LONG)View.Height)
+    if (!Dc)
     {
         return 0;
     }
 
-    return EngGetPixel32(&View, ViewX, ViewY);
+    ULONG ViewCount = VeaGdiCreateSurfaceViews(
+        Dc, Views, OriginsX, OriginsY, MAX_VISIBLE_CLIP_RECTS
+    );
+
+    for (ULONG i = 0; i < ViewCount; i++)
+    {
+        LONG ViewX, ViewY;
+        if (VeaGdiMapPoint(Dc, &Views[i], OriginsX[i], OriginsY[i], X, Y, &ViewX, &ViewY))
+        {
+            return EngGetPixel32(&Views[i], ViewX, ViewY);
+        }
+    }
+
+    return 0;
 }
 
 static
@@ -630,37 +820,55 @@ VeaGdiLineTo(
 )
 {
     PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
-    VEAGDI_SURFACE View;
-    LONG ViewOriginX;
-    LONG ViewOriginY;
-    LONGLONG ViewX1;
-    LONGLONG ViewY1;
-    LONGLONG ViewX2;
-    LONGLONG ViewY2;
+    VEAGDI_SURFACE Views[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsX[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsY[MAX_VISIBLE_CLIP_RECTS];
 
-    if (!Dc || !VeaGdiCreateSurfaceView(Dc, &View, &ViewOriginX, &ViewOriginY))
+    if (!Dc)
     {
         return FALSE;
     }
 
-    ViewX1 = (LONGLONG)Dc->OriginX + X1 - ViewOriginX;
-    ViewY1 = (LONGLONG)Dc->OriginY + Y1 - ViewOriginY;
-    ViewX2 = (LONGLONG)Dc->OriginX + X2 - ViewOriginX;
-    ViewY2 = (LONGLONG)Dc->OriginY + Y2 - ViewOriginY;
-
-    if (ViewX1 < -1000000 || ViewX1 > 1000000 || ViewX2 < -1000000 || ViewX2 > 1000000 ||
-        ViewY1 < -1000000 || ViewY1 > 1000000 || ViewY2 < -1000000 || ViewY2 > 1000000)
+    if (X1 < -1000000 || X1 > 1000000 || X2 < -1000000 || X2 > 1000000 ||
+        Y1 < -1000000 || Y1 > 1000000 || Y2 < -1000000 || Y2 > 1000000)
     {
         return FALSE;
     }
 
-    if (!VeaGdiClipLine((LONG)View.Width, (LONG)View.Height,
-                        &ViewX1, &ViewY1, &ViewX2, &ViewY2))
+    ULONG ViewCount = VeaGdiCreateSurfaceViews(
+        Dc, Views, OriginsX, OriginsY, MAX_VISIBLE_CLIP_RECTS
+    );
+    if (ViewCount == 0)
     {
-        return TRUE;
+        return (Dc->hWnd != NULL);
     }
 
-    EngLineTo32(&View, (LONG)ViewX1, (LONG)ViewY1, (LONG)ViewX2, (LONG)ViewY2, ColorARGB);
+    for (ULONG i = 0; i < ViewCount; i++)
+    {
+        LONGLONG ViewX1 = (LONGLONG)Dc->OriginX + X1 - OriginsX[i];
+        LONGLONG ViewY1 = (LONGLONG)Dc->OriginY + Y1 - OriginsY[i];
+        LONGLONG ViewX2 = (LONGLONG)Dc->OriginX + X2 - OriginsX[i];
+        LONGLONG ViewY2 = (LONGLONG)Dc->OriginY + Y2 - OriginsY[i];
+
+        if (VeaGdiClipLine((LONG)Views[i].Width, (LONG)Views[i].Height,
+                           &ViewX1, &ViewY1, &ViewX2, &ViewY2))
+        {
+            EngLineTo32(&Views[i], (LONG)ViewX1, (LONG)ViewY1, (LONG)ViewX2, (LONG)ViewY2, ColorARGB);
+
+            LONG MinX = (LONG)((ViewX1 < ViewX2) ? ViewX1 : ViewX2);
+            LONG MinY = (LONG)((ViewY1 < ViewY2) ? ViewY1 : ViewY2);
+            LONG MaxX = (LONG)((ViewX1 > ViewX2) ? ViewX1 : ViewX2);
+            LONG MaxY = (LONG)((ViewY1 > ViewY2) ? ViewY1 : ViewY2);
+
+            EngPresentRect(
+                OriginsX[i] + MinX,
+                OriginsY[i] + MinY,
+                (ULONG)(MaxX - MinX + 1),
+                (ULONG)(MaxY - MinY + 1)
+            );
+        }
+    }
+
     return TRUE;
 }
 
@@ -672,26 +880,43 @@ VeaGdiInvertRect(
 )
 {
     PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
-    VEAGDI_SURFACE View;
+    VEAGDI_SURFACE Views[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsX[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsY[MAX_VISIBLE_CLIP_RECTS];
     RECT Rect;
-    LONG ViewOriginX;
-    LONG ViewOriginY;
-    LONG X;
-    LONG Y;
-    ULONG Width;
-    ULONG Height;
 
-    if (!Dc || !VeaGdiCopyFromCaller(&Rect, lprc, sizeof(Rect)) ||
-        !VeaGdiCreateSurfaceView(Dc, &View, &ViewOriginX, &ViewOriginY) ||
-        !VeaGdiMapRect(Dc, ViewOriginX, ViewOriginY, &Rect, &View,
-                       &X, &Y, &Width, &Height))
+    if (!Dc || !VeaGdiCopyFromCaller(&Rect, lprc, sizeof(Rect)))
     {
         return FALSE;
     }
 
-    if (Width != 0 && Height != 0)
+    if (Rect.left > Rect.right || Rect.top > Rect.bottom)
     {
-        EngInvertRect32(&View, X, Y, Width, Height);
+        return FALSE;
+    }
+
+    ULONG ViewCount = VeaGdiCreateSurfaceViews(
+        Dc, Views, OriginsX, OriginsY, MAX_VISIBLE_CLIP_RECTS
+    );
+    if (ViewCount == 0)
+    {
+        return (Dc->hWnd != NULL);
+    }
+
+    for (ULONG i = 0; i < ViewCount; i++)
+    {
+        LONG X, Y;
+        ULONG Width, Height;
+        if (!VeaGdiMapRect(Dc, OriginsX[i], OriginsY[i], &Rect, &Views[i],
+                           &X, &Y, &Width, &Height))
+        {
+            return FALSE;
+        }
+
+        if (Width != 0 && Height != 0)
+        {
+            EngInvertRect32(&Views[i], X, Y, Width, Height);
+        }
     }
 
     return TRUE;
@@ -708,27 +933,63 @@ VeaGdiGradientFill(
 )
 {
     PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
-    VEAGDI_SURFACE View;
+    VEAGDI_SURFACE Views[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsX[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsY[MAX_VISIBLE_CLIP_RECTS];
     RECT Rect;
-    LONG ViewOriginX;
-    LONG ViewOriginY;
-    LONG X;
-    LONG Y;
-    ULONG Width;
-    ULONG Height;
 
-    if (!Dc || !VeaGdiCopyFromCaller(&Rect, lprc, sizeof(Rect)) ||
-        !VeaGdiCreateSurfaceView(Dc, &View, &ViewOriginX, &ViewOriginY) ||
-        !VeaGdiMapRect(Dc, ViewOriginX, ViewOriginY, &Rect, &View,
-                       &X, &Y, &Width, &Height))
+    if (!Dc || !VeaGdiCopyFromCaller(&Rect, lprc, sizeof(Rect)))
     {
         return FALSE;
     }
 
-    if (Width != 0 && Height != 0)
+    if (Rect.left > Rect.right || Rect.top > Rect.bottom)
     {
-        EngGradientFill32(&View, X, Y, Width, Height,
-                          ColorStartARGB, ColorEndARGB, Vertical);
+        return FALSE;
+    }
+
+    ULONG ViewCount = VeaGdiCreateSurfaceViews(
+        Dc, Views, OriginsX, OriginsY, MAX_VISIBLE_CLIP_RECTS
+    );
+    if (ViewCount == 0)
+    {
+        return (Dc->hWnd != NULL);
+    }
+
+    LONG FullW = Rect.right - Rect.left;
+    LONG FullH = Rect.bottom - Rect.top;
+
+    for (ULONG i = 0; i < ViewCount; i++)
+    {
+        LONG X, Y;
+        ULONG Width, Height;
+        if (!VeaGdiMapRect(Dc, OriginsX[i], OriginsY[i], &Rect, &Views[i],
+                           &X, &Y, &Width, &Height))
+        {
+            return FALSE;
+        }
+
+        if (Width != 0 && Height != 0)
+        {
+            ULONG SubStart = ColorStartARGB;
+            ULONG SubEnd   = ColorEndARGB;
+
+            if (Vertical && FullH > 1)
+            {
+                LONG OffY = (OriginsY[i] + Y) - (Dc->OriginY + Rect.top);
+                SubStart = VeaGdiInterpolateColor(ColorStartARGB, ColorEndARGB, OffY, FullH - 1);
+                SubEnd   = VeaGdiInterpolateColor(ColorStartARGB, ColorEndARGB, OffY + (LONG)Height - 1, FullH - 1);
+            }
+            else if (!Vertical && FullW > 1)
+            {
+                LONG OffX = (OriginsX[i] + X) - (Dc->OriginX + Rect.left);
+                SubStart = VeaGdiInterpolateColor(ColorStartARGB, ColorEndARGB, OffX, FullW - 1);
+                SubEnd   = VeaGdiInterpolateColor(ColorStartARGB, ColorEndARGB, OffX + (LONG)Width - 1, FullW - 1);
+            }
+
+            EngGradientFill32(&Views[i], X, Y, Width, Height,
+                              SubStart, SubEnd, Vertical);
+        }
     }
 
     return TRUE;
@@ -808,29 +1069,39 @@ VeaGdiDrawGlyph(
 )
 {
     PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
-    VEAGDI_SURFACE View;
+    VEAGDI_SURFACE Views[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsX[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsY[MAX_VISIBLE_CLIP_RECTS];
     UCHAR LocalGlyph[16];
-    LONG ViewOriginX;
-    LONG ViewOriginY;
-    LONGLONG ViewX;
-    LONGLONG ViewY;
 
-    if (!Dc || !VeaGdiCopyFromCaller(LocalGlyph, GlyphBitmap, sizeof(LocalGlyph)) ||
-        !VeaGdiCreateSurfaceView(Dc, &View, &ViewOriginX, &ViewOriginY))
+    if (!Dc || !VeaGdiCopyFromCaller(LocalGlyph, GlyphBitmap, sizeof(LocalGlyph)))
     {
         return FALSE;
     }
 
-    ViewX = (LONGLONG)Dc->OriginX + X - ViewOriginX;
-    ViewY = (LONGLONG)Dc->OriginY + Y - ViewOriginY;
-    if (ViewX >= View.Width || ViewY >= View.Height ||
-        ViewX + 8 <= 0 || ViewY + 16 <= 0)
+    ULONG ViewCount = VeaGdiCreateSurfaceViews(
+        Dc, Views, OriginsX, OriginsY, MAX_VISIBLE_CLIP_RECTS
+    );
+    if (ViewCount == 0)
     {
-        return TRUE;
+        return (Dc->hWnd != NULL);
     }
 
-    EngDrawGlyph8x16(&View, (LONG)ViewX, (LONG)ViewY, LocalGlyph,
-                     TextColorARGB, BkColorARGB, TransparentBk);
+    for (ULONG i = 0; i < ViewCount; i++)
+    {
+        LONGLONG ViewX = (LONGLONG)Dc->OriginX + X - OriginsX[i];
+        LONGLONG ViewY = (LONGLONG)Dc->OriginY + Y - OriginsY[i];
+
+        if (ViewX >= (LONGLONG)Views[i].Width || ViewY >= (LONGLONG)Views[i].Height ||
+            ViewX + 8 <= 0 || ViewY + 16 <= 0)
+        {
+            continue;
+        }
+
+        EngDrawGlyph8x16(&Views[i], (LONG)ViewX, (LONG)ViewY, LocalGlyph,
+                         TextColorARGB, BkColorARGB, TransparentBk);
+    }
+
     return TRUE;
 }
 
@@ -848,6 +1119,140 @@ VeaGdiDrawImage(
 {
     return VeaGdiBlit(hdc, DstX, DstY, Width, Height, Pixels,
                       Width, Height, 0, 0, Alpha, VeaGdiBlitAlpha);
+}
+
+/* DC GOES HERE */
+
+BOOLEAN
+VEAPI
+VeaGdiDeleteDC(
+    IN HDC hdc
+)
+{
+    PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
+
+    /* Tolak NULL, pointer user-mode palsu, Screen DC global, maupun Window DC
+       (Window DC wajib dilepas lewat ReleaseDC, bukan DeleteDC) */
+    if (!Dc || Dc == gScreenDc || Dc->hWnd != NULL)
+    {
+        return FALSE;
+    }
+
+    return GdipFreeDc(hdc);
+}
+
+HDC
+VEAPI
+VeaUserGetDCEx(
+    IN HWND   hWnd,
+    IN HANDLE hrgnClip,
+    IN ULONG  Flags
+)
+{
+    /* Jalur ReleaseDC(hWnd, hDC) lewat syscall yang sama */
+    if (Flags & DCX_INTERNAL_RELEASE)
+    {
+        HDC hdc = (HDC)hrgnClip;
+        PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
+
+        if (!Dc || Dc == gScreenDc)
+        {
+            return NULL;
+        }
+
+        if (hWnd != NULL && Dc->hWnd != hWnd)
+        {
+            return NULL;
+        }
+
+        return GdiReleaseWindowDC(hdc) ? (HDC)1 : NULL;
+    }
+
+    UNREFERENCED_PARAMETER(hrgnClip);
+
+    /* GetDC(NULL) / GetWindowDC(NULL) -> DC seluruh layar */
+    if (hWnd == NULL)
+    {
+        ULONG ScrW = GpPrimaryDisplay.PrimarySurface.Width;
+        ULONG ScrH = GpPrimaryDisplay.PrimarySurface.Height;
+
+        if (ScrW == 0 || ScrH == 0)
+        {
+            return NULL;
+        }
+
+        return GdiCreateWindowDC(NULL, 0, 0, ScrW, ScrH);
+    }
+
+    PWND_OBJECT Wnd = WndLookupHandle(hWnd);
+    if (!Wnd)
+    {
+        return NULL;
+    }
+
+    BOOLEAN IsChild = ((Wnd->Style & WS_CHILD) != 0);
+    LONG    OriginX;
+    LONG    OriginY;
+    LONG    ClipL, ClipT, ClipR, ClipB;
+    ULONG   Width;
+    ULONG   Height;
+
+    if (IsChild)
+    {
+        WndGetClippedClientRect(Wnd, &OriginX, &OriginY, &ClipL, &ClipT, &ClipR, &ClipB);
+        Width  = Wnd->Width;
+        Height = Wnd->Height;
+    }
+    else if (Flags & DCX_WINDOW)
+    {
+        OriginX = Wnd->X;
+        OriginY = Wnd->Y;
+        Width   = Wnd->Width;
+        Height  = Wnd->Height;
+        ClipL   = OriginX;
+        ClipT   = OriginY;
+        ClipR   = OriginX + (LONG)Width;
+        ClipB   = OriginY + (LONG)Height;
+    }
+    else
+    {
+        BOOLEAN Framed = !((Wnd->Style & WS_POPUP) && ((Wnd->Style & WS_CAPTION) != WS_CAPTION));
+        OriginX = Framed ? (Wnd->X + WND_BORDER_WIDTH)    : Wnd->X;
+        OriginY = Framed ? (Wnd->Y + WND_TITLEBAR_HEIGHT) : Wnd->Y;
+        Width   = Framed
+                  ? ((Wnd->Width > (2 * WND_BORDER_WIDTH)) ? (Wnd->Width - (2 * WND_BORDER_WIDTH)) : 0)
+                  : Wnd->Width;
+        Height  = Framed
+                  ? ((Wnd->Height > (WND_TITLEBAR_HEIGHT + WND_BORDER_WIDTH))
+                     ? (Wnd->Height - WND_TITLEBAR_HEIGHT - WND_BORDER_WIDTH) : 0)
+                  : Wnd->Height;
+        ClipL   = OriginX;
+        ClipT   = OriginY;
+        ClipR   = OriginX + (LONG)Width;
+        ClipB   = OriginY + (LONG)Height;
+    }
+
+    WndDereference(Wnd);
+
+    if (Width == 0 || Height == 0 || ClipL >= ClipR || ClipT >= ClipB)
+    {
+        return NULL;
+    }
+
+    HDC hdc = GdiCreateWindowDC(hWnd, OriginX, OriginY, Width, Height);
+    if (hdc)
+    {
+        PGDI_DC_OBJECT DcObj = VeaGdiGetDc(hdc);
+        if (DcObj)
+        {
+            DcObj->ClipLeft   = ClipL;
+            DcObj->ClipTop    = ClipT;
+            DcObj->ClipRight  = ClipR;
+            DcObj->ClipBottom = ClipB;
+        }
+    }
+
+    return hdc;
 }
 
 /* EOF */

@@ -22,8 +22,200 @@ static BOOLEAN          gFontReady      = FALSE;
 static LIST_ENTRY       gLoadedFaceList;
 static LIST_ENTRY       gFontObjectList;
 static KSPIN_LOCK       gFontListLock;
-static KSPIN_LOCK       gFtEngineLock;
+static KMUTEX           gFtEngineMutex;
 static PGDI_FONT_OBJECT gDefaultFontObj = NULL;
+
+static
+BOOLEAN
+GdipAsciiEqualIgnoreCase(
+    IN CONST CHAR *A,
+    IN CONST CHAR *B
+)
+{
+    if (!A || !B) return FALSE;
+
+    while (*A && *B)
+    {
+        CHAR Ca = *A++;
+        CHAR Cb = *B++;
+        if (Ca >= 'A' && Ca <= 'Z') Ca += ('a' - 'A');
+        if (Cb >= 'A' && Cb <= 'Z') Cb += ('a' - 'A');
+        if (Ca != Cb) return FALSE;
+    }
+
+    return (*A == '\0' && *B == '\0');
+}
+
+static
+VOID
+GdipReleaseLoadedFace(
+    IN PGDI_LOADED_FACE FaceObj
+)
+{
+    if (!FaceObj) return;
+
+    KsWaitForSingleObject(&gFtEngineMutex);
+    if (FaceObj->Face)
+    {
+        FT_Done_Face(FaceObj->Face);
+    }
+    KsReleaseMutex(&gFtEngineMutex, FALSE);
+
+    if (FaceObj->FileBuffer)
+    {
+        FONT_POOL_FREE(FaceObj->FileBuffer);
+    }
+    FONT_POOL_FREE(FaceObj);
+}
+
+static
+PGDI_LOADED_FACE
+GdipRegisterFontFaceFromMemory(
+    IN PVOID       FontBuffer,
+    IN ULONG       FontSize,
+    IN CONST CHAR *FilePath OPTIONAL,
+    IN ULONG       Flags,
+    IN BOOLEAN     IsMemoryFont
+)
+{
+    FT_Face FtFace = NULL;
+
+    KsWaitForSingleObject(&gFtEngineMutex);
+    FT_Error FtErr = FT_New_Memory_Face(
+        gFtLibrary,
+        (CONST FT_Byte *)FontBuffer,
+        (FT_Long)FontSize,
+        0,
+        &FtFace
+    );
+    KsReleaseMutex(&gFtEngineMutex, FALSE);
+
+    if (FtErr != 0 || !FtFace)
+    {
+        DPRINT("[VEAPI/FONT] FT_New_Memory_Face gagal: %d\n", FtErr);
+        return NULL;
+    }
+
+    PGDI_LOADED_FACE NewFace = (PGDI_LOADED_FACE)FONT_POOL_ALLOC(sizeof(GDI_LOADED_FACE));
+    if (!NewFace)
+    {
+        KsWaitForSingleObject(&gFtEngineMutex);
+        FT_Done_Face(FtFace);
+        KsReleaseMutex(&gFtEngineMutex, FALSE);
+        return NULL;
+    }
+
+    RtlZeroMemory(NewFace, sizeof(GDI_LOADED_FACE));
+    NewFace->Magic        = GDI_FACE_MAGIC;
+    NewFace->RefCount     = 1;
+    NewFace->Flags        = Flags;
+    NewFace->Registered   = TRUE;
+    NewFace->IsMemoryFont = IsMemoryFont;
+    NewFace->OwnerProcess = (IsMemoryFont || (Flags & FR_PRIVATE)) ? (PEPROCESS)PtGetCurrentProcess() : NULL;
+    NewFace->FileBuffer   = FontBuffer;
+    NewFace->FileSize     = FontSize;
+    NewFace->Face         = FtFace;
+    NewFace->Weight       = (FtFace->style_flags & FT_STYLE_FLAG_BOLD) ? FW_BOLD : FW_NORMAL;
+    NewFace->Italic       = ((FtFace->style_flags & FT_STYLE_FLAG_ITALIC) != 0);
+
+    if (FilePath)
+    {
+        for (ULONG i = 0; i < sizeof(NewFace->FilePath) - 1 && FilePath[i] != '\0'; i++)
+        {
+            NewFace->FilePath[i] = FilePath[i];
+        }
+    }
+
+    if (FtFace->family_name)
+    {
+        for (ULONG i = 0; i < sizeof(NewFace->FamilyName) - 1 && FtFace->family_name[i] != '\0'; i++)
+        {
+            NewFace->FamilyName[i] = FtFace->family_name[i];
+        }
+    }
+
+    KIRQL OldIrql;
+    KsAcquireSpinLock(&gFontListLock, &OldIrql);
+    InsertTailList(&gLoadedFaceList, &NewFace->ListEntry);
+    KsReleaseSpinLock(&gFontListLock, OldIrql);
+
+    DPRINT("[VEAPI/FONT] Registered Face='%s' (Weight=%lu, Italic=%d, Private=%d)\n",
+           NewFace->FamilyName,
+           NewFace->Weight,
+           NewFace->Italic,
+           (NewFace->OwnerProcess != NULL));
+
+    return NewFace;
+}
+
+static
+INT
+GdipRegisterMemoryFace(
+    IN PVOID     FontBuffer,
+    IN ULONG     FontSize,
+    IN CONST CHAR *FilePath OPTIONAL,
+    IN ULONG     Flags,
+    IN BOOLEAN   IsMemoryFont
+)
+{
+    FT_Face FtFace = NULL;
+    KsWaitForSingleObject(&gFtEngineMutex);
+    FT_Error Err = FT_New_Memory_Face(
+        gFtLibrary,
+        (CONST FT_Byte *)FontBuffer,
+        (FT_Long)FontSize,
+        0,
+        &FtFace
+    );
+    KsReleaseMutex(&gFtEngineMutex, FALSE);
+
+    if (Err != 0 || !FtFace)
+    {
+        return 0;
+    }
+
+    PGDI_LOADED_FACE NewFace = (PGDI_LOADED_FACE)FONT_POOL_ALLOC(sizeof(GDI_LOADED_FACE));
+    if (!NewFace)
+    {
+        KsWaitForSingleObject(&gFtEngineMutex);
+        FT_Done_Face(FtFace);
+        KsReleaseMutex(&gFtEngineMutex, FALSE);
+        return 0;
+    }
+
+    RtlZeroMemory(NewFace, sizeof(GDI_LOADED_FACE));
+    NewFace->Magic        = GDI_FACE_MAGIC;
+    NewFace->RefCount     = 1;
+    NewFace->Flags        = Flags;
+    NewFace->IsMemoryFont = IsMemoryFont;
+    NewFace->OwnerProcess = (IsMemoryFont || (Flags & FR_PRIVATE)) ? (PEPROCESS)PtGetCurrentProcess() : NULL;
+    NewFace->FileBuffer   = FontBuffer;
+    NewFace->FileSize     = FontSize;
+    NewFace->Face         = FtFace;
+    NewFace->Weight       = (FtFace->style_flags & FT_STYLE_FLAG_BOLD) ? FW_BOLD : FW_NORMAL;
+    NewFace->Italic       = ((FtFace->style_flags & FT_STYLE_FLAG_ITALIC) != 0);
+
+    if (FilePath)
+    {
+        RtlCopyMemory(NewFace->FilePath, (PCHAR)FilePath, sizeof(NewFace->FilePath) - 1);
+    }
+
+    if (FtFace->family_name)
+    {
+        /* Copy nama family internal TTF ke struct */
+        for (ULONG i = 0; i < sizeof(NewFace->FamilyName) - 1 && FtFace->family_name[i] != '\0'; i++)
+        {
+            NewFace->FamilyName[i] = FtFace->family_name[i];
+        }
+    }
+
+    KIRQL OldIrql;
+    KsAcquireSpinLock(&gFontListLock, &OldIrql);
+    InsertTailList(&gLoadedFaceList, &NewFace->ListEntry);
+    KsReleaseSpinLock(&gFontListLock, OldIrql);
+
+    return 1; /* Jumlah font face yang berhasil ditambahkan (standar Win32) */
+}
 
 static
 VEASTATUS
@@ -186,13 +378,12 @@ GdipBakeFontObject(
     IN PGDI_FONT_OBJECT FontObj
 )
 {
-    KIRQL OldIrql;
     FT_Face Face = FontObj->ParentFace->Face;
 
     RtlZeroMemory(FontObj->Glyphs, sizeof(FontObj->Glyphs));
     if (!Face) return;
 
-    KsAcquireSpinLock(&gFtEngineLock, &OldIrql);
+    KsWaitForSingleObject(&gFtEngineMutex);
 
     FT_Set_Pixel_Sizes(Face, 0, FontObj->PixelHeight);
 
@@ -232,7 +423,7 @@ GdipBakeFontObject(
         Entry->Valid = TRUE;
     }
 
-    KsReleaseSpinLock(&gFtEngineLock, OldIrql);
+    KsReleaseMutex(&gFtEngineMutex, FALSE);
 }
 
 static
@@ -275,11 +466,12 @@ GdipMeasureTextWithFont(
     IN PGDI_FONT_OBJECT FontObj,
     IN CONST CHAR *Text,
     OUT PULONG OutWidth,
-    OUT PULONG OutHeight
+    OUT PULONG OutHeight,
+    IN BOOLEAN FromUser
 )
 {
     CHAR LocalText[256];
-    BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
+    BOOLEAN IsUser = FromUser;
 
     if (!Text || !OutWidth || !OutHeight)
     {
@@ -347,137 +539,175 @@ GdipMeasureTextWithFont(
     return TRUE;
 }
 
+static
 HFONT
-VEAPI
-VeaGdiCreateFont(
+GdipCreateFontFromFile(
     IN CONST CHAR *FontPath,
-    IN ULONG PixelHeight
+    IN ULONG       PixelHeight
 )
 {
-    CHAR LocalPath[256];
-    BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
-    PLIST_ENTRY Entry;
-    KIRQL OldIrql;
-
-    if (!gFtLibrary || !FontPath || PixelHeight == 0 || PixelHeight > 256)
+    if (VeaGdiAddFontResourceEx(FontPath, 0, NULL) <= 0)
     {
         return NULL;
-    }
-
-    RtlZeroMemory(LocalPath, sizeof(LocalPath));
-    _VEA_TRY
-    {
-        for (ULONG i = 0; i < sizeof(LocalPath) - 1; i++)
-        {
-            if (IsUser && ((ULONG_PTR)(FontPath + i) >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS))
-            {
-                _VEA_YIELD(return NULL);
-            }
-            LocalPath[i] = FontPath[i];
-            if (FontPath[i] == '\0') break;
-        }
-    }
-    _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
-    {
-        return NULL;
-    }
-    _VEA_END
-
-    if (LocalPath[0] == '\0')
-    {
-        return NULL;
-    }
-
-    KsAcquireSpinLock(&gFontListLock, &OldIrql);
-    for (Entry = gFontObjectList.Flink; Entry != &gFontObjectList; Entry = Entry->Flink)
-    {
-        PGDI_FONT_OBJECT ExistingFont = CONTAINING_RECORD(Entry, GDI_FONT_OBJECT, ListEntry);
-        if (ExistingFont->PixelHeight == PixelHeight &&
-            RtlRawStringEqual(ExistingFont->ParentFace->FilePath, LocalPath))
-        {
-            KsReleaseSpinLock(&gFontListLock, OldIrql);
-            return (HFONT)ExistingFont;
-        }
     }
 
     PGDI_LOADED_FACE TargetFace = NULL;
-    for (Entry = gLoadedFaceList.Flink; Entry != &gLoadedFaceList; Entry = Entry->Flink)
+    KIRQL OldIrql;
+
+    KsAcquireSpinLock(&gFontListLock, &OldIrql);
+    for (PLIST_ENTRY Entry = gLoadedFaceList.Flink; Entry != &gLoadedFaceList; Entry = Entry->Flink)
     {
-        PGDI_LOADED_FACE ExistingFace = CONTAINING_RECORD(Entry, GDI_LOADED_FACE, ListEntry);
-        if (RtlRawStringEqual(ExistingFace->FilePath, LocalPath))
+        PGDI_LOADED_FACE Face = CONTAINING_RECORD(Entry, GDI_LOADED_FACE, ListEntry);
+        if (!Face->IsMemoryFont && RtlRawStringEqual(Face->FilePath, (PCHAR)FontPath))
         {
-            TargetFace = ExistingFace;
+            TargetFace = Face;
             TargetFace->RefCount++;
             break;
         }
     }
     KsReleaseSpinLock(&gFontListLock, OldIrql);
 
-    BOOLEAN NewlyLoadedFace = FALSE;
-    if (!TargetFace)
+    if (!TargetFace) return NULL;
+
+    PGDI_FONT_OBJECT NewFont = (PGDI_FONT_OBJECT)FONT_POOL_ALLOC(sizeof(GDI_FONT_OBJECT));
+    if (!NewFont) return NULL;
+
+    RtlZeroMemory(NewFont, sizeof(GDI_FONT_OBJECT));
+    NewFont->Magic       = GDI_FONT_MAGIC;
+    NewFont->ParentFace  = TargetFace;
+    NewFont->PixelHeight = PixelHeight;
+
+    GdipBakeFontObject(NewFont);
+
+    KsAcquireSpinLock(&gFontListLock, &OldIrql);
+    InsertTailList(&gFontObjectList, &NewFont->ListEntry);
+    KsReleaseSpinLock(&gFontListLock, OldIrql);
+
+    return (HFONT)NewFont;
+}
+
+HFONT
+VEAPI
+VeaGdiCreateFont(
+    IN INT         nHeight,
+    IN INT         fnWeight,
+    IN BOOLEAN     bItalic,
+    IN CONST CHAR *lpszFace
+)
+{
+    CHAR LocalFace[64];
+    BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
+    PEPROCESS CurrProc = (PEPROCESS)PtGetCurrentProcess();
+
+    if (!gFtLibrary)
     {
-        PVOID FontBuf = NULL;
-        ULONG FontBytes = 0;
-        if (!VEA_SUCCESS(GdipReadFileToBuffer(LocalPath, &FontBuf, &FontBytes)))
-        {
-            return NULL;
-        }
-
-        FT_Face FtFace = NULL;
-        KsAcquireSpinLock(&gFtEngineLock, &OldIrql);
-        FT_Error FtErr = FT_New_Memory_Face(
-            gFtLibrary,
-            (CONST FT_Byte *)FontBuf,
-            (FT_Long)FontBytes,
-            0,
-            &FtFace
-        );
-        KsReleaseSpinLock(&gFtEngineLock, OldIrql);
-
-        if (FtErr != 0 || !FtFace)
-        {
-            DPRINT("[VEAPI/FONT] FT_New_Memory_Face gagal '%s': %d\n", LocalPath, FtErr);
-            FONT_POOL_FREE(FontBuf);
-            return NULL;
-        }
-
-        TargetFace = (PGDI_LOADED_FACE)FONT_POOL_ALLOC(sizeof(GDI_LOADED_FACE));
-        if (!TargetFace)
-        {
-            KsAcquireSpinLock(&gFtEngineLock, &OldIrql);
-            FT_Done_Face(FtFace);
-            KsReleaseSpinLock(&gFtEngineLock, OldIrql);
-            FONT_POOL_FREE(FontBuf);
-            return NULL;
-        }
-
-        RtlZeroMemory(TargetFace, sizeof(GDI_LOADED_FACE));
-        TargetFace->Magic      = GDI_FACE_MAGIC;
-        TargetFace->RefCount   = 1;
-        TargetFace->FileBuffer = FontBuf;
-        TargetFace->FileSize   = FontBytes;
-        TargetFace->Face       = FtFace;
-        RtlCopyMemory(TargetFace->FilePath, LocalPath, sizeof(LocalPath));
-        NewlyLoadedFace = TRUE;
+        return NULL;
     }
 
+    ULONG PixelHeight;
+    if (nHeight < 0)
+        PixelHeight = (ULONG)(-nHeight);
+    else if (nHeight > 0)
+        PixelHeight = (ULONG)nHeight;
+    else
+        PixelHeight = FONT_DEFAULT_PIXEL_SIZE;
+
+    if (PixelHeight > 256) PixelHeight = 256;
+
+    ULONG DesiredWeight = (fnWeight >= 600) ? FW_BOLD : FW_NORMAL;
+
+    RtlZeroMemory(LocalFace, sizeof(LocalFace));
+    if (lpszFace)
+    {
+        _VEA_TRY
+        {
+            for (ULONG i = 0; i < sizeof(LocalFace) - 1; i++)
+            {
+                if (IsUser && ((ULONG_PTR)(lpszFace + i) >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS))
+                {
+                    _VEA_YIELD(return NULL);
+                }
+                LocalFace[i] = lpszFace[i];
+                if (lpszFace[i] == '\0') break;
+            }
+        }
+        _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
+        {
+            return NULL;
+        }
+        _VEA_END
+    }
+
+    /* 1. Cari GDI_LOADED_FACE yang cocok di gLoadedFaceList */
+    PGDI_LOADED_FACE ExactMatch = NULL;
+    PGDI_LOADED_FACE FamilyMatch = NULL;
+    KIRQL OldIrql;
+
+    KsAcquireSpinLock(&gFontListLock, &OldIrql);
+    for (PLIST_ENTRY Entry = gLoadedFaceList.Flink; Entry != &gLoadedFaceList; Entry = Entry->Flink)
+    {
+        PGDI_LOADED_FACE Face = CONTAINING_RECORD(Entry, GDI_LOADED_FACE, ListEntry);
+        if (!Face->Registered) continue;
+
+        /* Hormati isolasi proses untuk FR_PRIVATE & MemResource */
+        if (Face->OwnerProcess != NULL && Face->OwnerProcess != CurrProc)
+        {
+            continue;
+        }
+
+        if (LocalFace[0] != '\0' &&
+            !GdipAsciiEqualIgnoreCase(Face->FamilyName, LocalFace))
+        {
+            continue;
+        }
+
+        if (!FamilyMatch)
+        {
+            FamilyMatch = Face;
+        }
+        if (Face->Weight == DesiredWeight && Face->Italic == bItalic)
+        {
+            ExactMatch = Face;
+            break;
+        }
+    }
+
+    PGDI_LOADED_FACE TargetFace = ExactMatch ? ExactMatch : FamilyMatch;
+    if (!TargetFace && gDefaultFontObj)
+    {
+        /* Fallback ke default system font jika nama font tidak ditemukan */
+        TargetFace = gDefaultFontObj->ParentFace;
+    }
+
+    if (!TargetFace)
+    {
+        KsReleaseSpinLock(&gFontListLock, OldIrql);
+        return NULL;
+    }
+
+    /* 2. Cek apakah ukuran PixelHeight untuk Face ini sudah pernah di-bake */
+    for (PLIST_ENTRY Entry = gFontObjectList.Flink; Entry != &gFontObjectList; Entry = Entry->Flink)
+    {
+        PGDI_FONT_OBJECT ExistingFont = CONTAINING_RECORD(Entry, GDI_FONT_OBJECT, ListEntry);
+        if (ExistingFont->ParentFace == TargetFace &&
+            ExistingFont->PixelHeight == PixelHeight)
+        {
+            KsReleaseSpinLock(&gFontListLock, OldIrql);
+            return (HFONT)ExistingFont;
+        }
+    }
+
+    /* Naikkan RefCount sebelum melepas spinlock agar Face tidak terhapus saat baking */
+    TargetFace->RefCount++;
+    KsReleaseSpinLock(&gFontListLock, OldIrql);
+
+    /* 3. Bake glyph cache untuk ukuran baru */
     PGDI_FONT_OBJECT NewFont = (PGDI_FONT_OBJECT)FONT_POOL_ALLOC(sizeof(GDI_FONT_OBJECT));
     if (!NewFont)
     {
-        if (NewlyLoadedFace)
-        {
-            KsAcquireSpinLock(&gFtEngineLock, &OldIrql);
-            FT_Done_Face(TargetFace->Face);
-            KsReleaseSpinLock(&gFtEngineLock, OldIrql);
-            FONT_POOL_FREE(TargetFace->FileBuffer);
-            FONT_POOL_FREE(TargetFace);
-        }
-        else
-        {
-            KsAcquireSpinLock(&gFontListLock, &OldIrql);
-            if (TargetFace->RefCount > 0) TargetFace->RefCount--;
-            KsReleaseSpinLock(&gFontListLock, OldIrql);
-        }
+        KsAcquireSpinLock(&gFontListLock, &OldIrql);
+        if (TargetFace->RefCount > 0) TargetFace->RefCount--;
+        KsReleaseSpinLock(&gFontListLock, OldIrql);
         return NULL;
     }
 
@@ -489,18 +719,8 @@ VeaGdiCreateFont(
     GdipBakeFontObject(NewFont);
 
     KsAcquireSpinLock(&gFontListLock, &OldIrql);
-    if (NewlyLoadedFace)
-    {
-        InsertTailList(&gLoadedFaceList, &TargetFace->ListEntry);
-    }
     InsertTailList(&gFontObjectList, &NewFont->ListEntry);
     KsReleaseSpinLock(&gFontListLock, OldIrql);
-
-    DPRINT("[VEAPI/FONT] CreateFont '%s' (%lupx) -> Family='%s', HFONT=%p\n",
-           LocalPath,
-           PixelHeight,
-           TargetFace->Face->family_name ? TargetFace->Face->family_name : "Unknown",
-           NewFont);
 
     return (HFONT)NewFont;
 }
@@ -577,9 +797,9 @@ VeaGdiDeleteFont(
 
     if (FaceToFree)
     {
-        KsAcquireSpinLock(&gFtEngineLock, &OldIrql);
+        KsWaitForSingleObject(&gFtEngineMutex);
         if (FaceToFree->Face) FT_Done_Face(FaceToFree->Face);
-        KsReleaseSpinLock(&gFtEngineLock, OldIrql);
+        KsReleaseMutex(&gFtEngineMutex, FALSE);
 
         if (FaceToFree->FileBuffer) FONT_POOL_FREE(FaceToFree->FileBuffer);
         FONT_POOL_FREE(FaceToFree);
@@ -590,20 +810,21 @@ VeaGdiDeleteFont(
 
 BOOLEAN
 VEAPI
-VeaGdiDrawText(
+GdipDrawTextInternal(
     IN HDC hdc,
     IN INT X,
     IN INT Y,
     IN CONST CHAR *Text,
-    IN ULONG ColorARGB
+    IN ULONG ColorARGB,
+    IN BOOLEAN FromUser
 )
 {
     PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
-    VEAGDI_SURFACE View;
-    LONG ViewOriginX;
-    LONG ViewOriginY;
+    VEAGDI_SURFACE Views[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsX[MAX_VISIBLE_CLIP_RECTS];
+    LONG OriginsY[MAX_VISIBLE_CLIP_RECTS];
     CHAR LocalText[256];
-    BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
+    BOOLEAN IsUser = FromUser;
 
     if (!Dc || !Text || !gFontReady)
     {
@@ -635,9 +856,12 @@ VeaGdiDrawText(
     }
     _VEA_END
 
-    if (!VeaGdiCreateSurfaceView(Dc, &View, &ViewOriginX, &ViewOriginY))
+    ULONG ViewCount = VeaGdiCreateSurfaceViews(
+        Dc, Views, OriginsX, OriginsY, MAX_VISIBLE_CLIP_RECTS
+    );
+    if (ViewCount == 0)
     {
-        return FALSE;
+        return (Dc->hWnd != NULL);
     }
 
     INT PenX = X;
@@ -664,19 +888,31 @@ VeaGdiDrawText(
 
         if (Glyph->AlphaBuffer && Glyph->Width > 0 && Glyph->Rows > 0)
         {
-            LONGLONG ViewX = (LONGLONG)Dc->OriginX + PenX + Glyph->BitmapLeft - ViewOriginX;
-            LONGLONG ViewY = (LONGLONG)Dc->OriginY + BaselineY - Glyph->BitmapTop - ViewOriginY;
+            LONGLONG ScreenGlyphX = (LONGLONG)Dc->OriginX + PenX + Glyph->BitmapLeft;
+            LONGLONG ScreenGlyphY = (LONGLONG)Dc->OriginY + BaselineY - Glyph->BitmapTop;
 
-            EngDrawGlyphAlpha8(
-                &View,
-                (LONG)ViewX,
-                (LONG)ViewY,
-                Glyph->Width,
-                Glyph->Rows,
-                Glyph->Pitch,
-                Glyph->AlphaBuffer,
-                ColorARGB
-            );
+            for (ULONG v = 0; v < ViewCount; v++)
+            {
+                LONGLONG ViewX = ScreenGlyphX - OriginsX[v];
+                LONGLONG ViewY = ScreenGlyphY - OriginsY[v];
+
+                if (ViewX >= (LONGLONG)Views[v].Width || ViewY >= (LONGLONG)Views[v].Height ||
+                    ViewX + (LONGLONG)Glyph->Width <= 0 || ViewY + (LONGLONG)Glyph->Rows <= 0)
+                {
+                    continue;
+                }
+
+                EngDrawGlyphAlpha8(
+                    &Views[v],
+                    (LONG)ViewX,
+                    (LONG)ViewY,
+                    Glyph->Width,
+                    Glyph->Rows,
+                    Glyph->Pitch,
+                    Glyph->AlphaBuffer,
+                    ColorARGB
+                );
+            }
         }
 
         PenX += Glyph->AdvanceX;
@@ -687,13 +923,53 @@ VeaGdiDrawText(
 
 BOOLEAN
 VEAPI
+VeaGdiDrawText(
+    IN HDC hdc,
+    IN INT X,
+    IN INT Y,
+    IN CONST CHAR *Text,
+    IN ULONG ColorARGB
+)
+{
+    return GdipDrawTextInternal(
+        hdc,
+        X,
+        Y,
+        Text,
+        ColorARGB,
+        (KeGetPreviousMode() == UserMode)
+    );
+}
+
+BOOLEAN
+VEAPI
 VeaGdiGetTextExtent(
     IN CONST CHAR *Text,
     OUT PULONG OutWidth,
     OUT PULONG OutHeight
 )
 {
-    return GdipMeasureTextWithFont(gDefaultFontObj, Text, OutWidth, OutHeight);
+    return GdipMeasureTextWithFont(
+        gDefaultFontObj,
+        Text,
+        OutWidth,
+        OutHeight,
+        (KeGetPreviousMode() == UserMode)
+    );
+}
+
+BOOLEAN
+VEAPI
+GdipGetTextExtentFontInternal(
+    IN HDC hdc,
+    IN CONST CHAR *Text,
+    OUT PULONG OutWidth,
+    OUT PULONG OutHeight,
+    IN BOOLEAN FromUser
+)
+{
+    PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
+    return GdipMeasureTextWithFont(GdipResolveDcFont(Dc), Text, OutWidth, OutHeight, FromUser);
 }
 
 BOOLEAN
@@ -705,8 +981,13 @@ VeaGdiGetTextExtentFont(
     OUT PULONG OutHeight
 )
 {
-    PGDI_DC_OBJECT Dc = VeaGdiGetDc(hdc);
-    return GdipMeasureTextWithFont(GdipResolveDcFont(Dc), Text, OutWidth, OutHeight);
+    return GdipGetTextExtentFontInternal(
+        hdc,
+        Text,
+        OutWidth,
+        OutHeight,
+        (KeGetPreviousMode() == UserMode)
+    );
 }
 
 VEASTATUS
@@ -723,8 +1004,8 @@ GdiInitializeFontEngine(VOID)
     InitializeListHead(&gLoadedFaceList);
     InitializeListHead(&gFontObjectList);
     KsInitializeSpinlock(&gFontListLock);
-    KsInitializeSpinlock(&gFtEngineLock);
-
+    KsInitializeMutex(&gFtEngineMutex, 0);
+    
     FtErr = FT_Init_FreeType(&gFtLibrary);
     if (FtErr != 0 || !gFtLibrary)
     {
@@ -732,11 +1013,24 @@ GdiInitializeFontEngine(VOID)
         return STATUS_UNSUCCESSFUL;
     }
 
-    HFONT DefaultHandle = VeaGdiCreateFont(DEFAULT_SYSTEM_FONT_PATH, FONT_DEFAULT_PIXEL_SIZE);
+    /* 1. Daftarkan default system font ke gLoadedFaceList secara global (Flags = 0) */
+    if (VeaGdiAddFontResourceEx(DEFAULT_SYSTEM_FONT_PATH, 0, NULL) <= 0)
+    {
+        DPRINT("[VEAPI/FONT] Gagal mendaftarkan default system font '%s'\n", DEFAULT_SYSTEM_FONT_PATH);
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    /* 2. Bake ukuran default-nya (lpszFace = NULL akan mengambil face pertama yang terdaftar) */
+    HFONT DefaultHandle = VeaGdiCreateFont(
+        -(INT)FONT_DEFAULT_PIXEL_SIZE,
+        FW_NORMAL,
+        FALSE,
+        NULL
+    );
     if (!DefaultHandle)
     {
-        DPRINT("[VEAPI/FONT] Gagal memuat default system font '%s'\n", DEFAULT_SYSTEM_FONT_PATH);
-        return STATUS_OBJECT_NAME_NOT_FOUND;
+        DPRINT("[VEAPI/FONT] Gagal membuat HFONT default dari '%s'\n", DEFAULT_SYSTEM_FONT_PATH);
+        return STATUS_UNSUCCESSFUL;
     }
 
     gDefaultFontObj = (PGDI_FONT_OBJECT)DefaultHandle;
@@ -745,6 +1039,274 @@ GdiInitializeFontEngine(VOID)
     UserInvalidateAllWindows();
 
     return STATUS_SUCCESS;
+}
+
+INT
+VEAPI
+VeaGdiAddFontResourceEx(
+    IN CONST CHAR *FilePath,
+    IN ULONG       Flags,
+    IN PVOID       Reserved OPTIONAL
+)
+{
+    UNREFERENCED_PARAMETER(Reserved);
+
+    CHAR LocalPath[256];
+    BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
+    PEPROCESS CurrProc = (PEPROCESS)PtGetCurrentProcess();
+    BOOLEAN IsPrivate = ((Flags & FR_PRIVATE) != 0);
+
+    if (!gFtLibrary || !FilePath)
+    {
+        return 0;
+    }
+
+    RtlZeroMemory(LocalPath, sizeof(LocalPath));
+    _VEA_TRY
+    {
+        for (ULONG i = 0; i < sizeof(LocalPath) - 1; i++)
+        {
+            if (IsUser && ((ULONG_PTR)(FilePath + i) >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS))
+            {
+                _VEA_YIELD(return 0);
+            }
+            LocalPath[i] = FilePath[i];
+            if (FilePath[i] == '\0') break;
+        }
+    }
+    _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
+    {
+        return 0;
+    }
+    _VEA_END
+
+    if (LocalPath[0] == '\0')
+    {
+        return 0;
+    }
+
+    /* Cek apakah file font ini sudah terdaftar di scope yang sama */
+    KIRQL OldIrql;
+    KsAcquireSpinLock(&gFontListLock, &OldIrql);
+    for (PLIST_ENTRY Entry = gLoadedFaceList.Flink; Entry != &gLoadedFaceList; Entry = Entry->Flink)
+    {
+        PGDI_LOADED_FACE Existing = CONTAINING_RECORD(Entry, GDI_LOADED_FACE, ListEntry);
+        if (!Existing->IsMemoryFont &&
+            RtlRawStringEqual(Existing->FilePath, LocalPath) &&
+            ((IsPrivate && Existing->OwnerProcess == CurrProc) ||
+             (!IsPrivate && Existing->OwnerProcess == NULL)))
+        {
+            Existing->RefCount++;
+            Existing->Registered = TRUE;
+            KsReleaseSpinLock(&gFontListLock, OldIrql);
+            return 1;
+        }
+    }
+    KsReleaseSpinLock(&gFontListLock, OldIrql);
+
+    PVOID FontBuf = NULL;
+    ULONG FontBytes = 0;
+    if (!VEA_SUCCESS(GdipReadFileToBuffer(LocalPath, &FontBuf, &FontBytes)))
+    {
+        return 0;
+    }
+
+    PGDI_LOADED_FACE NewFace = GdipRegisterFontFaceFromMemory(
+        FontBuf, FontBytes, LocalPath, Flags, FALSE
+    );
+    if (!NewFace)
+    {
+        FONT_POOL_FREE(FontBuf);
+        return 0;
+    }
+
+    return 1;
+}
+
+BOOLEAN
+VEAPI
+VeaGdiRemoveFontResourceEx(
+    IN CONST CHAR *FilePath,
+    IN ULONG       Flags,
+    IN PVOID       Reserved OPTIONAL
+)
+{
+    UNREFERENCED_PARAMETER(Reserved);
+
+    CHAR LocalPath[256];
+    BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
+    PEPROCESS CurrProc = (PEPROCESS)PtGetCurrentProcess();
+    BOOLEAN IsPrivate = ((Flags & FR_PRIVATE) != 0);
+
+    if (!FilePath) return FALSE;
+
+    RtlZeroMemory(LocalPath, sizeof(LocalPath));
+    _VEA_TRY
+    {
+        for (ULONG i = 0; i < sizeof(LocalPath) - 1; i++)
+        {
+            if (IsUser && ((ULONG_PTR)(FilePath + i) >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS))
+            {
+                _VEA_YIELD(return FALSE);
+            }
+            LocalPath[i] = FilePath[i];
+            if (FilePath[i] == '\0') break;
+        }
+    }
+    _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
+    {
+        return FALSE;
+    }
+    _VEA_END
+
+    PGDI_LOADED_FACE FaceToFree = NULL;
+    BOOLEAN Found = FALSE;
+    KIRQL OldIrql;
+
+    KsAcquireSpinLock(&gFontListLock, &OldIrql);
+    for (PLIST_ENTRY Entry = gLoadedFaceList.Flink; Entry != &gLoadedFaceList; Entry = Entry->Flink)
+    {
+        PGDI_LOADED_FACE Face = CONTAINING_RECORD(Entry, GDI_LOADED_FACE, ListEntry);
+        if (!Face->IsMemoryFont &&
+            Face->Registered &&
+            RtlRawStringEqual(Face->FilePath, LocalPath) &&
+            ((IsPrivate && Face->OwnerProcess == CurrProc) ||
+             (!IsPrivate && Face->OwnerProcess == NULL)))
+        {
+            Found = TRUE;
+            Face->Registered = FALSE;
+            if (Face->RefCount > 0) Face->RefCount--;
+            if (Face->RefCount == 0)
+            {
+                RemoveEntryList(&Face->ListEntry);
+                Face->Magic = 0;
+                FaceToFree = Face;
+            }
+            break;
+        }
+    }
+    KsReleaseSpinLock(&gFontListLock, OldIrql);
+
+    if (FaceToFree)
+    {
+        GdipReleaseLoadedFace(FaceToFree);
+    }
+
+    return Found;
+}
+
+HANDLE
+VEAPI
+VeaGdiAddFontMemResourceEx(
+    IN  PVOID  FontData,
+    IN  ULONG  FontSize,
+    IN  PVOID  Reserved OPTIONAL,
+    OUT PULONG OutNumFonts OPTIONAL
+)
+{
+    UNREFERENCED_PARAMETER(Reserved);
+
+    BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
+
+    if (!gFtLibrary || !FontData || FontSize == 0 || FontSize > FONT_MAX_FILE_SIZE)
+    {
+        return NULL;
+    }
+
+    if (IsUser)
+    {
+        ULONG_PTR Start = (ULONG_PTR)FontData;
+        ULONG_PTR End   = Start + (ULONG_PTR)FontSize;
+        if (Start >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS ||
+            End < Start ||
+            End >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS)
+        {
+            return NULL;
+        }
+
+        if (OutNumFonts &&
+            ((ULONG_PTR)OutNumFonts >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS ||
+             ((ULONG_PTR)OutNumFonts + sizeof(ULONG)) >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS))
+        {
+            return NULL;
+        }
+    }
+
+    PVOID KernelBuf = FONT_POOL_ALLOC(FontSize);
+    if (!KernelBuf)
+    {
+        return NULL;
+    }
+
+    _VEA_TRY
+    {
+        RtlCopyMemory(KernelBuf, FontData, FontSize);
+        if (OutNumFonts)
+        {
+            *OutNumFonts = 1;
+        }
+    }
+    _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
+    {
+        FONT_POOL_FREE(KernelBuf);
+        return NULL;
+    }
+    _VEA_END
+
+    PGDI_LOADED_FACE NewFace = GdipRegisterFontFaceFromMemory(
+        KernelBuf, FontSize, NULL, FR_PRIVATE, TRUE
+    );
+    if (!NewFace)
+    {
+        FONT_POOL_FREE(KernelBuf);
+        return NULL;
+    }
+
+    return (HANDLE)NewFace;
+}
+
+BOOLEAN
+VEAPI
+VeaGdiRemoveFontMemResourceEx(
+    IN HANDLE hFontResource
+)
+{
+    if (!hFontResource || MI_IS_USER_ADDRESS((ULONG_PTR)hFontResource))
+    {
+        return FALSE;
+    }
+
+    PGDI_LOADED_FACE Target = (PGDI_LOADED_FACE)hFontResource;
+    PGDI_LOADED_FACE FaceToFree = NULL;
+    BOOLEAN Found = FALSE;
+    KIRQL OldIrql;
+
+    KsAcquireSpinLock(&gFontListLock, &OldIrql);
+    for (PLIST_ENTRY Entry = gLoadedFaceList.Flink; Entry != &gLoadedFaceList; Entry = Entry->Flink)
+    {
+        PGDI_LOADED_FACE Face = CONTAINING_RECORD(Entry, GDI_LOADED_FACE, ListEntry);
+        if (Face == Target && Face->Magic == GDI_FACE_MAGIC && Face->IsMemoryFont)
+        {
+            Found = TRUE;
+            Face->Registered = FALSE;
+            if (Face->RefCount > 0) Face->RefCount--;
+            if (Face->RefCount == 0)
+            {
+                RemoveEntryList(&Face->ListEntry);
+                Face->Magic = 0;
+                FaceToFree = Face;
+            }
+            break;
+        }
+    }
+    KsReleaseSpinLock(&gFontListLock, OldIrql);
+
+    if (FaceToFree)
+    {
+        GdipReleaseLoadedFace(FaceToFree);
+    }
+
+    return Found;
 }
 
 /* EOF */

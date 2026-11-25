@@ -22,25 +22,39 @@ VOID
 VEAPI
 EngFillRect32(
     IN PVEAGDI_SURFACE Surface,
-    IN ULONG X,
-    IN ULONG Y,
+    IN LONG X,
+    IN LONG Y,
     IN ULONG Width,
     IN ULONG Height,
     IN ULONG ColorARGB
 )
 {
-    if (!Surface || !Surface->Scan0) return;
-    if (X >= Surface->Width || Y >= Surface->Height) return;
+    if (!Surface || !Surface->Scan0 || Width == 0 || Height == 0) return;
 
-    if (X + Width > Surface->Width)   Width  = Surface->Width - X;
-    if (Y + Height > Surface->Height) Height = Surface->Height - Y;
+    if (X < 0)
+    {
+        if ((LONG)Width + X <= 0) return;
+        Width = (ULONG)((LONG)Width + X);
+        X = 0;
+    }
+    if (Y < 0)
+    {
+        if ((LONG)Height + Y <= 0) return;
+        Height = (ULONG)((LONG)Height + Y);
+        Y = 0;
+    }
+
+    if (X >= (LONG)Surface->Width || Y >= (LONG)Surface->Height) return;
+
+    if (X + (LONG)Width > (LONG)Surface->Width)   Width  = Surface->Width - (ULONG)X;
+    if (Y + (LONG)Height > (LONG)Surface->Height) Height = Surface->Height - (ULONG)Y;
 
     for (ULONG Row = 0; Row < Height; Row++)
     {
-        PULONG PixelRow = (PULONG)((PUCHAR)Surface->Scan0 + ((Y + Row) * Surface->Pitch));
+        PULONG PixelRow = (PULONG)((PUCHAR)Surface->Scan0 + (((ULONG)Y + Row) * Surface->Pitch));
         for (ULONG Col = 0; Col < Width; Col++)
         {
-            PixelRow[X + Col] = ColorARGB;
+            PixelRow[(ULONG)X + Col] = ColorARGB;
         }
     }
 }
@@ -248,6 +262,54 @@ EngGradientFill32(
                 }
             }
         }
+    }
+}
+
+VOID
+VEAPI
+EngPresentRect(
+    IN LONG X,
+    IN LONG Y,
+    IN ULONG Width,
+    IN ULONG Height
+)
+{
+    if (!GpPrimaryDisplay.IsInitialized || !GpPrimaryDisplay.BackBuffer)
+    {
+        return;
+    }
+
+    EngBitBlt32(
+        &GpPrimaryDisplay.PrimarySurface,
+        X, Y, Width, Height,
+        GpPrimaryDisplay.BackBuffer,
+        X, Y
+    );
+}
+
+VOID
+VEAPI
+EngFillDesktopRect(
+    IN LONG  X,
+    IN LONG  Y,
+    IN ULONG Width,
+    IN ULONG Height,
+    IN ULONG ColorARGB
+)
+{
+    PVEAGDI_SURFACE Target = EngGetTargetSurface();
+    if (!Target || !Target->Scan0 || Width == 0 || Height == 0)
+    {
+        return;
+    }
+
+    EngHidePointer();
+    EngFillRect32(Target, X, Y, Width, Height, ColorARGB);
+    EngShowPointer();
+
+    if (Target != &GpPrimaryDisplay.PrimarySurface)
+    {
+        EngPresentRect(X, Y, Width, Height);
     }
 }
 
@@ -628,6 +690,28 @@ InitVideo(VOID)
     GpPrimaryDisplay.IsInitialized = TRUE;
     GpPrimaryDisplay.ScreenEnabled = TRUE;
 
+    GpPrimaryDisplay.BackBuffer                   = NULL;
+
+    SIZE_T BackBytes = (SIZE_T)GpPrimaryDisplay.PrimarySurface.Pitch *
+                       GpPrimaryDisplay.PrimarySurface.Height;
+    PVEAGDI_SURFACE BackSurf = (PVEAGDI_SURFACE)GDI_POOL_ALLOC(sizeof(VEAGDI_SURFACE));
+    PVOID BackPixels         = BackSurf ? GDI_POOL_ALLOC(BackBytes) : NULL;
+
+    if (BackSurf && BackPixels)
+    {
+        RtlZeroMemory(BackPixels, BackBytes);
+        *BackSurf             = GpPrimaryDisplay.PrimarySurface;
+        BackSurf->Scan0       = BackPixels;
+        BackSurf->BufferSize  = BackBytes;
+        BackSurf->IsPrimary   = FALSE;
+        GpPrimaryDisplay.BackBuffer = BackSurf;
+    }
+    else
+    {
+        if (BackSurf) GDI_POOL_FREE(BackSurf);
+        DPRINT("[VEAPI] BackBuffer alloc failed, fallback to direct VRAM\n");
+    }
+
     DPRINT("[VEAPI] InitVideo OK: %lux%lu @ %lu bpp, Pitch=%lu, Scan0=%p\n",
            GpPrimaryDisplay.PrimarySurface.Width,
            GpPrimaryDisplay.PrimarySurface.Height,
@@ -636,6 +720,7 @@ InitVideo(VOID)
            GpPrimaryDisplay.PrimarySurface.Scan0);
     
     GdipInitializeDcManager();
+    GdipInitializeGdiObjects();
 
     return STATUS_SUCCESS;
 }
