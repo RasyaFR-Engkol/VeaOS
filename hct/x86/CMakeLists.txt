@@ -1,76 +1,38 @@
-file(GLOB_RECURSE HCT_ASM_SOURCES "*.asm")
-file(GLOB_RECURSE HCT_C_SOURCES "*.c")
-
-# Folder untuk file objek (.o) sementara -> build/hct/x86/
-set(OBJ_DIR ${CMAKE_CURRENT_BINARY_DIR})
-
-file(GLOB_RECURSE HCT_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
-
-set(HCT_OBJS "")
-
 # =============================================================
-# COMPILE ASM
+# VeaOS HARDWARE CONTROL LAYER (HCT x86) OBJECT LIBRARY
 # =============================================================
-foreach(ASM_FILE ${HCT_ASM_SOURCES})
-    file(RELATIVE_PATH REL_PATH ${CMAKE_CURRENT_SOURCE_DIR} ${ASM_FILE})
-    string(REPLACE "/" "_" SAFE_NAME ${REL_PATH})
-    set(OBJ_FILE ${OBJ_DIR}/hct_${SAFE_NAME}.o)
-    
-    add_custom_command(
-        OUTPUT ${OBJ_FILE}
-        COMMAND nasm -f elf32 ${ASM_FILE} -I${ASM_INCLUDE_DIR}/ -o ${OBJ_FILE}
-        DEPENDS ${ASM_FILE}
-        COMMENT "Compiling HCT ASM: ${SAFE_NAME}"
-    )
-    list(APPEND HCT_OBJS ${OBJ_FILE})
-endforeach()
 
-# =============================================================
-# COMPILE C
-# =============================================================
-foreach(C_FILE ${HCT_C_SOURCES})
-    file(RELATIVE_PATH REL_PATH ${CMAKE_CURRENT_SOURCE_DIR} ${C_FILE})
-    string(REPLACE "/" "_" SAFE_NAME ${REL_PATH})
-    set(OBJ_FILE ${OBJ_DIR}/hct_${SAFE_NAME}.o)
-    
-    add_custom_command(
-        OUTPUT ${OBJ_FILE}
-        COMMAND clang --target=i686-pc-none-elf -march=i686 -m32 -ffreestanding -nostdlib -fno-builtin -fPIC 
-                -I${CMAKE_CURRENT_SOURCE_DIR}/include 
-                ${VEA_INCLUDES} 
-            -g -c ${C_FILE} -o ${OBJ_FILE} -fms-extensions
-        DEPENDS ${C_FILE} ${HCT_HEADERS}
-        COMMENT "Compiling HCT C: ${SAFE_NAME}"
-    )
-    list(APPEND HCT_OBJS ${OBJ_FILE})
-endforeach()
+file(GLOB_RECURSE HCT_ASM_SOURCES CONFIGURE_DEPENDS "*.asm")
+file(GLOB_RECURSE HCT_C_SOURCES CONFIGURE_DEPENDS "*.c")
 
-# =============================================================
-# LINKING (Output ke build/out/hct.so)
-# =============================================================
-add_custom_command(
-    OUTPUT ${OUT_DIR}/hct.so
-    COMMAND ld.lld -shared -Bsymbolic -m elf_i386 ${HCT_OBJS} -o ${OUT_DIR}/hct.so
-    DEPENDS ${HCT_OBJS}
-    COMMENT "Linking HCT as shared library (${OUT_DIR}/hct.so)"
+add_library(hct OBJECT
+    ${HCT_ASM_SOURCES}
+    ${HCT_C_SOURCES}
 )
 
-add_custom_target(build_hct DEPENDS ${OUT_DIR}/hct.so)
+target_include_directories(hct PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/veakrnl/include
+    ${CMAKE_SOURCE_DIR}/sdk/include
+    ${CMAKE_SOURCE_DIR}/sdk/include/ndk
+    ${CMAKE_SOURCE_DIR}/sdk/include/ddk
+    ${CMAKE_SOURCE_DIR}/sdk/include/psdk
+)
 
-# Export variabel ke parent scope biar bisa dipakai veakrnl
-set(HCT_OBJS ${HCT_OBJS} PARENT_SCOPE)
-set(HCT_C_SOURCES ${HCT_C_SOURCES} PARENT_SCOPE)
-
-add_library(hct_clangd_index OBJECT EXCLUDE_FROM_ALL ${HCT_C_SOURCES})
-target_compile_options(hct_clangd_index PRIVATE
-    --target=i686-pc-none-elf
-    -march=i686
-    -m32
-    -ffreestanding
-    -nostdlib
-    -fno-builtin
-    -fPIC
-    -fms-extensions
-    -I${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${VEA_INCLUDES}
+target_compile_options(hct PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:
+        --target=i686-pc-none-elf
+        -march=i686
+        -m32
+        -ffreestanding
+        -nostdlib
+        -fno-builtin
+        -fno-pic
+        -fno-pie
+        -g
+        -fms-extensions
+    >
+    $<$<COMPILE_LANGUAGE:ASM_NASM>:
+        -I${ASM_INCLUDE_DIR}/
+    >
 )
