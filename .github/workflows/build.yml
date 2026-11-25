@@ -1,0 +1,35 @@
+name: Build VeaOS
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-clang-i386:
+    name: Build / build-linux (clang, i386)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            clang \
+            lld \
+            nasm \
+            python3 \
+            gcc-multilib \
+            g++-multilib
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -G Ninja
+
+      - name: Build
+        run: cmake --build build --target <nama_target> -j
