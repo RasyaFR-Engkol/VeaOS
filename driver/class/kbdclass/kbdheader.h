@@ -41,6 +41,7 @@ typedef struct _KBD_DEVICE_EXTENSION {
             POIP ReaderOip;
             KEYBOARD_INPUT_DATA RawPacket;
             POIP PendingReadOip;
+            KDPC InputDpc;
         } PdoData;
     };
 } KBD_DEVICE_EXTENSION, *PKBD_DEVICE_EXTENSION;
@@ -82,5 +83,18 @@ KbdPopInputData(
     IN ULONG MaxPackets
 );
 
+ULONG
+KbdPopInputDataLocked(
+    IN PKBD_DEVICE_EXTENSION DevExt,
+    OUT PKEYBOARD_INPUT_DATA OutBuffer,
+    IN ULONG MaxPackets
+);
+
+VOID
+VEAPI
+KbdRecordDeliveredPackets(
+    IN PKBD_DEVICE_EXTENSION DevExt,
+    IN ULONG Count
+);
 
 /* EOF */

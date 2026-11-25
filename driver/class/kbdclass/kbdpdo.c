@@ -16,8 +16,33 @@
  * --------------------------------------------------------------------- */
 
 static volatile LONG KbdNextUnitId = 0;
+static volatile LONG KbdQueuedPacketCount = 0;
+static volatile LONG KbdDroppedPacketCount = 0;
+static volatile LONG KbdDeliveredPacketCount = 0;
 
 VEASTATUS VEAPI KbdArmPortRead(IN PKBD_DEVICE_EXTENSION DevExt);
+
+VOID
+VEAPI
+KbdRecordDeliveredPackets(
+    IN PKBD_DEVICE_EXTENSION DevExt,
+    IN ULONG Count
+)
+{
+    ULONG Index;
+#if 0
+    for (Index = 0; Index < Count; Index++)
+    {
+        LONG Total = InterlockedIncrement((PLONG)&KbdDeliveredPacketCount);
+        if (Total == 1 || (Total & 0x0F) == 0)
+        {
+            DPRINT("[KBD] unit=%u delivered=%d\n",
+                   DevExt->PdoData.UnitId,
+                   Total);
+        }
+    }
+#endif
+}
 
 VOID
 VEAPI
@@ -91,7 +116,7 @@ KbdCreatePdoKeyboard(
     return STATUS_SUCCESS;
 }
 
-VOID
+BOOLEAN
 KbdPushInputDataLocked(
     IN PKBD_DEVICE_EXTENSION DevExt,
     IN PKEYBOARD_INPUT_DATA Data
@@ -104,7 +129,10 @@ KbdPushInputDataLocked(
         DevExt->PdoData.InputBuffer[DevExt->PdoData.WriteIndex] = *Data;
         DevExt->PdoData.InputBuffer[DevExt->PdoData.WriteIndex].UnitId = (USHORT)DevExt->PdoData.UnitId;
         DevExt->PdoData.WriteIndex = NextWrite;
+        return TRUE;
     }
+
+    return FALSE;
 }
 
 ULONG
@@ -158,6 +186,7 @@ KbdPortReadCompletion(
         Oip->StatusInformation.Information >= sizeof(KEYBOARD_INPUT_DATA))
     {
         KIRQL OldIrql;
+        BOOLEAN Queued;
 
         KsAcquireSpinLock(&DevExt->PdoData.KeyboardLock, &OldIrql);
         KbdPushInputDataLocked(DevExt, &DevExt->PdoData.RawPacket);
@@ -220,6 +249,7 @@ KbdInputDpcRoutine(
 
     if (UserOip != NULL)
     {
+        KbdRecordDeliveredPackets(DevExt, Copied);
         ObioCompleteRequest(UserOip);
     }
 

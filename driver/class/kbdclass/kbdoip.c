@@ -79,10 +79,14 @@ KbdPdoHandle(
 
         case OIP_MJ_CLEANUP:
         {
-            POIP Pending = (POIP)__InterlockedExchangePointer(
-                (volatile void**)&DevExt->PdoData.PendingReadOip,
-                NULL
-            );
+            KIRQL OldIrql;
+            POIP Pending;
+
+            KsAcquireSpinLock(&DevExt->PdoData.KeyboardLock, &OldIrql);
+            Pending = DevExt->PdoData.PendingReadOip;
+            DevExt->PdoData.PendingReadOip = NULL;
+            KsReleaseSpinLock(&DevExt->PdoData.KeyboardLock, OldIrql);
+
             if (Pending != NULL) {
                 Pending->StatusInformation.Status = STATUS_CANCELLED;
                 Pending->StatusInformation.Information = 0;
@@ -98,37 +102,40 @@ KbdPdoHandle(
         case OIP_MJ_READ:
         {
             ULONG MaxPackets = Stack->Parameters.ReadWrite.Length / sizeof(KEYBOARD_INPUT_DATA);
+            KIRQL OldIrql;
+            ULONG Copied;
+
             if (MaxPackets == 0 || Oip->AssociatedOip.SystemBuffer == NULL) {
                 Status = STATUS_BUFFER_TOO_SMALL;
                 break;
             }
 
-            ULONG Copied = KbdPopInputData(
+            KsAcquireSpinLock(&DevExt->PdoData.KeyboardLock, &OldIrql);
+
+            Copied = KbdPopInputDataLocked(
                 DevExt,
                 (PKEYBOARD_INPUT_DATA)Oip->AssociatedOip.SystemBuffer,
                 MaxPackets
             );
 
             if (Copied > 0) {
+                KsReleaseSpinLock(&DevExt->PdoData.KeyboardLock, OldIrql);
                 Oip->StatusInformation.Status = STATUS_SUCCESS;
                 Oip->StatusInformation.Information = Copied * sizeof(KEYBOARD_INPUT_DATA);
+                KbdRecordDeliveredPackets(DevExt, Copied);
                 ObioCompleteRequest(Oip);
                 return STATUS_SUCCESS;
             }
 
-            // Buffer kosong: simpan OIP sebagai pending sampai port driver dapet scancode
-            if (!__InterlockedCompareExchangePointer(
-                    (volatile void **)&DevExt->PdoData.PendingReadOip,
-                    Oip,
-                    NULL))
-            {
-                DPRINT("[KBD] Busy! PendingOip=%p, Self=%p, PortDev=%p\n",
-                    DevExt->PdoData.PendingReadOip,
-                    DevExt->Self,
-                    DevExt->PdoData.PortDevice);
+            if (DevExt->PdoData.PendingReadOip != NULL) {
+                KsReleaseSpinLock(&DevExt->PdoData.KeyboardLock, OldIrql);
                 Status = STATUS_DEVICE_BUSY;
                 break;
             }
+
+            /* Atomik di bawah KeyboardLock: tidak ada celah lost wake-up dengan KbdInputDpcRoutine */
+            DevExt->PdoData.PendingReadOip = Oip;
+            KsReleaseSpinLock(&DevExt->PdoData.KeyboardLock, OldIrql);
 
             return STATUS_PENDING;
         }
