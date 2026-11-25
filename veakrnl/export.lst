@@ -116,6 +116,7 @@ export UlWindowStationObjectType
 export UlDesktopObjectType
 export ObCreateObject
 export ObInsertObject
+export ObOpenObjectByPointer
 export RtlRawStringCompare
 export MmUnlockPages
 export MmProbeAndLockPages
@@ -124,3 +125,7 @@ export RtlMoveMemory
 export RtlFillMemory
 export memset
 export RtlRawStringEqual
+export KsClearEvent
+export PtGetCurrentThreadVeapiThread
+export KsReleaseMutex
+export KsInitializeMutex
