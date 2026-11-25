@@ -137,32 +137,31 @@ VOID
 VEAPI
 KsiRetireDpcList(IN PKPRCB Prcb)
 {
-    /* Tell PRCB we are workin on DPC now */
+    ULONG_PTR Flags;
+
+    __asm__ __volatile__("pushf; pop %0" : "=r"(Flags) :: "memory");
+    __Stop();
+
+    /* Tell PRCB we are working on DPC now */
     Prcb->DpcRoutineActive = TRUE;
 
-    /* While our list is not empty at all*/
-    while(!IsListEmpty(&Prcb->DpcListHead))
+    KsAcquireSpinLockAtDpcLevel(&Prcb->DpcLock);
+
+    /* While our list is not empty at all */
+    while (!IsListEmpty(&Prcb->DpcListHead))
     {
-        /* Acquire spinlock as safety */
-        KsAcquireSpinLockAtDpcLevel(&Prcb->DpcLock);
-
-        /* Recheck. This could be done by another CPU maybe */
-        if (IsListEmpty(&Prcb->DpcListHead)) {
-            KsReleaseSpinLockFromDpcLevel(&Prcb->DpcLock);
-            break;
-        }
-
         /* Pop Head Entry */
         PLIST_ENTRY Entry = RemoveHeadList(&Prcb->DpcListHead);
 
         /* Get our PKDPC Pointer */
         PKDPC Dpc = CONTAINING_RECORD(Entry, KDPC, DpcListEntry);
 
-        /* Tell them we done */
+        /* Tell them we are done */
         Dpc->DpcData = NULL;
 
-        /* Release Spinlock cause we are safe */
+        /* Release Spinlock & buka interrupt sebelum eksekusi DeferredRoutine */
         KsReleaseSpinLockFromDpcLevel(&Prcb->DpcLock);
+        __Start();
 
         /* Execute DPC */
         Dpc->DeferredRoutine(
@@ -171,10 +170,22 @@ KsiRetireDpcList(IN PKPRCB Prcb)
             Dpc->SystemArgument1,
             Dpc->SystemArgument2
         );
+
+        /* Matikan interrupt lagi sebelum mengunci DpcLock di iterasi berikutnya */
+        __Stop();
+        KsAcquireSpinLockAtDpcLevel(&Prcb->DpcLock);
     }
 
-    /* Yey we are done */
+    Prcb->DpcInterruptRequested = FALSE;
     Prcb->DpcRoutineActive = FALSE;
+
+    KsReleaseSpinLockFromDpcLevel(&Prcb->DpcLock);
+
+    /* Kembalikan IF hanya jika sebelumnya memang aktif saat masuk fungsi */
+    if (Flags & 0x200)
+    {
+        __Start();
+    }
 }
 
 BOOLEAN

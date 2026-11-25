@@ -13,6 +13,10 @@ KsiDispatchException(
 
 VOID
 VEAPI
+HctHandleNMI(VOID);
+
+VOID
+VEAPI
 ks_initialize_exception(VOID)
 {
     HctInitializeIsr();
@@ -107,6 +111,10 @@ KsiDispatchException(
     {
         KsBugCheckEx(PAGE_FAULT_IN_NONPAGED_AREA, (ULONG_PTR)Cr2, Vector, TrapFrame->ErrCode, 0);
         return;
+    }
+    else if (Vector == KS_EXCEPTION_NMI)
+    {
+        HctHandleNMI();
     }
 
     KsBugCheckEx(KMODE_EXCEPTION_NOT_HANDLED, Vector, TrapFrame->ErrCode, TrapFrame->Eip, 0);

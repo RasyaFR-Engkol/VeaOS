@@ -94,6 +94,15 @@ KsUpdateSystemTime(
 
     // Update System Time
     NewSystemTime = KsiAdvanceSystemTime(Increment);
+
+    if (!IsListEmpty(&KsTimerListHead))
+    {
+        PKTIMER FirstTimer = CONTAINING_RECORD(KsTimerListHead.Flink, KTIMER, TimerListEntry);
+        if (FirstTimer->DueTime.QuadPart <= NewSystemTime)
+        {
+            KsInsertQueueDpc(&KiTimerExpireDpc, NULL, NULL);
+        }
+    }
 }
 
 VOID
@@ -189,6 +198,7 @@ KsSetTimer(
 
     Timer->Period = Period;
     Timer->Dpc = Dpc;
+    Timer->Header.SignalState = 0;
     Timer->Active = TRUE;
 
     KsiInsertTimerSorted(Timer);

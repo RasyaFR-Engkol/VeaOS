@@ -262,6 +262,74 @@ KsWaitForSingleObject(
     return KsWaitForMultipleObjects(1, Objects, WaitAny);
 }
 
+VOID
+VEAPI
+KsSignalDispatcherObject(
+    IN PDISPATCHER_HEADER Object
+)
+{
+    KIRQL OldIrql;
+
+    if (Object == NULL)
+    {
+        return;
+    }
+
+    OldIrql = KsAcquireDispatcherLock();
+    if (Object->SignalState == 0)
+    {
+        Object->SignalState = 1;
+        if (!IsListEmpty(&Object->WaitListHead))
+        {
+            KsWaitTest(Object);
+        }
+    }
+    KsReleaseDispatcherLock(OldIrql);
+}
+
+static VEASTATUS
+KsiReferenceWaitObjectByHandle(
+    IN HANDLE Handle,
+    IN KPROCESSOR_MODE AccessMode,
+    OUT PVOID *Object
+)
+{
+    POBJECT_TYPE WaitableTypes[] = {
+        UlEventObjectType,
+        PtEprocessType,
+        PtEthreadType
+    };
+    VEASTATUS Status = STATUS_OBJECT_TYPE_MISMATCH;
+    VEASTATUS LastStatus = Status;
+    ULONG TypeCount = sizeof(WaitableTypes) / sizeof(WaitableTypes[0]);
+
+    for (ULONG Index = 0; Index < TypeCount; Index++)
+    {
+        if (WaitableTypes[Index] == NULL)
+        {
+            continue;
+        }
+
+        Status = ObReferenceObjectByHandle(
+            Handle,
+            VEA_SYNCHRONIZE,
+            WaitableTypes[Index],
+            AccessMode,
+            Object
+        );
+        if (VEA_SUCCESS(Status))
+        {
+            return Status;
+        }
+        if (Status != STATUS_OBJECT_TYPE_MISMATCH)
+        {
+            LastStatus = Status;
+        }
+    }
+
+    return LastStatus;
+}
+
 VEASTATUS
 VEAPI
 VeaWaitForSingleObject(
@@ -270,24 +338,22 @@ VeaWaitForSingleObject(
     IN PLARGE_INTEGER Timeout OPTIONAL
 )
 {
-    PKEVENT EventObject;
+    PVOID WaitObject = NULL;
     VEASTATUS Status;
 
     if (Alertable || Timeout != NULL)
         return STATUS_NOT_IMPLEMENTED;
 
-    Status = ObReferenceObjectByHandle(
+    Status = KsiReferenceWaitObjectByHandle(
         Handle,
-        VEA_SYNCHRONIZE,
-        UlEventObjectType,
         KeGetPreviousMode(),
-        (PVOID*)&EventObject
+        &WaitObject
     );
     if (!VEA_SUCCESS(Status))
         return Status;
 
-    Status = KsWaitForSingleObject(EventObject);
-    ObDereferenceObject(EventObject);
+    Status = KsWaitForSingleObject(WaitObject);
+    ObDereferenceObject(WaitObject);
 
     return Status;
 }
