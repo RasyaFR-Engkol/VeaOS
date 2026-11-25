@@ -100,14 +100,16 @@ RiSyscallDispatcherHandler(
 
     if (SyscallNumber >= 0x1000)
     {
-        /* Syscall >= 0x1000 (TableIndex == 1): arahkan ke KsServiceTableDescriptorShadow */
-        Descriptor = &KsServiceTableDescriptorShadow[TableIndex];
-
-        /* Opsional: sinkronkan ServiceTable thread ke Shadow SSDT jika belum */
         if ((ULONG_PTR)CurrentThread->ServiceTable == (ULONG_PTR)KsServiceTableDescriptor)
         {
-            CurrentThread->ServiceTable = KsServiceTableDescriptorShadow;
+            Status = PtConvertToGuiThread();
+            if (!VEA_SUCCESS(Status))
+            {
+                goto Exit;
+            }
         }
+
+        Descriptor = &KsServiceTableDescriptorShadow[TableIndex];
     }
     else if (CurrentThread->ServiceTable != NULL)
     {
