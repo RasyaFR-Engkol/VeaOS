@@ -15,9 +15,29 @@
  * REVISION   : Creating file proccess.c
  * --------------------------------------------------------------------- */
 
+/* PRIVATE ****************************************************************/
+
 LONG 
 VEAPI
 MmpCompareVad(PRTL_BALANCED_NODE NodeA, PRTL_BALANCED_NODE NodeB);
+
+static
+VOID
+MmpCleanupVadNodes(
+    IN PRTL_BALANCED_NODE Node
+)
+{
+    if (!Node)
+    {
+        return;
+    }
+
+    MmpCleanupVadNodes(Node->Left);
+    MmpCleanupVadNodes(Node->Right);
+    MmpFreeVadNode((PMM_VAD)Node);
+}
+
+/* PUBLIC *****************************************************************/
 
 VEASTATUS
 VEAPI
@@ -599,6 +619,101 @@ MmInitializeProcessAddressSpace(
     }
 
     return Status;
+}
+
+VOID
+VEAPI
+MmDeleteProcessAddressSpace(
+    IN PEPROCESS Process
+)
+{
+    ULONG PageDirPhys;
+    BOOLEAN IsAttached = FALSE;
+
+    if (!Process || Process == PtSystemProcess)
+    {
+        return;
+    }
+
+    if (Process->VmDeleted)
+    {
+        return;
+    }
+
+    Process->VmDeleted = TRUE;
+
+    if (Process->Peb)
+    {
+        MmDeletePeb(Process, Process->Peb);
+    }
+
+    if (Process->VadRoot.Root)
+    {
+        MmpCleanupVadNodes(Process->VadRoot.Root);
+        Process->VadRoot.Root = NULL;
+        Process->VadRoot.Leftmost = NULL;
+    }
+
+    PageDirPhys = (ULONG)Process->Pcb.DirectoryTableBase;
+    if (PageDirPhys == 0)
+    {
+        Process->AddressSpaceInitialized = FALSE;
+        return;
+    }
+
+    if ((PEPROCESS)PtGetCurrentProcess() != Process)
+    {
+        PtAttachProcess((PKPROCESS)Process);
+        IsAttached = TRUE;
+    }
+
+    PULONG PageDirVa = (PULONG)MM_GET_PD();
+
+    for (ULONG PdeIndex = 0; PdeIndex < 512; PdeIndex++)
+    {
+        ULONG BaseVa = PdeIndex << 22;
+        PMMPDE Pde = MiAddressToPde(BaseVa);
+
+        if (Pde->Hard.Valid)
+        {
+            ULONG PtPhysPage = Pde->Hard.PageFrameNumber << PAGE_SHIFT;
+
+            for (ULONG PteIndex = 0; PteIndex < 1024; PteIndex++)
+            {
+                ULONG Va = BaseVa | (PteIndex << PAGE_SHIFT);
+                PMMPTE Pte = MiAddressToPte(Va);
+
+                if (Pte->Hard.Valid)
+                {
+                    ULONG PhysPage = Pte->Hard.PageFrameNumber << PAGE_SHIFT;
+                    MI_ERASE_PTE(Pte);
+                    MmFreePhysicalPage(PhysPage);
+                }
+            }
+
+            PageDirVa[PdeIndex] = 0;
+            MMI_INVALIDATE_TLB((ULONG)MiAddressToPte(BaseVa));
+            MmFreePhysicalPage(PtPhysPage);
+        }
+    }
+
+    if (IsAttached)
+    {
+        PtDetachProcess();
+    }
+    else if (PtSystemProcess && Process != PtSystemProcess)
+    {
+        PtAttachProcess((PKPROCESS)PtSystemProcess);
+    }
+
+    Process->Pcb.DirectoryTableBase = 0;
+    Process->AddressSpaceInitialized = FALSE;
+
+    /* 6. Bebaskan frame fisik Page Directory proses */
+    MmFreePhysicalPage(PageDirPhys);
+
+    DPRINT("[MM/SPACE] MmDeleteProcessAddressSpace SUCCESS for '%s'\n",
+           Process->ImageFileName);
 }
 
 /* EOF */
