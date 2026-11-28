@@ -1021,6 +1021,12 @@ __divdi3(
     IN LONGLONG Divisor
 );
 
+ULONGLONG
+__udivdi3(
+    IN ULONGLONG Dividend,
+    IN ULONGLONG Divisor
+);
+
 void *memset(void *ptr, int x, size_t n);
 
 BOOLEAN
@@ -1029,5 +1035,26 @@ RtlRawStringEqual(
     IN PCHAR S1,
     IN PCHAR S2
 );
+
+DWORD
+VEAPI
+RtlGetLastVeapiError(VOID);
+
+VOID
+VEAPI
+RtlSetLastVeapiError(
+    IN DWORD Win32Error
+);
+
+ULONG
+VEAPI
+RtlVeaStatusToUserError(
+    IN VEASTATUS Status
+);
+
+#if !defined (LOWORD)
+    #define LOWORD(l)           ((USHORT)((ULONG_PTR)(l) & 0xFFFF))
+    #define HIWORD(l)           ((USHORT)(((ULONG_PTR)(l) >> 16) & 0xFFFF))
+#endif
 
 /* EOF */

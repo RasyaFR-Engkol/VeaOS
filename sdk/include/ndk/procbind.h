@@ -88,7 +88,7 @@ typedef int INT, *PINT;
 typedef unsigned char UCHAR, *PUCHAR, BYTE, *PBYTE;
 typedef unsigned short USHORT, *PUSHORT, WORD, *PWORD;
 typedef unsigned long ULONG, *PULONG, DWORD, *PDWORD;
-typedef unsigned int UINT, *PUINT;
+typedef unsigned int UINT, *PUINT, UINT_PTR;
 
 typedef void VOID, *PVOID;
 typedef void * __ptr64 PVOID64;

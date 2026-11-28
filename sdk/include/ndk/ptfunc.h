@@ -293,4 +293,19 @@ VeaTerminateThread(
     IN VEASTATUS ExitStatus
 );
 
+VOID
+VEAPI
+PtDeleteProcess(
+    IN PVOID Object
+);
+
+VEASTATUS
+VEAPI
+VeaOpenProcess(
+    OUT PHANDLE ProcessHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes,
+    IN PCLIENT_ID ClientId OPTIONAL
+);
+
 /* EOF */

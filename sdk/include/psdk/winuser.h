@@ -94,6 +94,9 @@ typedef LRESULT (CALLBACK *WNDPROC)(
 #define WM_CTLCOLORSTATIC 312
 #define MN_GETHMENU 481
 #define WM_MOUSEFIRST 512
+#define WM_TIMER 275
+#define WM_DRAWITEM         0x002B
+#define WM_SHELLHOOKMESSAGE         0xC001
 
 #define WS_OVERLAPPED           0x00000000L
 #define WS_POPUP                0x80000000L
@@ -178,7 +181,10 @@ typedef struct tagCREATESTRUCTA
 #define WS_DISABLED         0x08000000L
 #define WS_BORDER           0x00800000L
 #define WS_TABSTOP          0x00010000L
+#define WS_EX_TOPMOST       0x00000008L
 #define WS_EX_CLIENTEDGE    0x00000200L
+#define WS_EX_TOOLWINDOW    0x00000080L
+#define WS_EX_APPWINDOW     0x00040000L
 
 /* Static (Label) Styles */
 #define SS_LEFT             0x00000000L
@@ -196,6 +202,8 @@ typedef struct tagCREATESTRUCTA
 /* Button Styles & Notifications */
 #define BS_PUSHBUTTON       0x00000000L
 #define BS_DEFPUSHBUTTON    0x00000001L
+#define BS_OWNERDRAW        0x0000000BL
+#define BS_TYPEMASK         0x0000000FL
 #define BN_CLICKED          0
 
 /* Messages & Helper Macros */
@@ -372,7 +380,9 @@ typedef struct tagCREATESTRUCTA
 #define SWP_FRAMECHANGED    0x0020
 #define SWP_SHOWWINDOW      0x0040
 #define SWP_HIDEWINDOW      0x0080
+#define SWP_NOCOPYBITS      0x0100
 #define SWP_NOOWNERZORDER   0x0200
+#define SWP_NOSENDCHANGING  0x0400
 #endif
 
 #ifndef HWND_TOP
@@ -451,5 +461,169 @@ typedef struct tagCREATESTRUCTA
 #define FW_ULTRABOLD	FW_EXTRABOLD
 #define FW_HEAVY	900
 #define FW_BLACK	FW_HEAVY
+
+/* Non-Client & Size/Move Messages */
+#define WM_SETCURSOR            0x0020
+#define WM_NCCREATE             0x0081
+#define WM_NCDESTROY            0x0082
+#define WM_NCCALCSIZE           0x0083
+#define WM_NCHITTEST            0x0084
+#define WM_NCPAINT              0x0085
+#define WM_NCACTIVATE           0x0086
+#define WM_NCMOUSEMOVE          0x00A0
+#define WM_NCLBUTTONDOWN        0x00A1
+#define WM_NCLBUTTONUP          0x00A2
+#define WM_NCRBUTTONDOWN        0x00A4
+#define WM_NCRBUTTONUP          0x00A5
+#define WM_NCMBUTTONDOWN        0x00A7
+#define WM_NCMBUTTONUP          0x00A8
+#define WM_SIZING               0x0214
+#define WM_MOVING               0x0216
+#define WM_ENTERSIZEMOVE        0x0231
+#define WM_EXITSIZEMOVE         0x0232
+
+/* WM_NCHITTEST Return Codes */
+#define HTNOWHERE               0
+#define HTCLIENT                1
+#define HTCAPTION               2
+#define HTSYSMENU               3
+#define HTMINBUTTON             8
+#define HTMAXBUTTON             9
+#define HTLEFT                  10
+#define HTRIGHT                 11
+#define HTTOP                   12
+#define HTTOPLEFT               13
+#define HTTOPRIGHT              14
+#define HTBOTTOM                15
+#define HTBOTTOMLEFT            16
+#define HTBOTTOMRIGHT           17
+#define HTBORDER                18
+#define HTCLOSE                 20
+
+#define CAPTION_BTN_NONE    0
+#define CAPTION_BTN_MIN     1
+#define CAPTION_BTN_MAX     2
+#define CAPTION_BTN_CLOSE   3
+
+#define CAPTION_STATE_NORMAL   0
+#define CAPTION_STATE_HOVER    1
+#define CAPTION_STATE_PRESSED  2
+
+/* Owner-Draw Control Types */
+#define ODT_MENU            1
+#define ODT_LISTBOX         2
+#define ODT_COMBOBOX        3
+#define ODT_BUTTON          4
+#define ODT_STATIC          5
+
+/* Owner-Draw Actions */
+#define ODA_DRAWENTIRE      0x0001
+#define ODA_SELECT          0x0002
+#define ODA_FOCUS           0x0004
+
+/* Owner-Draw States */
+#define ODS_SELECTED        0x0001
+#define ODS_GRAYED          0x0002
+#define ODS_DISABLED        0x0004
+#define ODS_CHECKED         0x0008
+#define ODS_FOCUS           0x0010
+#define ODS_DEFAULT         0x0020
+#define ODS_HOTLIGHT        0x0040
+
+typedef struct tagRECT {
+    LONG left;
+    LONG top;
+    LONG right;
+    LONG bottom;
+} RECT, *PRECT, *NPRECT, *LPRECT;
+
+typedef struct tagDRAWITEMSTRUCT {
+    UINT      CtlType;
+    UINT      CtlID;
+    UINT      itemID;
+    UINT      itemAction;
+    UINT      itemState;
+    HWND      hwndItem;
+    HDC       hDC;
+    RECT      rcItem;
+    ULONG_PTR itemData;
+} DRAWITEMSTRUCT, *PDRAWITEMSTRUCT, *LPDRAWITEMSTRUCT;
+
+/* WParam for  */
+#define HSHELL_WINDOWCREATED        1
+#define HSHELL_WINDOWDESTROYED      2
+#define HSHELL_ACTIVATESHELLWINDOW  3
+#define HSHELL_WINDOWACTIVATED      4
+#define HSHELL_GETMINRECT           5
+#define HSHELL_REDRAW               6
+#define HSHELL_TASKMAN              7
+#define HSHELL_LANGUAGE             8
+
+/* -----------------------------------------------------------------------
+ * Process Creation Flags (dwCreationFlags)
+ * --------------------------------------------------------------------- */
+#define DEBUG_PROCESS                     0x00000001
+#define DEBUG_ONLY_THIS_PROCESS           0x00000002
+#define CREATE_SUSPENDED                  0x00000004
+#define DETACHED_PROCESS                  0x00000008
+#define CREATE_NEW_CONSOLE                0x00000010
+#define NORMAL_PRIORITY_CLASS             0x00000020
+#define IDLE_PRIORITY_CLASS               0x00000040
+#define HIGH_PRIORITY_CLASS               0x00000080
+#define REALTIME_PRIORITY_CLASS           0x00000100
+#define CREATE_NEW_PROCESS_GROUP          0x00000200
+#define CREATE_UNICODE_ENVIRONMENT        0x00000400
+#define CREATE_SEPARATE_WOW_VDM           0x00000800
+#define CREATE_SHARED_WOW_VDM             0x00001000
+#define CREATE_FORCEDOS                   0x00002000
+#define BELOW_NORMAL_PRIORITY_CLASS       0x00004000
+#define ABOVE_NORMAL_PRIORITY_CLASS       0x00008000
+#define CREATE_BREAKAWAY_FROM_JOB         0x01000000
+#define CREATE_PRESERVE_CODE_AUTHZ_LEVEL  0x02000000
+#define CREATE_DEFAULT_ERROR_MODE         0x04000000
+#define CREATE_NO_WINDOW                  0x08000000
+
+/* -----------------------------------------------------------------------
+ * Startup Info Flags (STARTUPINFOA.dwFlags)
+ * --------------------------------------------------------------------- */
+#define STARTF_USESHOWWINDOW              0x00000001
+#define STARTF_USESIZE                    0x00000002
+#define STARTF_USEPOSITION                0x00000004
+#define STARTF_USECOUNTCHARS              0x00000008
+#define STARTF_USEFILLATTRIBUTE           0x00000010
+#define STARTF_RUNFULLSCREEN              0x00000020
+#define STARTF_FORCEONFEEDBACK            0x00000040
+#define STARTF_FORCEOFFFEEDBACK           0x00000080
+#define STARTF_USESTDHANDLES              0x00000100
+#define STARTF_USEHOTKEY                  0x00000200
+
+typedef struct _PROCESS_INFORMATION {
+    HANDLE hProcess;
+    HANDLE hThread;
+    DWORD dwProcessId;
+    DWORD dwThreadId;
+} PROCESS_INFORMATION, *PPROCESS_INFORMATION, *LPPROCESS_INFORMATION;
+
+typedef struct _STARTUPINFOA {
+    DWORD cb;
+    PSTR lpReserved;
+    PSTR lpDesktop;
+    PSTR lpTitle;
+    DWORD dwX;
+    DWORD dwY;
+    DWORD dwXSize;
+    DWORD dwYSize;
+    DWORD dwXCountChars;
+    DWORD dwYCountChars;
+    DWORD dwFillAttribute;
+    DWORD dwFlags;
+    WORD wShowWindow;
+    WORD cbReserved2;
+    PBYTE lpReserved2;
+    HANDLE hStdInput;
+    HANDLE hStdOutput;
+    HANDLE hStdError;
+} STARTUPINFOA, *PSTARTUPINFOA, *LPSTARTUPINFOA;
+
 
 /* EOF */

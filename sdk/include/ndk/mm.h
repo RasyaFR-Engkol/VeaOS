@@ -596,4 +596,10 @@ MmDeleteKernelStack(
     IN BOOLEAN GuiStack
 );
 
+VOID
+VEAPI
+MmDeleteProcessAddressSpace(
+    IN PEPROCESS Process
+);
+
 /* EOF */

@@ -356,4 +356,17 @@ VeaCreateTimer(
     IN TIMER_TYPE TimerType
 );
 
+VOID
+VEAPI
+UlDestroyHandleTable(
+    IN PHANDLE_TABLE Table
+);
+
+PHANDLE_TABLE_ENTRY
+VEAPI
+UlLookupHandleTableEntry(
+    IN PHANDLE_TABLE Table,
+    IN HANDLE Handle
+);
+
 /* EOF */

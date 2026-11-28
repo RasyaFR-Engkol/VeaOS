@@ -527,4 +527,46 @@ VeaGdiRemoveFontMemResourceEx(
     IN HANDLE hFontResource
 );
 
+UINT_PTR
+VEAPI
+VeaUserSetTimer(
+    IN HWND      hWnd,
+    IN UINT_PTR  nIDEvent,
+    IN UINT      uElapse,
+    IN TIMERPROC lpTimerFunc
+);
+
+BOOLEAN
+VEAPI
+VeaUserKillTimer(
+    IN HWND     hWnd,
+    IN UINT_PTR uIDEvent
+);
+
+VOID
+VEAPI
+VeaUserSetCaptionButtonState(
+    IN HWND  hWnd,
+    IN ULONG HotBtn,
+    IN ULONG PressedBtn
+);
+
+BOOLEAN
+VEAPI
+VeaUserSetTaskmanWindow(
+    IN HWND hWnd
+);
+
+BOOLEAN
+VEAPI
+VeaUserRegisterShellHookWindow(
+    IN HWND hWnd
+);
+
+BOOLEAN
+VEAPI
+VeaUserDeregisterShellHookWindow(
+    IN HWND hWnd
+);
+
 /* EOF */
