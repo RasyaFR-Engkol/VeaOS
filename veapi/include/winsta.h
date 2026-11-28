@@ -21,7 +21,10 @@ typedef struct _DESKTOP_OBJECT
     KSPIN_LOCK              Lock;
     LIST_ENTRY              WindowListHead;    
     PVOID                   ForegroundWindow;  
-    PVOID                   FocusWindow;       
+    PVOID                   FocusWindow;    
+    ULONG                   BackgroundColor;  
+    HWND                    TaskmanWindow;
+    HWND                    ShellHookWindow; 
 } DESKTOP_OBJECT, *PDESKTOP_OBJECT;
 
 extern PWINDOW_STATION_OBJECT GpInteractiveWindowStation;

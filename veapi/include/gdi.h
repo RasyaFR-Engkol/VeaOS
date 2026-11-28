@@ -64,6 +64,11 @@ typedef struct _GDI_DC_OBJECT {
     HFONT   hFont;
     HBRUSH  hBrush;
     HPEN    hPen;
+    BOOLEAN HasDirty;
+    LONG    DirtyLeft;
+    LONG    DirtyTop;
+    LONG    DirtyRight;
+    LONG    DirtyBottom;
 } GDI_DC_OBJECT, *PGDI_DC_OBJECT;
 
 #define WND_BORDER_WIDTH    3
@@ -384,12 +389,6 @@ VOID
 VEAPI
 EngHidePointer(VOID);
 
-typedef struct tagPOINT
-{
-    LONG x;
-    LONG y;
-} POINT, *PPOINT, *LPPOINT;
-
 HDC
 VEAPI
 VeaUserGetDCEx(
@@ -641,5 +640,26 @@ VeaGdiRemoveFontMemResourceEx(
 );
 
 #define FONT_MAX_FILE_SIZE (16 * 1024 * 1024)
+
+VOID
+VEAPI
+GdiAccumulateDirtyRect(
+    IN PGDI_DC_OBJECT Dc,
+    IN LONG           Left,
+    IN LONG           Top,
+    IN LONG           Right,
+    IN LONG           Bottom
+);
+
+VOID
+WndBlitMoveWindow(
+    IN PVEAGDI_SURFACE Surface,
+    IN LONG            OldX,
+    IN LONG            OldY,
+    IN LONG            NewX,
+    IN LONG            NewY,
+    IN LONG            Width,
+    IN LONG            Height
+);
 
 /* EOF */

@@ -85,6 +85,12 @@ ULONG_PTR VeapiSSDT[] = {
     SVC_ENTRY(VeaGdiRemoveFontResourceEx, 3)    /* Syscall ID: 0x1050 */
     SVC_ENTRY(VeaGdiAddFontMemResourceEx, 4)    /* Syscall ID: 0x1051 */
     SVC_ENTRY(VeaGdiRemoveFontMemResourceEx, 1) /* Syscall ID: 0x1052 */
+    SVC_ENTRY(VeaUserSetTimer, 4)               /* Syscall ID: 0x1053 */
+    SVC_ENTRY(VeaUserKillTimer, 2)              /* Syscall ID: 0x1054 */
+    SVC_ENTRY(VeaUserSetCaptionButtonState, 3)  /* Syscall ID: 0x1055 */
+    SVC_ENTRY(VeaUserSetTaskmanWindow, 1)       /* Syscall ID: 0x1056 */
+    SVC_ENTRY(VeaUserRegisterShellHookWindow, 1)/* Syscall ID: 0x1057 */
+    SVC_ENTRY(VeaUserDeregisterShellHookWindow, 1) /* Syscall ID: 0x1058 */
 };
 #undef SVC_ENTRY
 
@@ -173,6 +179,12 @@ UCHAR VeapiSSPT[] = {
     SVC_ENTRY(VeaGdiRemoveFontResourceEx, 3)
     SVC_ENTRY(VeaGdiAddFontMemResourceEx, 4)
     SVC_ENTRY(VeaGdiRemoveFontMemResourceEx, 1)
+    SVC_ENTRY(VeaUserSetTimer, 4)
+    SVC_ENTRY(VeaUserKillTimer, 2)
+    SVC_ENTRY(VeaUserSetCaptionButtonState, 3)
+    SVC_ENTRY(VeaUserSetTaskmanWindow, 1)      
+    SVC_ENTRY(VeaUserRegisterShellHookWindow, 1)
+    SVC_ENTRY(VeaUserDeregisterShellHookWindow, 1) 
 };
 #undef SVC_ENTRY
 

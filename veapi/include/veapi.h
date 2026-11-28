@@ -864,15 +864,6 @@ WndReference(
     IN PWND_OBJECT Wnd
 );
 
-#define CAPTION_BTN_NONE    0
-#define CAPTION_BTN_MIN     1
-#define CAPTION_BTN_MAX     2
-#define CAPTION_BTN_CLOSE   3
-
-#define CAPTION_STATE_NORMAL   0
-#define CAPTION_STATE_HOVER    1
-#define CAPTION_STATE_PRESSED  2
-
 ULONG
 WndHitTestCaptionButton(
     IN PWND_OBJECT Wnd,
@@ -950,6 +941,139 @@ VEAPI
 VeaUserGetClassLong(
     IN HWND hWnd,
     IN INT  nIndex
+);
+
+#define USER_TIMER_MINIMUM  0x0000000A
+#define USER_TIMER_MAXIMUM  0x7FFFFFFF
+
+typedef struct _USER_TIMER
+{
+    LIST_ENTRY ListEntry;
+    KTIMER     KeTimer;
+    KDPC       Dpc;
+    PETHREAD   Thread;
+    HWND       hWnd;
+    UINT_PTR   nIDEvent;
+    UINT       ElapseMs;
+    TIMERPROC  TimerProc;
+    LONG       RefCount;
+    BOOLEAN    Expired;
+    BOOLEAN    Cancelled;
+    BOOLEAN     Armed;
+    ULONG       IgnoreDpcCount;
+} USER_TIMER, *PUSER_TIMER;
+
+VOID
+MsgDereferenceQueue(
+    IN PUSER_MESSAGE_QUEUE Queue
+);
+
+VOID
+VEAPI
+TimerInitialize(VOID);
+
+BOOLEAN
+VEAPI
+TimerCheckThreadTimers(
+    IN  PETHREAD            Thread,
+    IN  PUSER_MESSAGE_QUEUE Queue,
+    IN  HWND                FilterHwnd,
+    IN  ULONG               MsgMin,
+    IN  ULONG               MsgMax,
+    IN  BOOLEAN             RemoveMsg,
+    OUT PMESSAGE_QUEUE      OutMsg
+);
+
+VOID
+VEAPI
+TimerCleanupWindowTimers(
+    IN HWND hWnd
+);
+
+VOID
+VEAPI
+TimerCleanupThreadTimers(
+    IN PETHREAD Thread
+);
+
+UINT_PTR
+VEAPI
+VeaUserSetTimer(
+    IN HWND      hWnd,
+    IN UINT_PTR  nIDEvent,
+    IN UINT      uElapse,
+    IN TIMERPROC lpTimerFunc
+);
+
+BOOLEAN
+VEAPI
+VeaUserKillTimer(
+    IN HWND     hWnd,
+    IN UINT_PTR uIDEvent
+);
+
+VOID
+WndRedrawTitleBar(
+    IN PWND_OBJECT Wnd
+);
+
+extern HWND  gHotCaptionWnd;
+extern ULONG gHotCaptionBtn;
+extern HWND  gPressedCaptionWnd;
+extern ULONG gPressedCaptionBtn;
+
+VOID
+VEAPI
+VeaUserSetCaptionButtonState(
+    IN HWND  hWnd,
+    IN ULONG HotBtn,
+    IN ULONG PressedBtn
+);
+
+BOOLEAN
+VEAPI
+VeaUserSetTaskmanWindow(
+    IN HWND hWnd
+);
+
+BOOLEAN
+VEAPI
+VeaUserRegisterShellHookWindow(
+    IN HWND hWnd
+);
+
+BOOLEAN
+VEAPI
+VeaUserDeregisterShellHookWindow(
+    IN HWND hWnd
+);
+
+VOID
+WndScreenToClient(
+    IN     PWND_OBJECT Wnd,
+    IN OUT PPOINT      lpPoint
+);
+
+BOOLEAN
+WndIsTaskbarEligible(
+    IN PDESKTOP_OBJECT Desktop,
+    IN PWND_OBJECT     Wnd
+);
+
+VOID
+WndNotifyShellHook(
+    IN PDESKTOP_OBJECT Desktop,
+    IN WPARAM          EventCode,
+    IN HWND            TargetHwnd
+);
+
+VOID
+VEAPI
+CurCompositeToPrimaryRect(
+    IN LONG  ClipX,
+    IN LONG  ClipY,
+    IN ULONG ClipW,
+    IN ULONG ClipH
 );
 
 #endif
