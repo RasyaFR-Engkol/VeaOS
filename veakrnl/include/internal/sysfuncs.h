@@ -61,3 +61,4 @@ SVC_(QueryTimer, 5)                   /* SSN 59 */
 SVC_(OpenTimer, 3)                    /* SSN 60 */
 SVC_(SetTimer, 7)                     /* SSN 61 */
 SVC_(CreateTimer, 4)                  /* SSN 62 */
+SVC_(OpenProcess, 4)                  /* SSN 63 */

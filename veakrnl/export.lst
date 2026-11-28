@@ -129,3 +129,8 @@ export KsClearEvent
 export PtGetCurrentThreadVeapiThread
 export KsReleaseMutex
 export KsInitializeMutex
+export KsCancelTimer
+export KsSetTimer
+export KsInitializeTimer
+export KsQuerySystemTime
+export __udivdi3

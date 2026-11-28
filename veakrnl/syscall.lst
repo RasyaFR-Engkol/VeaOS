@@ -63,3 +63,4 @@
 60  OpenTimer               3   VeaOpenTimer
 61  SetTimer                7   VeaSetTimer
 62  CreateTimer             4   VeaCreateTimer
+63  OpenProcess             4   VeaOpenProcess
