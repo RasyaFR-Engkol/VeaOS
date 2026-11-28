@@ -10,21 +10,19 @@ file(GLOB_RECURSE LOADER_ASM_SOURCES CONFIGURE_DEPENDS "*.asm")
 file(GLOB_RECURSE LOADER_C_SOURCES CONFIGURE_DEPENDS "*.c")
 list(APPEND LOADER_C_SOURCES ${RTL_SOURCES})
 
-# Keluarkan boot.asm dari list umum supaya bisa ditaruh di urutan paling awal
 list(FILTER LOADER_ASM_SOURCES EXCLUDE REGEX ".*/boot\\.asm$")
 
-# Target build bernama 'osi386', dengan boot.asm wajib di posisi pertama
 add_executable(osi386
     ${CMAKE_CURRENT_SOURCE_DIR}/boot.asm
     ${LOADER_ASM_SOURCES}
     ${LOADER_C_SOURCES}
 )
 
-# Output akhir persis 'OSI386' tanpa ekstensi di folder ${OUT_DIR}
 set_target_properties(osi386 PROPERTIES
     OUTPUT_NAME "OSI386"
     SUFFIX ""
     RUNTIME_OUTPUT_DIRECTORY "${OUT_DIR}"
+    POSITION_INDEPENDENT_CODE OFF
     LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/linker.ld"
 )
 
@@ -48,6 +46,8 @@ target_compile_options(osi386 PRIVATE
         -ffreestanding
         -nostdlib
         -fno-builtin
+        -fno-pic
+        -fno-pie
         -fms-extensions
     >
     $<$<COMPILE_LANGUAGE:ASM_NASM>:
@@ -55,11 +55,10 @@ target_compile_options(osi386 PRIVATE
     >
 )
 
+set(CMAKE_C_LINK_EXECUTABLE "ld.lld <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>")
+
 target_link_options(osi386 PRIVATE
-    --target=i686-pc-none-elf
-    -fuse-ld=lld
-    -nostdlib
-    -Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/linker.ld
-    -Wl,-m,elf_i386
-    -Wl,-Map=${OUT_DIR}/OSI386.map
+    "SHELL:-T ${CMAKE_CURRENT_SOURCE_DIR}/linker.ld"
+    "SHELL:-m elf_i386"
+    "-Map=${OUT_DIR}/OSI386.map"
 )
