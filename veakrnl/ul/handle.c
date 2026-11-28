@@ -251,4 +251,105 @@ UlDupHandleTable(
     return TargetTable;
 }
 
+VOID
+VEAPI
+UlDestroyHandleTable(
+    IN PHANDLE_TABLE Table
+)
+{
+    KIRQL OldIrql;
+
+    if (!Table)
+    {
+        return;
+    }
+
+    /* Tutup dan dereference semua handle yang masih terbuka di tabel ini */
+    if (Table->Entries)
+    {
+        for (ULONG i = 1; i < Table->MaxEntries; i++)
+        {
+            PVOID ObjectToDereference = NULL;
+            PVOID OwnerThread = NULL;
+            ULONG CountNow = 0;
+
+            KsAcquireSpinLock(&Table->Lock, &OldIrql);
+
+            PHANDLE_TABLE_ENTRY Entry = &Table->Entries[i];
+            if (Entry->Object != NULL)
+            {
+                ObjectToDereference = Entry->Object;
+                OwnerThread = Entry->OwnerThread;
+
+                Entry->Object = NULL;
+                Entry->OwnerThread = NULL;
+                Entry->GrantedAccess = 0;
+                Entry->NextFreeIndex = 0;
+
+                if (Table->HandleCount > 0)
+                {
+                    Table->HandleCount--;
+                }
+                CountNow = Table->HandleCount;
+            }
+
+            KsReleaseSpinLock(&Table->Lock, OldIrql);
+
+            /* Lepas spinlock DULU sebelum memanggil ObDereferenceObject
+               agar tidak deadlock atau menyalahi IRQL DISPATCH_LEVEL */
+            if (ObjectToDereference != NULL)
+            {
+                HANDLE Handle = INDEX_TO_HANDLE(i);
+
+                ObpReportLifecycle(
+                    Handle,
+                    CountNow,
+                    FALSE,
+                    TRUE,
+                    OwnerThread,
+                    ObjectToDereference
+                );
+
+                ObpDeleteNameCheck(ObjectToDereference);
+                ObDereferenceObject(ObjectToDereference);
+            }
+        }
+
+        UlFreePoolWithTag(Table->Entries, 'EnHn');
+        Table->Entries = NULL;
+    }
+
+    UlFreePoolWithTag(Table, 'TbHn');
+}
+
+PHANDLE_TABLE_ENTRY
+VEAPI
+UlLookupHandleTableEntry(
+    IN PHANDLE_TABLE Table,
+    IN HANDLE Handle
+)
+{
+    ULONG Index;
+    PHANDLE_TABLE_ENTRY Entry;
+
+    if (!Table || !Handle)
+    {
+        return NULL;
+    }
+
+    Index = HANDLE_TO_INDEX(Handle);
+    if (Index == 0 || Index >= Table->MaxEntries)
+    {
+        return NULL;
+    }
+
+    Entry = &Table->Entries[Index];
+    if (Entry->Object == NULL)
+    {
+        return NULL;
+    }
+
+    return Entry;
+}
+
 /* EOF */
