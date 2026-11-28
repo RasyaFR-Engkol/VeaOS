@@ -10,6 +10,7 @@
 #include "logon.h"
 #include <ptfunc.h>
 #include <rtl.h>
+#include <kernelapi.h>
 
 /* Revision History ------------------------------------------------------
  * DATE       : 22-11-2026
@@ -18,7 +19,7 @@
  * --------------------------------------------------------------------- */
 
 #define WM_LOGON_SHELL_EXITED   (WM_APP + 1)
-#define DEFAULT_SHELL_PATH      "D1P1:/VeaOS/SystemReserved/TestVeapiApp.elf"
+#define DEFAULT_SHELL_PATH      "D1P1:/VeaOS/explorer.elf"
 #define DEFAULT_USER_DESKTOP    "Default"
 
 #define ID_LBL_SAS_TITLE        201
@@ -74,92 +75,48 @@ LogonSpawnOnDefaultDesktop(
     OUT PHANDLE OutProcessHandle OPTIONAL
 )
 {
-    ANSI_STRING ImageAnsi;
-    ANSI_STRING DesktopAnsi;
-    PRTL_USER_PROCESS_PARAMETERS ProcParams = NULL;
-    RTL_USER_PROCESS_INFORMATION ProcInfo;
-    VEASTATUS Status;
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
 
     if (OutProcessHandle != NULL)
     {
         *OutProcessHandle = NULL;
     }
 
-    RtlInitAnsiString(&ImageAnsi, ImagePath);
-    RtlInitAnsiString(&DesktopAnsi, DEFAULT_USER_DESKTOP);
+    RtlZeroMemory(&si, sizeof(si));
+    si.cb        = sizeof(si);
+    si.lpDesktop = DEFAULT_USER_DESKTOP; /* Ikat proses anak ke Desktop 'Default' */
 
-    RtlZeroMemory(&ProcInfo, sizeof(ProcInfo));
-    ProcInfo.Size = sizeof(ProcInfo);
+    RtlZeroMemory(&pi, sizeof(pi));
 
-    Status = RtlCreateProcessParameters(
-        &ProcParams,
-        &ImageAnsi,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        NULL,
-        &DesktopAnsi,   /* Ikat proses anak ke Desktop 'Default' */
-        NULL,
-        NULL
-    );
-    if (!VEA_SUCCESS(Status) || !ProcParams)
+    if (!CreateProcessA(
+            ImagePath,
+            NULL,
+            NULL,
+            NULL,
+            FALSE,
+            0,
+            NULL,
+            NULL,
+            &si,
+            &pi))
     {
         return FALSE;
     }
 
-    Status = RtlCreateUserProcess(
-        &ImageAnsi,
-        OBJ_CASE_INSENSITIVE,
-        ProcParams,
-        NULL,
-        NULL,
-        NULL,
-        FALSE,
-        NULL,
-        NULL,
-        &ProcInfo
-    );
-
-    RtlDestroyProcessParameters(ProcParams);
-
-    if (!VEA_SUCCESS(Status))
+    if (pi.hThread != NULL)
     {
-        return FALSE;
+        VeaClose(pi.hThread);
     }
-
-    if (!ProcInfo.ProcessHandle || !ProcInfo.ThreadHandle)
-    {
-        if (ProcInfo.ThreadHandle != NULL)
-        {
-            VeaClose(ProcInfo.ThreadHandle);
-        }
-        if (ProcInfo.ProcessHandle != NULL)
-        {
-            VeaTerminateProcess(ProcInfo.ProcessHandle, STATUS_UNSUCCESSFUL);
-            VeaClose(ProcInfo.ProcessHandle);
-        }
-        return FALSE;
-    }
-
-    Status = VeaResumeThread(ProcInfo.ThreadHandle, NULL);
-    if (!VEA_SUCCESS(Status))
-    {
-        VeaTerminateProcess(ProcInfo.ProcessHandle, Status);
-        VeaClose(ProcInfo.ThreadHandle);
-        VeaClose(ProcInfo.ProcessHandle);
-        return FALSE;
-    }
-    VeaClose(ProcInfo.ThreadHandle);
 
     if (OutProcessHandle != NULL)
     {
-        *OutProcessHandle = ProcInfo.ProcessHandle;
+        *OutProcessHandle = pi.hProcess;
     }
-    else
+    else if (pi.hProcess != NULL)
     {
         /* Untuk proses fire-and-forget seperti Task Manager */
-        VeaClose(ProcInfo.ProcessHandle);
+        VeaClose(pi.hProcess);
     }
 
     return TRUE;
@@ -339,6 +296,8 @@ LogonAttemptSignIn(
             RtlZeroMemory(gszActiveUser, sizeof(gszActiveUser));
             LogonShowLoginScreen("Status: Gagal menjalankan shell user!", FALSE);
         }
+
+        LogonSpawnOnDefaultDesktop("/D1P1:/VeaOS/SystemReserved/TestVeapiApp.elf", NULL);
     }
     else
     {

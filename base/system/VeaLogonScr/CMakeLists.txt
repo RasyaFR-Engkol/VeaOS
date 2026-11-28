@@ -13,5 +13,4 @@ target_include_directories(VeaLogonScr PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-# vea (berisi VeaProcessStartup) harus sebelum veaso agar simbol entry point ketarik linker
-add_importlibs(VeaLogonScr vea veaso userapi)
+add_importlibs(VeaLogonScr vea veaso userapi kernelapi)
