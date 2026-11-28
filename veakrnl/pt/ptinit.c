@@ -49,7 +49,7 @@ PtpInitSystem0(VOID)
     PtInitializer.ObjectSize = sizeof(EPROCESS);
     PtInitializer.AllowAttachByDefault = FALSE;
     PtInitializer.CreateRoutine = NULL;
-    PtInitializer.DeleteRoutine = NULL; // TODO: PtDeleteProcess
+    PtInitializer.DeleteRoutine = PtDeleteProcess;
     PtInitializer.ParseRoutine = NULL;
     PtInitializer.InterruptHandler = NULL;
     PtInitializer.PoolTag = 'Pt  ';

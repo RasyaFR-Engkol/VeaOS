@@ -241,10 +241,6 @@ PtpExitThread(
         PtpVeapiCallouts.ThreadCallout((PETHREAD)CurrentThread, VeapiThreadCalloutExit);
     }
 
-    InsertTailList(&PtDeadThreadListHead, &CurrentThread->ThreadListEntry);
-
-    PtpRestoreInterrupts(Flags);
-
     if (ProcessExiting &&
         ParentProcess != PtSystemProcess &&
         PtpVeapiCallouts.ProcessCallout != NULL)
@@ -258,6 +254,25 @@ PtpExitThread(
 
     if (ProcessExiting)
     {
+        KIRQL ListIrql;
+
+        /* Cabut dari daftar proses aktif begitu thread terakhir exit */
+        ListIrql = KsAcquireDispatcherLock();
+        if (!IsListEmpty(&ParentProcess->ActiveProcessLinks) &&
+            ParentProcess->ActiveProcessLinks.Flink != NULL)
+        {
+            RemoveEntryList(&ParentProcess->ActiveProcessLinks);
+            InitializeListHead(&ParentProcess->ActiveProcessLinks);
+        }
+        KsReleaseDispatcherLock(ListIrql);
+
+        /* Hapus entry Process CID dari PtpCidTable agar tidak dangling */
+        if (ParentProcess->UniqueProcessId)
+        {
+            UlDestroyHandle(PtpCidTable, ParentProcess->UniqueProcessId);
+            ParentProcess->UniqueProcessId = NULL;
+        }
+
         KsSignalDispatcherObject(&ParentProcess->Pcb.Dispatcher);
     }
 
@@ -266,7 +281,10 @@ PtpExitThread(
         ObDereferenceObject(ParentProcess);
     }
 
+    Flags = PtpSaveAndDisableInterrupts();
+    InsertTailList(&PtDeadThreadListHead, &CurrentThread->ThreadListEntry);
     PtYieldThread();
+    PtpRestoreInterrupts(Flags);
 
     for (;;)
     {
@@ -1016,7 +1034,7 @@ PtpCreateThread(
     if (CreateSuspended)
     {
         Thread->Tcb.SuspendCount = 1;
-        Thread->Tcb.State = Waiting; // Atau buat State khusus 'Suspended' jika ada
+        Thread->Tcb.State = Waiting; 
     }
     else
     {

@@ -146,7 +146,8 @@ PtWakeThread(
 
     Flags = PtpSaveAndDisableInterrupts();
 
-    if (Thread->State != Waiting)
+    if (Thread->State != Waiting ||
+        (Thread->ApcState.Process && Thread->ApcState.Process->DirectoryTableBase == 0))
     {
         PtpRestoreInterrupts(Flags);
         return FALSE;

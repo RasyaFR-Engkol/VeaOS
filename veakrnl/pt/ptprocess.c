@@ -15,6 +15,46 @@ static inline VOID PiSwapProcess(PKPROCESS TargetProcess) {
     );
 }
 
+VEASTATUS
+VEAPI
+PtLookupProcessByProcessId(
+    IN HANDLE ProcessId,
+    OUT PEPROCESS *Process
+)
+{
+    PHANDLE_TABLE_ENTRY CidEntry;
+    PEPROCESS FoundProcess;
+    KIRQL OldIrql;
+
+    if (!ProcessId || !Process)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    KsAcquireSpinLock(&PtpCidTable->Lock, &OldIrql);
+
+    CidEntry = UlLookupHandleTableEntry(PtpCidTable, ProcessId);
+    if (!CidEntry || !CidEntry->Object)
+    {
+        KsReleaseSpinLock(&PtpCidTable->Lock, OldIrql);
+        return STATUS_INVALID_CID;
+    }
+
+    FoundProcess = (PEPROCESS)CidEntry->Object;
+
+    if (OBJECT_TO_OBJECT_HEADER(FoundProcess)->Type != PtEprocessType)
+    {
+        KsReleaseSpinLock(&PtpCidTable->Lock, OldIrql);
+        return STATUS_INVALID_CID;
+    }
+
+    ObReferenceObject(FoundProcess);
+    KsReleaseSpinLock(&PtpCidTable->Lock, OldIrql);
+
+    *Process = FoundProcess;
+    return STATUS_SUCCESS;
+}
+
 VOID
 VEAPI
 PiInitializeProcess(
@@ -987,6 +1027,228 @@ VeaTerminateProcess(
     Status = PtpTerminateProcess(Process, ExitStatus);
     ObDereferenceObject(Process);
     return Status;
+}
+
+VEASTATUS
+VEAPI
+VeaOpenProcess(
+    OUT PHANDLE ProcessHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes,
+    IN PCLIENT_ID ClientId OPTIONAL
+)
+{
+    VEASTATUS Status = STATUS_SUCCESS;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    HANDLE LocalProcessHandle = NULL;
+    OBJECT_ATTRIBUTES LocalObjectAttributes;
+    CLIENT_ID LocalClientId;
+    BOOLEAN HasObjectName = FALSE;
+    PEPROCESS Process = NULL;
+    ULONG HandleAttributes = 0;
+
+    RtlZeroMemory(&LocalObjectAttributes, sizeof(OBJECT_ATTRIBUTES));
+    RtlZeroMemory(&LocalClientId, sizeof(CLIENT_ID));
+
+    if (PreviousMode == UserMode)
+    {
+        if (!ProcessHandle || (ULONG_PTR)ProcessHandle >= 0x80000000)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+
+        if (!ObjectAttributes || (ULONG_PTR)ObjectAttributes >= 0x80000000)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+
+        _VEA_TRY
+        {
+            /* Probe write access pada output ProcessHandle */
+            *(volatile HANDLE*)ProcessHandle = *(volatile HANDLE*)ProcessHandle;
+
+            /* Salin ObjectAttributes ke kernel stack */
+            RtlCopyMemory(&LocalObjectAttributes, ObjectAttributes, sizeof(OBJECT_ATTRIBUTES));
+            HasObjectName = (LocalObjectAttributes.ObjectName != NULL);
+
+            /* Salin ClientId jika disuplai */
+            if (ClientId)
+            {
+                if ((ULONG_PTR)ClientId >= 0x80000000)
+                {
+                    return STATUS_ACCESS_VIOLATION;
+                }
+                RtlCopyMemory(&LocalClientId, ClientId, sizeof(CLIENT_ID));
+            }
+        }
+        _VEA_EXCEPT(1)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+        _VEA_END;
+    }
+    else
+    {
+        if (!ProcessHandle || !ObjectAttributes)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        RtlCopyMemory(&LocalObjectAttributes, ObjectAttributes, sizeof(OBJECT_ATTRIBUTES));
+        HasObjectName = (LocalObjectAttributes.ObjectName != NULL);
+
+        if (ClientId)
+        {
+            RtlCopyMemory(&LocalClientId, ClientId, sizeof(CLIENT_ID));
+        }
+    }
+
+    if (HasObjectName && ClientId)
+    {
+        return STATUS_INVALID_PARAMETER_MIX;
+    }
+
+    if (!HasObjectName && !ClientId)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    HandleAttributes = LocalObjectAttributes.Attributes;
+    if (PreviousMode == UserMode)
+    {
+        HandleAttributes &= ~OBJ_KERNEL_HANDLE;
+    }
+
+    if (ClientId)
+    {
+        if (LocalClientId.UniqueProcess)
+        {
+            Status = PtLookupProcessByProcessId(LocalClientId.UniqueProcess, &Process);
+            if (!VEA_SUCCESS(Status))
+            {
+                return Status;
+            }
+        }
+        else if (LocalClientId.UniqueThread)
+        {
+            /* Opsional: Buka proses berdasarkan TID pemiliknya */
+            PHANDLE_TABLE_ENTRY ThreadEntry = UlLookupHandleTableEntry(PtpCidTable, LocalClientId.UniqueThread);
+            if (!ThreadEntry || !ThreadEntry->Object ||
+                OBJECT_TO_OBJECT_HEADER(ThreadEntry->Object)->Type != PtEthreadType)
+            {
+                return STATUS_INVALID_CID;
+            }
+
+            PETHREAD Thread = (PETHREAD)ThreadEntry->Object;
+            Process = Thread->ThreadProcess;
+            ObReferenceObject(Process);
+        }
+        else
+        {
+            return STATUS_INVALID_CID;
+        }
+
+        Status = ObOpenObjectByPointer(
+            Process,
+            HandleAttributes,
+            NULL,
+            DesiredAccess,
+            PtEprocessType,
+            PreviousMode,
+            &LocalProcessHandle
+        );
+
+        ObDereferenceObject(Process);
+    }
+    else
+    {
+        Status = ObOpenObjectByName(
+            &LocalObjectAttributes,
+            PtEprocessType,
+            PreviousMode,
+            DesiredAccess,
+            NULL,
+            &LocalProcessHandle
+        );
+    }
+
+    if (!VEA_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    if (PreviousMode == UserMode)
+    {
+        _VEA_TRY
+        {
+            *ProcessHandle = LocalProcessHandle;
+        }
+        _VEA_EXCEPT(1)
+        {
+            ObCloseHandle(LocalProcessHandle, UserMode);
+            Status = STATUS_ACCESS_VIOLATION;
+        }
+        _VEA_END;
+    }
+    else
+    {
+        *ProcessHandle = LocalProcessHandle;
+    }
+
+    return Status;
+}
+
+VOID
+VEAPI
+PtDeleteProcess(
+    IN PVOID Object
+)
+{
+    PEPROCESS Process = (PEPROCESS)Object;
+    KIRQL OldIrql;
+
+    if (!Process)
+    {
+        return;
+    }
+
+    /* 1. Safety net: pastikan sudah lepas dari PtProcessList */
+    OldIrql = KsAcquireDispatcherLock();
+    if (!IsListEmpty(&Process->ActiveProcessLinks) &&
+        Process->ActiveProcessLinks.Flink != NULL)
+    {
+        RemoveEntryList(&Process->ActiveProcessLinks);
+        InitializeListHead(&Process->ActiveProcessLinks);
+    }
+    KsReleaseDispatcherLock(OldIrql);
+
+    /* 2. Bebaskan ObjectTable jika belum dihancurkan saat process exit */
+    if (Process->ObjectTable)
+    {
+        /* Sesuaikan dengan fungsi destroy handle table di ul/handle.c */
+        UlDestroyHandleTable(Process->ObjectTable);
+        Process->ObjectTable = NULL;
+    }
+
+    /* 3. Lepas referensi SectionObject & Token yang terlihat di dump GDB */
+    if (Process->SectionObject)
+    {
+        ObDereferenceObject(Process->SectionObject);
+        Process->SectionObject = NULL;
+    }
+
+    if (Process->Token)
+    {
+        ObDereferenceObject(Process->Token);
+        Process->Token = NULL;
+    }
+
+    /* 4. Bebaskan VAD & Page Directory (DirectoryTableBase) user-mode */
+    if (Process->AddressSpaceInitialized && !Process->VmDeleted)
+    {
+        MmDeleteProcessAddressSpace(Process);
+        Process->VmDeleted = TRUE;
+    }
 }
 
 /* EOF */
