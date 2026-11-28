@@ -25,68 +25,154 @@ KSPIN_LOCK   gWindowListLock;
 static BOOLEAN      gWndListsInitialized = FALSE;
 static ULONG        gWindowCascadeCount  = 0;
 HWND                    IptFocusWindow = NULL;
-static HWND gDragWindow  = NULL;
-static LONG gDragOffsetX = 0;
-static LONG gDragOffsetY = 0;
-static HWND  gHotCaptionWnd     = NULL;
-static ULONG gHotCaptionBtn     = CAPTION_BTN_NONE;
-static HWND  gPressedCaptionWnd = NULL;
-static ULONG gPressedCaptionBtn = CAPTION_BTN_NONE;
+HWND  gHotCaptionWnd     = NULL;
+ULONG gHotCaptionBtn     = CAPTION_BTN_NONE;
+HWND  gPressedCaptionWnd = NULL;
+ULONG gPressedCaptionBtn = CAPTION_BTN_NONE;
 
 /* PRIVATE *****************************************************************************/
 
-static VOID
-WndExecuteCaptionButton(
-    IN HWND  hWnd,
-    IN ULONG BtnId
+BOOLEAN
+WndIsTaskbarEligible(
+    IN PDESKTOP_OBJECT Desktop,
+    IN PWND_OBJECT     Wnd
 )
+/*++
+
+Routine Description:
+
+    This routine determines whether a window qualifies to be displayed as a
+    taskbar button on the specified desktop based on its visibility,
+    hierarchy, shell role, and extended window styles.
+
+Arguments:
+
+    Desktop - Supplies an optional pointer to the desktop object used to
+              exclude the taskbar and shell hook windows themselves.
+
+    Wnd - Supplies a pointer to the window object to evaluate.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE if the window is eligible to appear on the
+              taskbar; otherwise returns FALSE.
+
+--*/
 {
-    PWND_OBJECT Wnd = WndLookupHandle(hWnd);
     if (!Wnd)
+    {
+        return FALSE;
+    }
+
+    /* Harus top-level window yang visible */
+    if ((Wnd->Style & WS_CHILD) || !(Wnd->Style & WS_VISIBLE))
+    {
+        return FALSE;
+    }
+
+    /* Jangan masukkan taskbar/shell hook window itu sendiri */
+    if (Desktop)
+    {
+        if (Wnd->hWnd == Desktop->TaskmanWindow ||
+            Wnd->hWnd == Desktop->ShellHookWindow)
+        {
+            return FALSE;
+        }
+    }
+
+    /* WS_EX_APPWINDOW memaksa window masuk taskbar meski punya owner/tool style */
+    if (Wnd->ExStyle & WS_EX_APPWINDOW)
+    {
+        return TRUE;
+    }
+
+    /* Pada top-level window, hWndParent berperan sebagai owner window */
+    if ((Wnd->ExStyle & WS_EX_TOOLWINDOW) || (Wnd->hWndParent != NULL))
+    {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+VOID
+WndNotifyShellHook(
+    IN PDESKTOP_OBJECT Desktop,
+    IN WPARAM          EventCode,
+    IN HWND            TargetHwnd
+)
+/*++
+
+Routine Description:
+
+    This routine posts a shell hook notification message to the desktop's
+    registered shell hook window. If the registered shell hook window is no
+    longer valid, the registration is cleared automatically.
+
+Arguments:
+
+    Desktop - Supplies a pointer to the desktop object whose shell hook
+              window is to be notified.
+
+    EventCode - Supplies the shell hook event code passed as WPARAM.
+
+    TargetHwnd - Supplies the handle of the window associated with the event,
+                 passed as LPARAM.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    if (!Desktop)
     {
         return;
     }
 
-    ULONG Style = Wnd->Style;
-    WndDereference(Wnd);
-
-    switch (BtnId)
+    HWND HookHwnd = Desktop->ShellHookWindow;
+    if (HookHwnd == NULL)
     {
-        case CAPTION_BTN_MIN:
-            if (Style & WS_MINIMIZE)
-            {
-                MsgPostToWindow(hWnd, WM_SYSCOMMAND, SC_RESTORE, 0, FALSE);
-            }
-            else
-            {
-                MsgPostToWindow(hWnd, WM_SYSCOMMAND, SC_MINIMIZE, 0, FALSE);
-            }
-            break;
-
-        case CAPTION_BTN_MAX:
-            if (Style & WS_MAXIMIZE)
-            {
-                MsgPostToWindow(hWnd, WM_SYSCOMMAND, SC_RESTORE, 0, FALSE);
-            }
-            else
-            {
-                MsgPostToWindow(hWnd, WM_SYSCOMMAND, SC_MAXIMIZE, 0, FALSE);
-            }
-            break;
-
-        case CAPTION_BTN_CLOSE:
-            MsgPostToWindow(hWnd, WM_SYSCOMMAND, SC_CLOSE, 0, FALSE);
-            break;
-
-        default:
-            break;
+        return;
     }
+
+    /* Validasi aman di luar spinlock; auto-cleanup jika explorer.elf mati */
+    PWND_OBJECT HookWnd = WndLookupHandle(HookHwnd);
+    if (!HookWnd)
+    {
+        if (Desktop->ShellHookWindow == HookHwnd)
+        {
+            Desktop->ShellHookWindow = NULL;
+        }
+        return;
+    }
+    WndDereference(HookWnd);
+
+    MsgPostToWindow(HookHwnd, WM_SHELLHOOKMESSAGE, EventCode, (LPARAM)TargetHwnd, FALSE);
 }
 
 static VOID
 WndInvalidateWindowsInRect(
     IN CONST RECT *DirtyRect
 )
+/*++
+
+Routine Description:
+
+    This routine marks all effectively visible windows on the active desktop
+    whose screen bounds intersect the specified dirty rectangle as needing a
+    repaint, and notifies the message subsystem if any window was invalidated.
+
+Arguments:
+
+    DirtyRect - Supplies a pointer to the screen-space rectangle describing
+                the invalidated region.
+
+Return Value:
+
+    None.
+
+--*/
 {
     PLIST_ENTRY Entry;
     KIRQL OldIrql;
@@ -144,7 +230,7 @@ WndInvalidateWindowsInRect(
     }
 }
 
-static VOID
+VOID
 WndBlitMoveWindow(
     IN PVEAGDI_SURFACE Surface,
     IN LONG            OldX,
@@ -154,6 +240,40 @@ WndBlitMoveWindow(
     IN LONG            Width,
     IN LONG            Height
 )
+/*++
+
+Routine Description:
+
+    This routine copies a rectangular window region from an old position to a
+    new position within the same 32-bit-per-pixel surface, clipping both
+    source and destination against the surface bounds and safely handling
+    overlapping vertical moves.
+
+Arguments:
+
+    Surface - Supplies a pointer to the target GDI surface.
+
+    OldX - Supplies the original horizontal coordinate, in pixels, of the
+           window region.
+
+    OldY - Supplies the original vertical coordinate, in pixels, of the
+           window region.
+
+    NewX - Supplies the new horizontal coordinate, in pixels, of the window
+           region.
+
+    NewY - Supplies the new vertical coordinate, in pixels, of the window
+           region.
+
+    Width - Supplies the width, in pixels, of the region to move.
+
+    Height - Supplies the height, in pixels, of the region to move.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!Surface || !Surface->Scan0 || Width <= 0 || Height <= 0)
     {
@@ -214,6 +334,31 @@ WndFindNextTopLevelLocked(
     IN PDESKTOP_OBJECT Desktop,
     IN PWND_OBJECT     ExcludeTop
 )
+/*++
+
+Routine Description:
+
+    This routine searches the global window list in reverse Z-order (top to
+    bottom) for the highest-ordered visible top-level window on the specified
+    desktop, excluding a given window.
+
+    N.B. The global window list lock must be held by the caller.
+
+Arguments:
+
+    Desktop - Supplies an optional pointer to the desktop object used to
+              filter candidate windows. If NULL, windows on any desktop are
+              considered.
+
+    ExcludeTop - Supplies an optional pointer to a window object to skip
+                 during the search.
+
+Return Value:
+
+    PWND_OBJECT - Returns a pointer to the next highest visible top-level
+                  window, or NULL if no matching window is found.
+
+--*/
 {
     PLIST_ENTRY Entry;
 
@@ -247,6 +392,27 @@ static PWND_OBJECT
 WndFindVisibleAncestorLocked(
     IN PWND_OBJECT ChildWnd
 )
+/*++
+
+Routine Description:
+
+    This routine walks up the parent chain of a child window to locate the
+    nearest ancestor window that is effectively visible, capping traversal at
+    64 levels to prevent cycles.
+
+    N.B. The global window list lock must be held by the caller.
+
+Arguments:
+
+    ChildWnd - Supplies a pointer to the child window object whose visible
+               ancestor is to be found.
+
+Return Value:
+
+    PWND_OBJECT - Returns a pointer to the nearest effectively visible
+                  ancestor window, or NULL if none is found.
+
+--*/
 {
     PWND_OBJECT Cur = ChildWnd ? WndLookupHandleLocked(ChildWnd->hWndParent) : NULL;
     ULONG Depth = 0;
@@ -275,6 +441,31 @@ WndGetClientOriginLocked(
     OUT PLONG       OutX,
     OUT PLONG       OutY
 )
+/*++
+
+Routine Description:
+
+    This routine calculates the screen-space origin coordinates of the
+    specified window's client area, accounting for parent offsets on child
+    windows and frame/titlebar insets on framed top-level windows.
+
+    N.B. The global window list lock must be held by the caller.
+
+Arguments:
+
+    Wnd - Supplies a pointer to the target window object.
+
+    OutX - Receives the screen-space horizontal coordinate, in pixels, of the
+           client area origin.
+
+    OutY - Receives the screen-space vertical coordinate, in pixels, of the
+           client area origin.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!Wnd)
     {
@@ -300,6 +491,28 @@ WndIsDescendantLocked(
     IN PWND_OBJECT Ancestor,
     IN PWND_OBJECT Node
 )
+/*++
+
+Routine Description:
+
+    This routine determines whether a given window is a child descendant of
+    the specified ancestor window by walking up its parent chain, capped at
+    64 levels.
+
+    N.B. The global window list lock must be held by the caller.
+
+Arguments:
+
+    Ancestor - Supplies a pointer to the potential ancestor window object.
+
+    Node - Supplies a pointer to the window object to test.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE if Node is a descendant of Ancestor; otherwise
+              returns FALSE.
+
+--*/
 {
     PWND_OBJECT Cur = Node;
     ULONG Depth = 0;
@@ -326,6 +539,25 @@ VOID
 WndBringToFront(
     IN PWND_OBJECT TopWnd
 )
+/*++
+
+Routine Description:
+
+    This routine raises a top-level window and all of its child descendants to
+    the front of the global Z-order while preserving their relative ordering.
+    Non-topmost windows are placed immediately beneath the desktop's visible
+    taskbar window, if one is present.
+
+Arguments:
+
+    TopWnd - Supplies a pointer to the top-level window object to bring to the
+             front. Child windows are ignored.
+
+Return Value:
+
+    None.
+
+--*/
 {
     LIST_ENTRY GroupHead;
     PLIST_ENTRY Entry;
@@ -372,7 +604,7 @@ WndBringToFront(
                     for (GEntry = GroupHead.Flink; GEntry != &GroupHead; GEntry = GEntry->Flink)
                     {
                         PWND_OBJECT GWnd = CONTAINING_RECORD(GEntry, WND_OBJECT, GlobalListEntry);
-                        if (GWnd == (PWND_OBJECT)Cur->hWndParent &&
+                        if (GWnd->hWnd == Cur->hWndParent &&
                             GWnd->Magic == WND_OBJECT_MAGIC && GWnd->Used)
                         {
                             P = GWnd;
@@ -404,11 +636,25 @@ WndBringToFront(
         Entry = Next;
     }
 
-    /* 3. Masukkan kembali [TopWnd, Child1, Child2, ...] ke tail gWindowListHead */
+    /* 3. Tentukan titik sisip: window biasa ditaruh tepat di bawah TaskmanWindow */
+    PLIST_ENTRY InsertTarget = &gWindowListHead;
+    if (TopWnd->Desktop != NULL &&
+        TopWnd->Desktop->TaskmanWindow != NULL &&
+        TopWnd->hWnd != TopWnd->Desktop->TaskmanWindow &&
+        !(TopWnd->ExStyle & WS_EX_TOPMOST))
+    {
+        PWND_OBJECT TaskmanWnd = WndLookupHandleLocked(TopWnd->Desktop->TaskmanWindow);
+        if (TaskmanWnd != NULL && (TaskmanWnd->Style & WS_VISIBLE))
+        {
+            InsertTarget = &TaskmanWnd->GlobalListEntry;
+        }
+    }
+
+    /* 4. Masukkan kembali [TopWnd, Child1, Child2, ...] */
     while (!IsListEmpty(&GroupHead))
     {
         Entry = RemoveHeadList(&GroupHead);
-        InsertTailList(&gWindowListHead, Entry);
+        InsertTailList(InsertTarget, Entry);
     }
 
     KsReleaseSpinLock(&gWindowListLock, OldIrql);
@@ -471,6 +717,28 @@ WndFindClassByName(
     IN CONST CHAR *ClassName,
     IN PEPROCESS Process
 )
+/*++
+
+Routine Description:
+
+    This routine searches the global window class list for an active window
+    class matching the specified name that is either registered as a global
+    class (CS_GLOBALCLASS) or owned by the specified process.
+
+Arguments:
+
+    ClassName - Supplies a pointer to the null-terminated name of the window
+                class to locate.
+
+    Process - Supplies a pointer to the process object used to match
+              process-local window classes.
+
+Return Value:
+
+    PWND_CLASS_OBJECT - Returns a pointer to the matching window class object,
+                        or NULL if no matching class is found.
+
+--*/
 {
     PLIST_ENTRY Entry;
     KIRQL OldIrql;
@@ -501,6 +769,25 @@ VEAPI
 WndCleanupProcessClasses(
     IN PEPROCESS Process
 )
+/*++
+
+Routine Description:
+
+    This routine unlinks, invalidates, and frees all window class objects
+    owned by the specified process from the global window class list,
+    deferring pool deallocation until after the class list spinlock is
+    released.
+
+Arguments:
+
+    Process - Supplies a pointer to the terminating process whose registered
+              window classes are to be cleaned up.
+
+Return Value:
+
+    None.
+
+--*/
 {
     LIST_ENTRY VictimsHead;
     PLIST_ENTRY Entry;
@@ -547,6 +834,26 @@ VEAPI
 WndIsEffectivelyVisibleLocked(
     IN PWND_OBJECT Wnd
 )
+/*++
+
+Routine Description:
+
+    This routine determines whether the specified window and every ancestor
+    in its child-parent chain (up to 64 levels) are valid, active, and have
+    the WS_VISIBLE style set.
+
+    N.B. The global window list lock must be held by the caller.
+
+Arguments:
+
+    Wnd - Supplies a pointer to the window object to evaluate.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE if the window and all of its ancestors are
+              visible; otherwise returns FALSE.
+
+--*/
 {
     PWND_OBJECT Cur = Wnd;
     ULONG Depth = 0;
@@ -577,6 +884,24 @@ VEAPI
 WndIsEffectivelyVisible(
     IN PWND_OBJECT Wnd
 )
+/*++
+
+Routine Description:
+
+    This routine acquires the global window list spinlock and determines
+    whether the specified window is effectively visible within its parent
+    hierarchy.
+
+Arguments:
+
+    Wnd - Supplies a pointer to the window object to evaluate.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE if the window and all of its ancestors are
+              visible; otherwise returns FALSE.
+
+--*/
 {
     KIRQL OldIrql;
     BOOLEAN Visible;
@@ -597,6 +922,22 @@ VOID
 WndReference(
     IN PWND_OBJECT Wnd
 )
+/*++
+
+Routine Description:
+
+    This routine atomically increments the reference count of the specified
+    window object to prevent it from being freed while in use.
+
+Arguments:
+
+    Wnd - Supplies a pointer to the window object to reference.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (Wnd)
     {
@@ -608,6 +949,23 @@ VOID
 WndDereference(
     IN PWND_OBJECT Wnd
 )
+/*++
+
+Routine Description:
+
+    This routine atomically decrements the reference count of the specified
+    window object. When the reference count reaches zero, any allocated
+    shadow backup buffer and the window object itself are freed.
+
+Arguments:
+
+    Wnd - Supplies a pointer to the window object to dereference.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (Wnd && InterlockedDecrement((PLONG)&Wnd->RefCount) == 0)
     {
@@ -622,6 +980,23 @@ WndDereference(
 
 VOID
 WndEnsureListsInitialized(VOID)
+/*++
+
+Routine Description:
+
+    This routine lazily initializes the global window class list, the global
+    window list, and their corresponding spinlocks if they have not yet been
+    initialized.
+
+Arguments:
+
+    None.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!gWndListsInitialized)
     {
@@ -637,11 +1012,28 @@ ULONG
 WndGetDesktopBgColor(
     IN PDESKTOP_OBJECT Desktop
 )
+/*++
+
+Routine Description:
+
+    This routine retrieves the 32-bit ARGB background color configured for the
+    specified desktop, falling back to the default teal color (0xFF008080)
+    if no desktop is provided.
+
+Arguments:
+
+    Desktop - Supplies an optional pointer to the desktop object.
+
+Return Value:
+
+    ULONG - Returns the desktop's 32-bit ARGB background color, or 0xFF008080
+            if Desktop is NULL.
+
+--*/
 {
-    if (Desktop && Desktop->Name.Buffer &&
-        RtlRawStringEqual(Desktop->Name.Buffer, "Winlogon"))
+    if (Desktop != NULL)
     {
-        return 0xFF003366;
+        return Desktop->BackgroundColor;
     }
     return 0xFF008080;
 }
@@ -650,6 +1042,27 @@ PWND_OBJECT
 WndLookupHandleLocked(
     IN HWND hWnd
 )
+/*++
+
+Routine Description:
+
+    This routine validates a window handle and locates its corresponding
+    active window object in the global window list without incrementing its
+    reference count.
+
+    N.B. The global window list lock must be held by the caller.
+
+Arguments:
+
+    hWnd - Supplies the window handle to look up.
+
+Return Value:
+
+    PWND_OBJECT - Returns a pointer to the matching active window object, or
+                  NULL if the handle is invalid, in user-mode address space,
+                  or not found.
+
+--*/
 {
     PLIST_ENTRY Entry;
 
@@ -674,6 +1087,27 @@ PWND_OBJECT
 WndLookupHandle(
     IN HWND hWnd
 )
+/*++
+
+Routine Description:
+
+    This routine acquires the global window list spinlock, validates the
+    specified window handle, and returns a referenced pointer to the matching
+    active window object.
+
+    N.B. The caller is responsible for calling WndDereference on the returned
+         window object when finished.
+
+Arguments:
+
+    hWnd - Supplies the window handle to look up.
+
+Return Value:
+
+    PWND_OBJECT - Returns a referenced pointer to the matching active window
+                  object, or NULL if the handle is invalid or not found.
+
+--*/
 {
     PLIST_ENTRY Entry;
     KIRQL OldIrql;
@@ -709,6 +1143,32 @@ WndInvokeUserProc(
     IN WPARAM wParam,
     IN LPARAM lParam
 )
+/*++
+
+Routine Description:
+
+    This routine dispatches a window message to the window's user-mode window
+    procedure via a kernel-to-user callback. For WM_CREATE messages with a
+    NULL lParam, it marshals a CREATESTRUCTA payload along with the window
+    title and class name into the callback buffer using relative offsets.
+
+Arguments:
+
+    Wnd - Supplies a pointer to the target window object.
+
+    Msg - Supplies the window message identifier.
+
+    wParam - Supplies additional message-specific information.
+
+    lParam - Supplies additional message-specific information.
+
+Return Value:
+
+    LRESULT - Returns the result value returned by the user-mode window
+              procedure, or 0 if the window procedure is missing or the
+              callback fails.
+
+--*/
 {
     UCHAR Payload[sizeof(WNDPROC_CALLBACK_ARGS) + sizeof(CREATESTRUCTA) + 128];
     PWNDPROC_CALLBACK_ARGS Args = (PWNDPROC_CALLBACK_ARGS)Payload;
@@ -804,6 +1264,26 @@ VEAPI
 WndCleanupProcessWindows(
     IN PEPROCESS Process
 )
+/*++
+
+Routine Description:
+
+    This routine unlinks and invalidates all window objects owned by the
+    specified process from the global window list, detaches them from their
+    associated desktops, clears any dangling foreground, focus, capture, or
+    caption button references, and releases each window object's base
+    reference.
+
+Arguments:
+
+    Process - Supplies a pointer to the terminating process whose windows are
+              to be cleaned up.
+
+Return Value:
+
+    None.
+
+--*/
 {
     LIST_ENTRY VictimsHead;
     PLIST_ENTRY Entry;
@@ -869,8 +1349,6 @@ WndCleanupProcessWindows(
         {
             gCaptureWindow = NULL;
         }
-        if (gDragWindow == Wnd->hWnd) 
-            gDragWindow = NULL;
 
         if (gHotCaptionWnd == Wnd->hWnd) 
         { 
@@ -891,6 +1369,27 @@ VEAPI
 VeaUserRegisterClass(
     IN CONST PWNDCLASS UserWndClass
 )
+/*++
+
+Routine Description:
+
+    This routine validates and registers a new window class in the global
+    class list. When invoked from user mode, it safely probes and copies the
+    WNDCLASS structure and class name string, checks for duplicate class
+    names within the global or current process scope, and inserts the new
+    class object under the global class list spinlock.
+
+Arguments:
+
+    UserWndClass - Supplies a pointer to a WNDCLASS structure describing the
+                   window class to register.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE if the class was successfully registered;
+              otherwise returns FALSE.
+
+--*/
 {
     WNDCLASS LocalClass;
     CHAR LocalClassName[64];
@@ -1001,6 +1500,27 @@ VeaUserCreateWindow(
     IN PCHAR WindowName,
     IN ULONG Style
 )
+/*++
+
+Routine Description:
+
+    This routine creates a window with default position, dimensions, and zero
+    extended style by delegating to VeaUserCreateWindowEx.
+
+Arguments:
+
+    ClassName - Supplies the name of the registered window class.
+
+    WindowName - Supplies the optional title text for the window.
+
+    Style - Supplies the window style flags.
+
+Return Value:
+
+    HWND - Returns the handle to the newly created window, or NULL on
+           failure.
+
+--*/
 {
     return VeaUserCreateWindowEx(
         0,
@@ -1023,6 +1543,27 @@ VEAPI
 VeaUserDispatchMessage(
     IN CONST PMESSAGE_QUEUE UserMsg
 )
+/*++
+
+Routine Description:
+
+    This routine dispatches a retrieved message to the appropriate user-mode
+    window procedure or timer callback. When called from user mode, it safely
+    copies the message structure, handles WM_TIMER messages with an explicit
+    timer procedure in lParam, and otherwise invokes the target window's
+    procedure.
+
+Arguments:
+
+    UserMsg - Supplies a pointer to a MESSAGE_QUEUE structure containing the
+              message to dispatch.
+
+Return Value:
+
+    LRESULT - Returns the value returned by the window or timer procedure, or
+              0 if the message is invalid or the target window is not found.
+
+--*/
 {
     MESSAGE_QUEUE LocalMsg;
     PWND_OBJECT Wnd;
@@ -1056,12 +1597,47 @@ VeaUserDispatchMessage(
         RtlCopyMemory(&LocalMsg, UserMsg, sizeof(MESSAGE_QUEUE));
     }
 
-    if (!LocalMsg.hwnd)
+    if (LocalMsg.hwnd != NULL)
     {
-        return 0;
+        Wnd = WndLookupHandle(LocalMsg.hwnd);
+        if (!Wnd)
+        {
+            return 0;
+        }
+    }
+    else
+    {
+        Wnd = NULL;
     }
 
-    Wnd = WndLookupHandle(LocalMsg.hwnd);
+    if (LocalMsg.message == WM_TIMER && LocalMsg.lParam != 0)
+    {
+        WNDPROC_CALLBACK_ARGS CbArgs;
+        PVOID CallbackResult = NULL;
+        ULONG ResultLength = 0;
+
+        RtlZeroMemory(&CbArgs, sizeof(CbArgs));
+        CbArgs.lpfnWndProc = (PVOID)(ULONG_PTR)LocalMsg.lParam;
+        CbArgs.hWnd        = LocalMsg.hwnd;
+        CbArgs.Msg         = WM_TIMER;
+        CbArgs.wParam      = LocalMsg.wParam;
+        CbArgs.lParam      = (LPARAM)LocalMsg.time;
+
+        KsUserModeCallback(
+            USER_CALLBACK_WNDPROC,
+            &CbArgs,
+            sizeof(CbArgs),
+            &CallbackResult,
+            &ResultLength
+        );
+
+        if (Wnd)
+        {
+            WndDereference(Wnd);
+        }
+        return (LRESULT)(ULONG_PTR)CallbackResult;
+    }
+
     if (!Wnd)
     {
         return 0;
@@ -1088,6 +1664,52 @@ VeaUserCreateWindowEx(
     IN HINSTANCE hInstance,
     IN PVOID     lpParam
 )
+/*++
+
+Routine Description:
+
+    This routine allocates, initializes, and registers a new window object
+    with the specified extended style, class, geometry, and parent. It links
+    the window into the global and target desktop window lists, updates
+    foreground and input focus for top-level windows, dispatches WM_NCCREATE
+    and WM_CREATE to the user-mode window procedure, and notifies the shell
+    hook if the window is taskbar-eligible. If creation callbacks fail, the
+    window is destroyed.
+
+Arguments:
+
+    ExStyle - Supplies the extended window style flags.
+
+    ClassName - Supplies the name of the registered window class.
+
+    WindowName - Supplies the optional title text for the window.
+
+    Style - Supplies the standard window style flags.
+
+    X - Supplies the initial horizontal position, or CW_USEDEFAULT.
+
+    Y - Supplies the initial vertical position, or CW_USEDEFAULT.
+
+    Width - Supplies the initial window width, or CW_USEDEFAULT.
+
+    Height - Supplies the initial window height, or CW_USEDEFAULT.
+
+    hWndParent - Supplies the handle to the parent window (required if
+                 WS_CHILD is set).
+
+    hMenu - Supplies the handle to the menu or child-window identifier.
+
+    hInstance - Supplies the handle to the module instance associated with
+                the window.
+
+    lpParam - Supplies an optional creation parameter passed in CREATESTRUCTA.
+
+Return Value:
+
+    HWND - Returns the handle to the newly created window, or NULL if
+           validation, allocation, or creation callbacks fail.
+
+--*/
 {
     CHAR LocalClass[64];
     CHAR LocalTitle[64];
@@ -1249,6 +1871,12 @@ VeaUserCreateWindowEx(
     /* Tembak callback WM_CREATE pertama kali ke Ring 3 */
     CreatedHwnd = Wnd->hWnd;
 
+    if (!WndInvokeUserProc(Wnd, WM_NCCREATE, 0, 0))
+    {
+        VeaUserDestroyWindow(CreatedHwnd);
+        return NULL;
+    }
+
     LRESULT Result = WndInvokeUserProc(Wnd, WM_CREATE, 0, 0);
 
     if (Result == (LRESULT)-1)
@@ -1262,8 +1890,14 @@ VeaUserCreateWindowEx(
     {
         return NULL;
     }
-    WndDereference(AliveWnd);
 
+    if (WndIsTaskbarEligible(AliveWnd->Desktop, AliveWnd))
+    {
+        WndNotifyShellHook(AliveWnd->Desktop, HSHELL_WINDOWCREATED, CreatedHwnd);
+        WndNotifyShellHook(AliveWnd->Desktop, HSHELL_WINDOWACTIVATED, CreatedHwnd);
+    }
+
+    WndDereference(AliveWnd);
     return CreatedHwnd;
 }
 
@@ -1275,6 +1909,31 @@ VeaUserSendMessage(
     IN WPARAM wParam,
     IN LPARAM lParam
 )
+/*++
+
+Routine Description:
+
+    This routine synchronously sends a message to the specified window. If the
+    calling thread owns the window, the user-mode window procedure is invoked
+    directly; otherwise, the message is queued to the owning thread's sent
+    message list via MsgSendMessageToThread.
+
+Arguments:
+
+    hWnd - Supplies the handle to the target window.
+
+    Msg - Supplies the window message identifier.
+
+    wParam - Supplies additional message-specific information.
+
+    lParam - Supplies additional message-specific information.
+
+Return Value:
+
+    LRESULT - Returns the result of the message processing, or 0 if the
+              window handle, window procedure, or owning thread is invalid.
+
+--*/
 {
     PWND_OBJECT Wnd = WndLookupHandle(hWnd);
     if (!Wnd)
@@ -1308,6 +1967,24 @@ VEAPI
 WndInvalidateChildWindows(
     IN HWND hWndParent
 )
+/*++
+
+Routine Description:
+
+    This routine scans the global window list under lock and marks all
+    effectively visible descendant child windows of the specified parent
+    window (up to 64 levels deep) as needing a repaint.
+
+Arguments:
+
+    hWndParent - Supplies the handle to the ancestor window whose visible
+                 descendants should be invalidated.
+
+Return Value:
+
+    None.
+
+--*/
 {
     PLIST_ENTRY Entry;
     KIRQL OldIrql;
@@ -1345,6 +2022,23 @@ WndInvalidateChildWindows(
 VOID
 VEAPI
 UserInvalidateAllWindows(VOID)
+/*++
+
+Routine Description:
+
+    This routine marks all effectively visible windows on the active desktop
+    as needing a repaint and triggers a paint notification if at least one
+    window was invalidated.
+
+Arguments:
+
+    None.
+
+Return Value:
+
+    None.
+
+--*/
 {
     PLIST_ENTRY Entry;
     KIRQL OldIrql;
@@ -1378,6 +2072,27 @@ VEAPI
 VeaUserSetFocus(
     IN HWND hWnd
 )
+/*++
+
+Routine Description:
+
+    This routine sets keyboard input focus to the specified window (which
+    must belong to the calling process, or NULL to clear focus), updates the
+    active desktop's focus window and global input focus handle, and
+    synchronously dispatches WM_KILLFOCUS and WM_SETFOCUS messages if the
+    focus changed.
+
+Arguments:
+
+    hWnd - Supplies the handle to the window that will receive keyboard
+           focus, or NULL to remove focus.
+
+Return Value:
+
+    HWND - Returns the handle to the window that previously had keyboard
+           focus, or NULL if no window had focus or validation failed.
+
+--*/
 {
     PWND_OBJECT NewWnd = NULL;
     PWND_OBJECT OldWnd = NULL;
@@ -1451,17 +2166,34 @@ VeaUserShowWindow(
     IN HWND hWnd,
     IN INT  nCmdShow
 )
+/*++
+
+Routine Description:
+
+    This routine changes the visibility and display state (hide, maximize,
+    minimize, restore, or show) of the specified window. It updates window
+    style flags, saved normal geometry, desktop foreground and input focus,
+    shell hook notifications, shadow restoration, and repaint invalidation
+    as appropriate for the requested command.
+
+Arguments:
+
+    hWnd - Supplies the handle to the target window.
+
+    nCmdShow - Supplies the display command (such as SW_HIDE, SW_MAXIMIZE,
+               SW_MINIMIZE, SW_RESTORE, or SW_SHOWNORMAL).
+
+Return Value:
+
+    BOOLEAN - Returns TRUE if the window was previously visible; otherwise
+              returns FALSE.
+
+--*/
 {
     PWND_OBJECT Wnd = WndLookupHandle(hWnd);
     KIRQL ListIrql, DeskIrql;
     if (!Wnd)
     {
-        return FALSE;
-    }
-
-    if (Wnd->OwnerProcess != (PEPROCESS)PtGetCurrentProcess())
-    {
-        WndDereference(Wnd);
         return FALSE;
     }
 
@@ -1474,16 +2206,13 @@ VeaUserShowWindow(
     {
         if (WasVisible)
         {
-            PDESKTOP_OBJECT Desktop = Wnd->Desktop;
-            PWND_OBJECT NextTop     = NULL;
-            PWND_OBJECT FallbackAnc = NULL;
+            PDESKTOP_OBJECT Desktop    = Wnd->Desktop;
+            PWND_OBJECT NextTop        = NULL;
+            PWND_OBJECT FallbackAnc    = NULL;
+            BOOLEAN WasTaskbarEligible = WndIsTaskbarEligible(Desktop, Wnd);
+            BOOLEAN WasFg              = FALSE;
+            HWND NextActiveTaskHwnd    = NULL;
 
-            if (gDragWindow == hWnd)
-            {
-                gDragWindow  = NULL;
-                gDragOffsetX = 0;
-                gDragOffsetY = 0;
-            }
             if (gCaptureWindow == hWnd)
             {
                 gCaptureWindow = NULL;
@@ -1530,7 +2259,7 @@ VeaUserShowWindow(
 
                 if (!IsChild)
                 {
-                    BOOLEAN WasFg = (PrevFg == Wnd);
+                    WasFg = (PrevFg == Wnd);
                     if (WasFg)
                     {
                         Desktop->ForegroundWindow = NextTop;
@@ -1580,6 +2309,10 @@ VeaUserShowWindow(
             if (NextTop != NULL)
             {
                 NextTop->NeedsPaint = TRUE;
+                if (WndIsTaskbarEligible(Desktop, NextTop))
+                {
+                    NextActiveTaskHwnd = NextTop->hWnd;
+                }
             }
             KsReleaseSpinLock(&gWindowListLock, ListIrql);
 
@@ -1592,9 +2325,17 @@ VeaUserShowWindow(
                 MsgPostToWindow(NewFocusHwnd, WM_SETFOCUS, (WPARAM)OldFocusHwnd, 0, FALSE);
             }
 
+            if (WasTaskbarEligible)
+            {
+                WndNotifyShellHook(Desktop, HSHELL_WINDOWDESTROYED, Wnd->hWnd);
+            }
+            if (!IsChild && WasFg)
+            {
+                WndNotifyShellHook(Desktop, HSHELL_WINDOWACTIVATED, NextActiveTaskHwnd);
+            }
+
             if (!IsChild && (GpActiveDesktop == NULL || Wnd->Desktop == GpActiveDesktop))
             {
-                /* Pulihkan area shadow di bawah window sebelum badan window dihapus */
                 WndRestoreWindowBottomShadow(Wnd, TRUE);
 
                 EngHidePointer();
@@ -1617,6 +2358,34 @@ VeaUserShowWindow(
         if (ScrW == 0) ScrW = 800;
         if (ScrH == 0) ScrH = 600;
 
+        LONG  WorkX = 0;
+        LONG  WorkY = 0;
+        ULONG WorkW = ScrW;
+        ULONG WorkH = ScrH;
+
+        if (Wnd->Desktop != NULL &&
+            Wnd->Desktop->TaskmanWindow != NULL &&
+            Wnd->hWnd != Wnd->Desktop->TaskmanWindow)
+        {
+            PWND_OBJECT TaskmanWnd = WndLookupHandle(Wnd->Desktop->TaskmanWindow);
+            if (TaskmanWnd != NULL)
+            {
+                if (TaskmanWnd->Style & WS_VISIBLE)
+                {
+                    if (TaskmanWnd->Y > 0 && (ULONG)TaskmanWnd->Y < ScrH)
+                    {
+                        WorkH = (ULONG)TaskmanWnd->Y;
+                    }
+                    else if (TaskmanWnd->Y == 0 && TaskmanWnd->Height < ScrH)
+                    {
+                        WorkY = (LONG)TaskmanWnd->Height;
+                        WorkH = ScrH - TaskmanWnd->Height;
+                    }
+                }
+                WndDereference(TaskmanWnd);
+            }
+        }
+
         if (GpActiveDesktop == NULL || Wnd->Desktop == GpActiveDesktop)
         {
             WndRestoreWindowBottomShadow(Wnd, TRUE);
@@ -1631,19 +2400,41 @@ VeaUserShowWindow(
             Wnd->NormalHeight = Wnd->Height;
         }
         Wnd->Style = (Wnd->Style & ~WS_MINIMIZE) | WS_MAXIMIZE | WS_VISIBLE;
-        Wnd->X     = 0;
-        Wnd->Y     = 0;
-        Wnd->Width = ScrW;
-        Wnd->Height = ScrH;
+        Wnd->X          = WorkX;
+        Wnd->Y          = WorkY;
+        Wnd->Width      = WorkW;
+        Wnd->Height     = WorkH;
         Wnd->NeedsPaint = TRUE;
         KsReleaseSpinLock(&gWindowListLock, ListIrql);
 
-        WndBringToFront(Wnd);
+        if (!WasVisible && WndIsTaskbarEligible(Wnd->Desktop, Wnd))
+        {
+            WndNotifyShellHook(Wnd->Desktop, HSHELL_WINDOWCREATED, Wnd->hWnd);
+        }
+
+        VeaUserSetForegroundWindow(Wnd->hWnd);
         WndInvalidateChildWindows(Wnd->hWnd);
         MsgNotifyPaintAll();
     }
     else if (!IsChild && (nCmdShow == SW_MINIMIZE || nCmdShow == SW_SHOWMINIMIZED))
     {
+        PDESKTOP_OBJECT Desktop = Wnd->Desktop;
+        BOOLEAN HasTaskbar      = FALSE;
+
+        if (Desktop && Desktop->TaskmanWindow != NULL)
+        {
+            PWND_OBJECT Taskman = WndLookupHandle(Desktop->TaskmanWindow);
+            if (Taskman != NULL)
+            {
+                HasTaskbar = TRUE;
+                WndDereference(Taskman);
+            }
+            else
+            {
+                Desktop->TaskmanWindow = NULL;
+            }
+        }
+
         ULONG ScrH = GpPrimaryDisplay.PrimarySurface.Height;
         if (ScrH == 0) ScrH = 600;
 
@@ -1652,10 +2443,14 @@ VeaUserShowWindow(
         ULONG OldW = Wnd->Width;
         ULONG OldH = Wnd->Height;
 
-        if (GpActiveDesktop == NULL || Wnd->Desktop == GpActiveDesktop)
+        if (GpActiveDesktop == NULL || Desktop == GpActiveDesktop)
         {
             WndRestoreWindowBottomShadow(Wnd, TRUE);
         }
+
+        PWND_OBJECT NextTop     = NULL;
+        BOOLEAN WasFg           = FALSE;
+        HWND NextActiveTaskHwnd = NULL;
 
         KsAcquireSpinLock(&gWindowListLock, &ListIrql);
         if (!(Wnd->Style & (WS_MAXIMIZE | WS_MINIMIZE)))
@@ -1665,20 +2460,101 @@ VeaUserShowWindow(
             Wnd->NormalWidth  = Wnd->Width;
             Wnd->NormalHeight = Wnd->Height;
         }
-        Wnd->Style      = (Wnd->Style & ~WS_MAXIMIZE) | WS_MINIMIZE | WS_VISIBLE;
-        Wnd->Width      = 190;
-        Wnd->Height     = WND_TITLEBAR_HEIGHT + WND_BORDER_WIDTH;
-        Wnd->X          = 8;
-        Wnd->Y          = (LONG)ScrH - (LONG)Wnd->Height - 8;
-        Wnd->NeedsPaint = TRUE;
+
+        Wnd->Style = (Wnd->Style & ~WS_MAXIMIZE) | WS_MINIMIZE | WS_VISIBLE;
+
+        if (HasTaskbar)
+        {
+            /* Mode Taskbar Aktif: lempar ke luar layar & jangan render */
+            Wnd->X          = -32000;
+            Wnd->Y          = -32000;
+            Wnd->NeedsPaint = FALSE;
+        }
+        else
+        {
+            /* Mode Fallback (explorer mati): parkir kotak kecil di pojok kiri bawah */
+            Wnd->Width      = 190;
+            Wnd->Height     = WND_TITLEBAR_HEIGHT + WND_BORDER_WIDTH;
+            Wnd->X          = 8;
+            Wnd->Y          = (LONG)ScrH - (LONG)Wnd->Height - 8;
+            Wnd->NeedsPaint = TRUE;
+        }
+
+        NextTop = WndFindNextTopLevelLocked(Desktop, Wnd);
+
+        if (Desktop != NULL)
+        {
+            KsAcquireSpinLock(&Desktop->Lock, &DeskIrql);
+
+            PWND_OBJECT PrevFg    = (PWND_OBJECT)Desktop->ForegroundWindow;
+            PWND_OBJECT PrevFocus = (PWND_OBJECT)Desktop->FocusWindow;
+            BOOLEAN HadFocus = (PrevFocus != NULL &&
+                                PrevFocus->Magic == WND_OBJECT_MAGIC &&
+                                PrevFocus->Used &&
+                                (PrevFocus == Wnd || WndIsDescendantLocked(Wnd, PrevFocus)));
+
+            WasFg = (PrevFg == Wnd);
+            if (WasFg)
+            {
+                Desktop->ForegroundWindow = NextTop;
+            }
+
+            if (HadFocus || WasFg)
+            {
+                if (HadFocus)
+                {
+                    OldFocusHwnd = PrevFocus->hWnd;
+                }
+                Desktop->FocusWindow = NextTop;
+                NewFocusHwnd = NextTop ? NextTop->hWnd : NULL;
+
+                if (GpActiveDesktop == NULL || Desktop == GpActiveDesktop)
+                {
+                    IptFocusWindow = NewFocusHwnd;
+                }
+            }
+
+            KsReleaseSpinLock(&Desktop->Lock, DeskIrql);
+        }
+
+        if (NextTop != NULL)
+        {
+            NextTop->NeedsPaint = TRUE;
+            if (WndIsTaskbarEligible(Desktop, NextTop))
+            {
+                NextActiveTaskHwnd = NextTop->hWnd;
+            }
+        }
         KsReleaseSpinLock(&gWindowListLock, ListIrql);
 
-        if (GpActiveDesktop == NULL || Wnd->Desktop == GpActiveDesktop)
+        if (OldFocusHwnd != NULL && OldFocusHwnd != NewFocusHwnd)
+        {
+            MsgPostToWindow(OldFocusHwnd, WM_KILLFOCUS, (WPARAM)NewFocusHwnd, 0, FALSE);
+        }
+        if (NewFocusHwnd != NULL && NewFocusHwnd != OldFocusHwnd)
+        {
+            MsgPostToWindow(NewFocusHwnd, WM_SETFOCUS, (WPARAM)OldFocusHwnd, 0, FALSE);
+        }
+
+        if (!WasVisible && WndIsTaskbarEligible(Desktop, Wnd))
+        {
+            WndNotifyShellHook(Desktop, HSHELL_WINDOWCREATED, Wnd->hWnd);
+        }
+        if (WasFg)
+        {
+            WndNotifyShellHook(Desktop, HSHELL_WINDOWACTIVATED, NextActiveTaskHwnd);
+        }
+
+        if (GpActiveDesktop == NULL || Desktop == GpActiveDesktop)
         {
             EngHidePointer();
             EngFillDesktopRect(OldX, OldY, OldW, OldH,
                                WndGetDesktopBgColor(GpActiveDesktop));
             EngShowPointer();
+            if (NextTop != NULL)
+            {
+                WndInvalidateChildWindows(NextTop->hWnd);
+            }
             UserInvalidateAllWindows();
         }
     }
@@ -1707,7 +2583,13 @@ VeaUserShowWindow(
         Wnd->NeedsPaint = TRUE;
         KsReleaseSpinLock(&gWindowListLock, ListIrql);
 
-        WndBringToFront(Wnd);
+        if (!WasVisible && WndIsTaskbarEligible(Wnd->Desktop, Wnd))
+        {
+            WndNotifyShellHook(Wnd->Desktop, HSHELL_WINDOWCREATED, Wnd->hWnd);
+        }
+
+        /* Angkat ke depan & jadikan foreground window aktif di taskbar */
+        VeaUserSetForegroundWindow(Wnd->hWnd);
 
         if (WasMaxOrMin && (GpActiveDesktop == NULL || Wnd->Desktop == GpActiveDesktop))
         {
@@ -1737,48 +2619,12 @@ VeaUserShowWindow(
 
         if (!IsChild)
         {
-            WndBringToFront(Wnd);
-
-            if (Wnd->Desktop != NULL)
+            if (!WasVisible && WndIsTaskbarEligible(Wnd->Desktop, Wnd))
             {
-                KsAcquireSpinLock(&Wnd->Desktop->Lock, &DeskIrql);
-                PWND_OBJECT PrevFg    = (PWND_OBJECT)Wnd->Desktop->ForegroundWindow;
-                PWND_OBJECT PrevFocus = (PWND_OBJECT)Wnd->Desktop->FocusWindow;
-
-                if (PrevFocus && PrevFocus != Wnd &&
-                    PrevFocus->Magic == WND_OBJECT_MAGIC && PrevFocus->Used)
-                {
-                    OldFocusHwnd = PrevFocus->hWnd;
-                }
-                if (PrevFg && PrevFg != Wnd &&
-                    PrevFg->Magic == WND_OBJECT_MAGIC && PrevFg->Used)
-                {
-                    PrevFg->NeedsPaint = TRUE;
-                }
-
-                Wnd->Desktop->ForegroundWindow = Wnd;
-                Wnd->Desktop->FocusWindow      = Wnd;
-                KsReleaseSpinLock(&Wnd->Desktop->Lock, DeskIrql);
-            }
-            else if (IptFocusWindow != Wnd->hWnd)
-            {
-                OldFocusHwnd = IptFocusWindow;
+                WndNotifyShellHook(Wnd->Desktop, HSHELL_WINDOWCREATED, Wnd->hWnd);
             }
 
-            if (GpActiveDesktop == NULL || Wnd->Desktop == GpActiveDesktop)
-            {
-                NewFocusHwnd   = Wnd->hWnd;
-                IptFocusWindow = NewFocusHwnd;
-            }
-
-            if (OldFocusHwnd != NULL && OldFocusHwnd != NewFocusHwnd)
-            {
-                MsgPostToWindow(OldFocusHwnd, WM_KILLFOCUS, (WPARAM)NewFocusHwnd, 0, FALSE);
-            }
-            if (NewFocusHwnd != NULL && NewFocusHwnd != OldFocusHwnd)
-            {
-                MsgPostToWindow(NewFocusHwnd, WM_SETFOCUS, (WPARAM)OldFocusHwnd, 0, FALSE);
-            }
+            VeaUserSetForegroundWindow(Wnd->hWnd);
         }
 
         if (EffVisible)
@@ -1798,6 +2644,36 @@ WndDestroyWindowInternal(
     IN BOOLEAN ForceSystem,
     IN ULONG   Depth
 )
+/*++
+
+Routine Description:
+
+    This routine recursively destroys all child windows of the specified
+    window (up to a recursion depth of 32), cleans up associated timers,
+    dispatches WM_DESTROY and WM_NCDESTROY to the user-mode window
+    procedure, unlinks the window from the global and desktop lists,
+    transfers foreground and input focus to the next eligible window,
+    notifies shell hooks, releases references, and erases and invalidates
+    affected screen regions.
+
+Arguments:
+
+    hWnd - Supplies the handle to the window to destroy.
+
+    ForceSystem - Supplies TRUE to bypass process ownership checks for
+                  internal or recursive destruction; FALSE for direct
+                  user-mode requests.
+
+    Depth - Supplies the current recursion depth for child window
+            destruction.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE if the window was destroyed (or already gone);
+              otherwise returns FALSE if the handle is invalid, ownership
+              validation fails, or the recursion limit is exceeded.
+
+--*/
 {
     PWND_OBJECT Wnd;
     KIRQL OldIrql;
@@ -1856,6 +2732,12 @@ WndDestroyWindowInternal(
         }
     }
 
+    //
+    // Send WM_TIMER End
+    //
+
+    TimerCleanupWindowTimers(hWnd);
+
     /* 2. Kirim WM_DESTROY lalu WM_NCDESTROY ke WndProc di Ring 3 */
     Wnd = WndLookupHandle(hWnd);
     if (!Wnd)
@@ -1898,6 +2780,9 @@ WndDestroyWindowInternal(
     PWND_OBJECT NextTop     = NULL;
     PWND_OBJECT FallbackAnc = NULL;
     HWND NewFocusHwnd       = NULL;
+    BOOLEAN WasFg              = FALSE;
+    BOOLEAN WasTaskbarEligible = WndIsTaskbarEligible(Desktop, Wnd);
+    HWND NextActiveTaskHwnd    = NULL;
 
     KsAcquireSpinLock(&gWindowListLock, &OldIrql);
 
@@ -1920,6 +2805,15 @@ WndDestroyWindowInternal(
         KIRQL DeskIrql;
         KsAcquireSpinLock(&Desktop->Lock, &DeskIrql);
 
+        if (Desktop->TaskmanWindow == hWnd)
+        {
+            Desktop->TaskmanWindow = NULL;
+        }
+        if (Desktop->ShellHookWindow == hWnd)
+        {
+            Desktop->ShellHookWindow = NULL;
+        }
+
         if (Wnd->DesktopListEntry.Flink && Wnd->DesktopListEntry.Blink)
         {
             RemoveEntryList(&Wnd->DesktopListEntry);
@@ -1927,7 +2821,7 @@ WndDestroyWindowInternal(
             Wnd->DesktopListEntry.Blink = NULL;
         }
 
-        BOOLEAN WasFg    = (Desktop->ForegroundWindow == Wnd);
+        WasFg            = (Desktop->ForegroundWindow == Wnd);
         BOOLEAN HadFocus = (Desktop->FocusWindow == Wnd);
 
         if (WasFg)
@@ -1967,9 +2861,22 @@ WndDestroyWindowInternal(
     if (NextTop != NULL)
     {
         NextTop->NeedsPaint = TRUE;
+        if (WndIsTaskbarEligible(Desktop, NextTop))
+        {
+            NextActiveTaskHwnd = NextTop->hWnd;
+        }
     }
 
     KsReleaseSpinLock(&gWindowListLock, OldIrql);
+
+    if (WasTaskbarEligible)
+    {
+        WndNotifyShellHook(Desktop, HSHELL_WINDOWDESTROYED, hWnd);
+    }
+    if (!IsChild && WasFg)
+    {
+        WndNotifyShellHook(Desktop, HSHELL_WINDOWACTIVATED, NextActiveTaskHwnd);
+    }
 
     if (NewFocusHwnd != NULL)
     {
@@ -1979,12 +2886,6 @@ WndDestroyWindowInternal(
     if (gCaptureWindow == hWnd)
     {
         gCaptureWindow = NULL;
-    }
-    if (gDragWindow == hWnd)
-    {
-        gDragWindow  = NULL;
-        gDragOffsetX = 0;
-        gDragOffsetY = 0;
     }
 
     /* Lepas referensi lookup terakhir + referensi awal saat CreateWindow */
@@ -2015,6 +2916,24 @@ VEAPI
 VeaUserDestroyWindow(
     IN HWND hWnd
 )
+/*++
+
+Routine Description:
+
+    This routine destroys the specified window and its child hierarchy by
+    delegating to WndDestroyWindowInternal with standard user-mode ownership
+    validation enabled.
+
+Arguments:
+
+    hWnd - Supplies the handle to the window to destroy.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE if the window was successfully destroyed;
+              otherwise returns FALSE.
+
+--*/
 {
     return WndDestroyWindowInternal(hWnd, FALSE, 0);
 }
@@ -2024,6 +2943,25 @@ VEAPI
 WndAdoptOrphanWindowsToDesktop(
     IN PDESKTOP_OBJECT Desktop
 )
+/*++
+
+Routine Description:
+
+    This routine scans the global window list for active windows that are not
+    yet associated with any desktop, attaches them to the specified desktop's
+    window list, and updates the desktop's foreground and focus window
+    pointers for adopted top-level windows.
+
+Arguments:
+
+    Desktop - Supplies a pointer to the target desktop object that will adopt
+              orphaned windows.
+
+Return Value:
+
+    None.
+
+--*/
 {
     PLIST_ENTRY Entry;
     KIRQL OldIrql;
@@ -2067,6 +3005,36 @@ WndHitTestPoint(
     OUT PLONG OutClientX,
     OUT PLONG OutClientY
 )
+/*++
+
+Routine Description:
+
+    This routine performs a reverse Z-order hit test across active,
+    effectively visible windows on the active desktop to find the topmost
+    window containing the specified screen coordinates. Child window bounds
+    are clipped against their ancestor chain (up to 64 levels).
+
+    N.B. The caller is responsible for calling WndDereference on the returned
+         window object when finished.
+
+Arguments:
+
+    ScreenX - Supplies the horizontal screen coordinate to test.
+
+    ScreenY - Supplies the vertical screen coordinate to test.
+
+    OutClientX - Receives the horizontal coordinate relative to the hit
+                 window's client origin if a match is found.
+
+    OutClientY - Receives the vertical coordinate relative to the hit
+                 window's client origin if a match is found.
+
+Return Value:
+
+    PWND_OBJECT - Returns a referenced pointer to the topmost window at the
+                  specified point, or NULL if no window was hit.
+
+--*/
 {
     PLIST_ENTRY Entry;
     KIRQL OldIrql;
@@ -2156,6 +3124,27 @@ PWND_OBJECT
 WndGetTopLevelAncestor(
     IN PWND_OBJECT Wnd
 )
+/*++
+
+Routine Description:
+
+    This routine walks up the child-parent chain of the specified window (up
+    to 64 levels) under the global window list lock to locate its top-level
+    ancestor window.
+
+    N.B. The caller is responsible for calling WndDereference on the returned
+         window object when finished.
+
+Arguments:
+
+    Wnd - Supplies a pointer to the starting window object.
+
+Return Value:
+
+    PWND_OBJECT - Returns a referenced pointer to the top-level ancestor
+                  window, or NULL if the window or ancestor is invalid.
+
+--*/
 {
     PWND_OBJECT Cur = Wnd;
     KIRQL OldIrql;
@@ -2196,6 +3185,27 @@ VEAPI
 UserProcessMousePacket(
     IN PMOUSE_INPUT_DATA Mou
 )
+/*++
+
+Routine Description:
+
+    This routine processes a raw mouse input packet by updating the global
+    cursor coordinates, primary display cursor position, mouse button state,
+    and async key state. It resolves the target window (via active mouse
+    capture or hit-testing), handles Z-order activation, foreground/focus
+    transitions, shell hook and WM_NCACTIVATE notifications on left-button
+    clicks, and posts the corresponding mouse messages with screen
+    coordinates to the target window.
+
+Arguments:
+
+    Mou - Supplies a pointer to the MOUSE_INPUT_DATA packet to process.
+
+Return Value:
+
+    None.
+
+--*/
 {
     LONG ScreenW;
     LONG ScreenH;
@@ -2220,17 +3230,18 @@ UserProcessMousePacket(
     else if (Mou->LastX != 0 || Mou->LastY != 0)
     {
         gCursorX += Mou->LastX;
-        gCursorY += Mou->LastY; /* Jika driver PS/2 kamu masih inverted Y, ganti jadi -= */
+        gCursorY += Mou->LastY;
         Moved = TRUE;
     }
 
-    /* Jepit koordinat agar kursor tidak keluar batas layar */
     if (gCursorX < 0) gCursorX = 0;
     if (gCursorY < 0) gCursorY = 0;
     if (gCursorX >= ScreenW) gCursorX = ScreenW - 1;
     if (gCursorY >= ScreenH) gCursorY = ScreenH - 1;
 
-    /* Update status tombol global walaupun klik jatuh di luar window */
+    GpPrimaryDisplay.CursorX = gCursorX;
+    GpPrimaryDisplay.CursorY = gCursorY;
+
     if (Mou->ButtonFlags & MOUSE_LEFT_BUTTON_DOWN)
     {
         gMouseButtonState |= MK_LBUTTON;
@@ -2262,252 +3273,13 @@ UserProcessMousePacket(
         IptAsyncKeyState[VK_MBUTTON] = 0x00;
     }
 
-    /* 0. Proses tombol titlebar yang sedang ditekan (Pressed state) */
-    if (gPressedCaptionWnd != NULL)
-    {
-        PWND_OBJECT PressedWnd = WndLookupHandle(gPressedCaptionWnd);
-        if (!PressedWnd || !(PressedWnd->Style & WS_VISIBLE) ||
-            (GpActiveDesktop != NULL && PressedWnd->Desktop != GpActiveDesktop))
-        {
-            if (PressedWnd) WndDereference(PressedWnd);
-            gPressedCaptionWnd = NULL;
-            gPressedCaptionBtn = CAPTION_BTN_NONE;
-            return;
-        }
-
-        ULONG CurHit = WndHitTestCaptionButton(PressedWnd, gCursorX, gCursorY);
-        ULONG NewHot = (CurHit == gPressedCaptionBtn) ? gPressedCaptionBtn : CAPTION_BTN_NONE;
-
-        if (Mou->ButtonFlags & MOUSE_LEFT_BUTTON_UP)
-        {
-            HWND  ExecHwnd = gPressedCaptionWnd;
-            ULONG ExecBtn  = gPressedCaptionBtn;
-
-            gPressedCaptionWnd = NULL;
-            gPressedCaptionBtn = CAPTION_BTN_NONE;
-            gHotCaptionWnd     = (NewHot != CAPTION_BTN_NONE) ? ExecHwnd : NULL;
-            gHotCaptionBtn     = NewHot;
-
-            WndRedrawCaptionButtons(PressedWnd);
-            WndDereference(PressedWnd);
-
-            if (NewHot == ExecBtn)
-            {
-                WndExecuteCaptionButton(ExecHwnd, ExecBtn);
-            }
-            return;
-        }
-
-        if (Moved && (gHotCaptionWnd != PressedWnd->hWnd || gHotCaptionBtn != NewHot))
-        {
-            gHotCaptionWnd = (NewHot != CAPTION_BTN_NONE) ? PressedWnd->hWnd : NULL;
-            gHotCaptionBtn = NewHot;
-            WndRedrawCaptionButtons(PressedWnd);
-        }
-
-        WndDereference(PressedWnd);
-        return;
-    }
-
-    /* 1. Lepas drag titlebar saat tombol kiri dilepas */
-    if ((Mou->ButtonFlags & MOUSE_LEFT_BUTTON_UP) && gDragWindow != NULL)
-    {
-        gDragWindow  = NULL;
-        gDragOffsetX = 0;
-        gDragOffsetY = 0;
-        return;
-    }
-
-    /* 2. Proses pergeseran window jika sedang drag titlebar */
-    if (Moved && (gMouseButtonState & MK_LBUTTON) && gDragWindow != NULL)
-    {
-        PWND_OBJECT DragWnd = WndLookupHandle(gDragWindow);
-        if (!DragWnd || !(DragWnd->Style & WS_VISIBLE) ||
-            (GpActiveDesktop != NULL && DragWnd->Desktop != GpActiveDesktop))
-        {
-            if (DragWnd) WndDereference(DragWnd);
-            gDragWindow = NULL;
-            return;
-        }
-
-        LONG NewX = gCursorX - gDragOffsetX;
-        LONG NewY = gCursorY - gDragOffsetY;
-
-        /* Jaga agar titlebar tetap terjangkau di layar */
-        if (NewY < 0) NewY = 0;
-        if (NewY > ScreenH - WND_TITLEBAR_HEIGHT) NewY = ScreenH - WND_TITLEBAR_HEIGHT;
-        if (NewX + (LONG)DragWnd->Width < 32) NewX = 32 - (LONG)DragWnd->Width;
-        if (NewX > ScreenW - 32) NewX = ScreenW - 32;
-
-        if (NewX != DragWnd->X || NewY != DragWnd->Y)
-        {
-            KIRQL ListIrql;
-            BOOLEAN HasWindowAbove = FALSE;
-
-            WndRestoreWindowBottomShadow(DragWnd, TRUE);
-            KsAcquireSpinLock(&gWindowListLock, &ListIrql);
-            LONG OldX  = DragWnd->X;
-            LONG OldY  = DragWnd->Y;
-            LONG W     = (LONG)DragWnd->Width;
-            LONG H     = (LONG)DragWnd->Height;
-            DragWnd->X = NewX;
-            DragWnd->Y = NewY;
-
-            PLIST_ENTRY Entry;
-            for (Entry = DragWnd->GlobalListEntry.Flink; Entry != &gWindowListHead; Entry = Entry->Flink)
-            {
-                PWND_OBJECT Cand = CONTAINING_RECORD(Entry, WND_OBJECT, GlobalListEntry);
-                if (Cand->Magic == WND_OBJECT_MAGIC && Cand->Used &&
-                    !(Cand->Style & WS_CHILD) && (Cand->Style & WS_VISIBLE) &&
-                    Cand->Desktop == DragWnd->Desktop)
-                {
-                    HasWindowAbove = TRUE;
-                    break;
-                }
-            }
-            KsReleaseSpinLock(&gWindowListLock, ListIrql);
-
-            PVEAGDI_SURFACE Primary = EngGetTargetSurface();
-            ULONG BgColor = WndGetDesktopBgColor(GpActiveDesktop);
-            BOOLEAN WasClipped = (OldX < 0 || OldY < 0 || OldX + W > ScreenW || OldY + H > ScreenH);
-
-            RECT Strips[2];
-            ULONG StripCount = 0;
-
-            if (NewY > OldY)
-            {
-                LONG StripB = (OldY + H < NewY) ? (OldY + H) : NewY;
-                if (StripB > OldY)
-                {
-                    Strips[StripCount].left   = OldX;
-                    Strips[StripCount].top    = OldY;
-                    Strips[StripCount].right  = OldX + W;
-                    Strips[StripCount].bottom = StripB;
-                    StripCount++;
-                }
-            }
-            else if (NewY < OldY)
-            {
-                LONG StripT = (OldY > NewY + H) ? OldY : (NewY + H);
-                if (OldY + H > StripT)
-                {
-                    Strips[StripCount].left   = OldX;
-                    Strips[StripCount].top    = StripT;
-                    Strips[StripCount].right  = OldX + W;
-                    Strips[StripCount].bottom = OldY + H;
-                    StripCount++;
-                }
-            }
-
-            LONG MidT = (OldY > NewY) ? OldY : NewY;
-            LONG MidB = (OldY + H < NewY + H) ? (OldY + H) : (NewY + H);
-            if (MidB > MidT)
-            {
-                if (NewX > OldX)
-                {
-                    LONG StripR = (OldX + W < NewX) ? (OldX + W) : NewX;
-                    if (StripR > OldX)
-                    {
-                        Strips[StripCount].left   = OldX;
-                        Strips[StripCount].top    = MidT;
-                        Strips[StripCount].right  = StripR;
-                        Strips[StripCount].bottom = MidB;
-                        StripCount++;
-                    }
-                }
-                else if (NewX < OldX)
-                {
-                    LONG StripL = (OldX > NewX + W) ? OldX : (NewX + W);
-                    if (OldX + W > StripL)
-                    {
-                        Strips[StripCount].left   = StripL;
-                        Strips[StripCount].top    = MidT;
-                        Strips[StripCount].right  = OldX + W;
-                        Strips[StripCount].bottom = MidB;
-                        StripCount++;
-                    }
-                }
-            }
-
-            EngHidePointer();
-
-            if (!HasWindowAbove && Primary != NULL)
-            {
-                WndBlitMoveWindow(Primary, OldX, OldY, NewX, NewY, W, H);
-            }
-
-            for (ULONG s = 0; s < StripCount; s++)
-            {
-                LONG Sl = (Strips[s].left < 0) ? 0 : Strips[s].left;
-                LONG St = (Strips[s].top < 0)  ? 0 : Strips[s].top;
-                LONG Sr = (Strips[s].right > ScreenW)  ? ScreenW : Strips[s].right;
-                LONG Sb = (Strips[s].bottom > ScreenH) ? ScreenH : Strips[s].bottom;
-
-                if (Sl < Sr && St < Sb)
-                {
-                    if (Primary != NULL)
-                    {
-                        EngFillRect32(Primary, Sl, St, (ULONG)(Sr - Sl), (ULONG)(Sb - St), BgColor);
-                    }
-                    EngPresentRect(Sl, St, (ULONG)(Sr - Sl), (ULONG)(Sb - St));
-                    WndInvalidateWindowsInRect(&Strips[s]);
-                }
-            }
-
-            if (!HasWindowAbove)
-            {
-                LONG Wl = (NewX < 0) ? 0 : NewX;
-                LONG Wt = (NewY < 0) ? 0 : NewY;
-                LONG Wr = (NewX + W > ScreenW) ? ScreenW : (NewX + W);
-                LONG Wb = (NewY + H > ScreenH) ? ScreenH : (NewY + H);
-
-                if (Wl < Wr && Wt < Wb)
-                {
-                    EngPresentRect(Wl, Wt, (ULONG)(Wr - Wl), (ULONG)(Wb - Wt));
-                }
-            }
-
-            EngShowPointer();
-            WndDrawWindowBottomShadow(DragWnd, TRUE);
-
-            /* Repaint DragWnd hanya jika ada bagian yang sebelumnya terpotong tepi layar / tertutup window lain */
-            if (HasWindowAbove || WasClipped)
-            {
-                DragWnd->NeedsPaint = TRUE;
-                WndInvalidateChildWindows(DragWnd->hWnd);
-                MsgNotifyPaint(DragWnd->OwnerThread);
-            }
-        }
-
-        WndDereference(DragWnd);
-        return;
-    }
-
-    /* 3. Cari target window (hanya sekali lookup supaya tidak leak reference) */
-    LONG ClientX = 0;
-    LONG ClientY = 0;
+    /* Cari target window: pakai gCaptureWindow jika aktif, selain itu HitTestPoint */
+    LONG DummyX = 0, DummyY = 0;
     PWND_OBJECT Target = gCaptureWindow ? WndLookupHandle(gCaptureWindow) : NULL;
-
-    if (Target)
-    {
-        if (Target->Style & WS_CHILD)
-        {
-            LONG OrigX, OrigY;
-            WndGetClientOriginOnScreen(Target, &OrigX, &OrigY);
-            ClientX = gCursorX - OrigX;
-            ClientY = gCursorY - OrigY;
-        }
-        else
-        {
-            BOOLEAN Framed = !((Target->Style & WS_POPUP) && ((Target->Style & WS_CAPTION) != WS_CAPTION));
-            ClientX = gCursorX - (Framed ? (Target->X + WND_BORDER_WIDTH)    : Target->X);
-            ClientY = gCursorY - (Framed ? (Target->Y + WND_TITLEBAR_HEIGHT) : Target->Y);
-        }
-    }
-    else
+    if (!Target)
     {
         gCaptureWindow = NULL;
-        Target = WndHitTestPoint(gCursorX, gCursorY, &ClientX, &ClientY);
+        Target = WndHitTestPoint(gCursorX, gCursorY, &DummyX, &DummyY);
     }
 
     if (!Target)
@@ -2515,130 +3287,16 @@ UserProcessMousePacket(
         return;
     }
 
-    /* 4. Cek klik pada Titlebar untuk memulai drag window */
-    if ((Mou->ButtonFlags & MOUSE_LEFT_BUTTON_DOWN) &&
-        !(Target->Style & WS_CHILD) &&
-        !((Target->Style & WS_POPUP) && ((Target->Style & WS_CAPTION) != WS_CAPTION)))
+    /* Aktivasi Z-order, fokus, dan WM_NCACTIVATE saat klik kiri (jika tidak sedang capture) */
+    if ((Mou->ButtonFlags & MOUSE_LEFT_BUTTON_DOWN) && gCaptureWindow == NULL)
     {
-        if (gCursorY >= Target->Y + WND_BORDER_WIDTH &&
-            gCursorY <  Target->Y + WND_TITLEBAR_HEIGHT)
-        {
-            WndBringToFront(Target);
-
-            PDESKTOP_OBJECT Desktop = GpActiveDesktop;
-            if (Desktop != NULL)
-            {
-                KIRQL OldIrql;
-                PWND_OBJECT PrevFg    = (PWND_OBJECT)Desktop->ForegroundWindow;
-                PWND_OBJECT PrevFocus = (PWND_OBJECT)Desktop->FocusWindow;
-
-                BOOLEAN KeepChildFocus = FALSE;
-                if (PrevFocus && PrevFocus->Magic == WND_OBJECT_MAGIC && PrevFocus->Used)
-                {
-                    KIRQL ListIrql;
-                    KsAcquireSpinLock(&gWindowListLock, &ListIrql);
-                    KeepChildFocus = WndIsDescendantLocked(Target, PrevFocus);
-                    KsReleaseSpinLock(&gWindowListLock, ListIrql);
-                }
-
-                KsAcquireSpinLock(&Desktop->Lock, &OldIrql);
-                Desktop->ForegroundWindow = Target;
-                if (!KeepChildFocus)
-                {
-                    Desktop->FocusWindow = Target;
-                    IptFocusWindow = Target->hWnd;
-                }
-                KsReleaseSpinLock(&Desktop->Lock, OldIrql);
-
-                if (PrevFg && PrevFg != Target && PrevFg->Magic == WND_OBJECT_MAGIC && PrevFg->Used)
-                {
-                    PrevFg->NeedsPaint = TRUE;
-                }
-            }
-            else
-            {
-                IptFocusWindow = Target->hWnd;
-            }
-
-            ULONG HitBtn = WndHitTestCaptionButton(Target, gCursorX, gCursorY);
-            if (HitBtn != CAPTION_BTN_NONE)
-            {
-                gPressedCaptionWnd = Target->hWnd;
-                gPressedCaptionBtn = HitBtn;
-                gHotCaptionWnd     = Target->hWnd;
-                gHotCaptionBtn     = HitBtn;
-
-                Target->NeedsPaint = TRUE;
-                WndInvalidateChildWindows(Target->hWnd);
-                MsgNotifyPaintAll();
-                WndRedrawCaptionButtons(Target);
-
-                WndDereference(Target);
-                return;
-            }
-
-            /* Jangan drag window jika sedang fullscreen maximized */
-            if (!(Target->Style & WS_MAXIMIZE))
-            {
-                gDragWindow  = Target->hWnd;
-                gDragOffsetX = gCursorX - Target->X;
-                gDragOffsetY = gCursorY - Target->Y;
-            }
-
-            Target->NeedsPaint = TRUE;
-            WndInvalidateChildWindows(Target->hWnd);
-            MsgNotifyPaintAll();
-
-            WndDereference(Target);
-            return;
-        }
-    }
-
-    /* Update efek hover saat kursor bergerak di atas 3 tombol */
-    if (Moved && gDragWindow == NULL)
-    {
-        ULONG NewHotBtn  = WndHitTestCaptionButton(Target, gCursorX, gCursorY);
-        HWND  NewHotHwnd = (NewHotBtn != CAPTION_BTN_NONE) ? Target->hWnd : NULL;
-
-        if (NewHotHwnd != gHotCaptionWnd || NewHotBtn != gHotCaptionBtn)
-        {
-            HWND OldHotHwnd = gHotCaptionWnd;
-            gHotCaptionWnd  = NewHotHwnd;
-            gHotCaptionBtn  = NewHotBtn;
-
-            if (OldHotHwnd != NULL && OldHotHwnd != NewHotHwnd)
-            {
-                PWND_OBJECT OldHotWnd = WndLookupHandle(OldHotHwnd);
-                if (OldHotWnd)
-                {
-                    WndRedrawCaptionButtons(OldHotWnd);
-                    WndDereference(OldHotWnd);
-                }
-            }
-
-            if (NewHotHwnd != NULL)
-            {
-                WndRedrawCaptionButtons(Target);
-            }
-        }
-    }
-
-    /* Pack koordinat signed 16-bit (penting saat ClientX/Y negatif ketika drag keluar window) */
-    LONG_PTR ClientLParam = ((LONG_PTR)(SHORT)ClientY << 16) | ((ULONG_PTR)(USHORT)ClientX);
-
-    /* 5. Kirim pesan gerakan mouse */
-    if (Moved)
-    {
-        MsgPostMouseMessage(Target->hWnd, WM_MOUSEMOVE, gMouseButtonState, ClientLParam);
-    }
-
-    /* 6. Kirim pesan klik & pindahkan fokus + Z-order ke window yang diklik */
-    if (Mou->ButtonFlags & MOUSE_LEFT_BUTTON_DOWN)
-    {
-        PWND_OBJECT TopWnd    = WndGetTopLevelAncestor(Target);
-        PWND_OBJECT ActiveTop = TopWnd ? TopWnd : Target;
-        HWND OldFocusHwnd     = NULL;
-        HWND NewFocusHwnd     = NULL;
+        PWND_OBJECT TopWnd      = WndGetTopLevelAncestor(Target);
+        PWND_OBJECT ActiveTop   = TopWnd ? TopWnd : Target;
+        HWND OldFocusHwnd       = NULL;
+        HWND NewFocusHwnd       = NULL;
+        HWND PrevFgHwnd         = NULL;
+        HWND ActiveTaskHwnd     = NULL;
+        BOOLEAN FgChanged       = FALSE;
 
         WndBringToFront(ActiveTop);
 
@@ -2647,14 +3305,15 @@ UserProcessMousePacket(
         PDESKTOP_OBJECT Desktop = GpActiveDesktop;
         if (Desktop != NULL)
         {
-            KIRQL OldIrql;
+            KIRQL ListIrql, DeskIrql;
+            KsAcquireSpinLock(&gWindowListLock, &ListIrql);
+            KsAcquireSpinLock(&Desktop->Lock, &DeskIrql);
+
             PWND_OBJECT PrevFg    = (PWND_OBJECT)Desktop->ForegroundWindow;
             PWND_OBJECT PrevFocus = (PWND_OBJECT)Desktop->FocusWindow;
 
             if (!ShouldChangeFocus)
             {
-                KIRQL ListIrql;
-                KsAcquireSpinLock(&gWindowListLock, &ListIrql);
                 if (PrevFocus == NULL ||
                     PrevFocus->Magic != WND_OBJECT_MAGIC ||
                     !PrevFocus->Used ||
@@ -2662,10 +3321,20 @@ UserProcessMousePacket(
                 {
                     ShouldChangeFocus = TRUE;
                 }
-                KsReleaseSpinLock(&gWindowListLock, ListIrql);
             }
 
-            KsAcquireSpinLock(&Desktop->Lock, &OldIrql);
+            if (PrevFg != ActiveTop)
+            {
+                FgChanged = TRUE;
+                if (PrevFg != NULL && PrevFg->Magic == WND_OBJECT_MAGIC && PrevFg->Used)
+                {
+                    PrevFgHwnd = PrevFg->hWnd;
+                    PrevFg->NeedsPaint = TRUE;
+                }
+                ActiveTop->NeedsPaint = TRUE;
+                ActiveTaskHwnd = WndIsTaskbarEligible(Desktop, ActiveTop) ? ActiveTop->hWnd : NULL;
+            }
+
             Desktop->ForegroundWindow = ActiveTop;
 
             if (ShouldChangeFocus)
@@ -2678,23 +3347,30 @@ UserProcessMousePacket(
                 Desktop->FocusWindow = Target;
                 NewFocusHwnd = Target->hWnd;
             }
-            KsReleaseSpinLock(&Desktop->Lock, OldIrql);
 
-            if (PrevFg && PrevFg != ActiveTop && PrevFg->Magic == WND_OBJECT_MAGIC && PrevFg->Used)
+            KsReleaseSpinLock(&Desktop->Lock, DeskIrql);
+            KsReleaseSpinLock(&gWindowListLock, ListIrql);
+
+            if (FgChanged)
             {
-                PrevFg->NeedsPaint = TRUE;
-                ActiveTop->NeedsPaint = TRUE;
                 WndInvalidateChildWindows(ActiveTop->hWnd);
                 MsgNotifyPaintAll();
+                WndNotifyShellHook(Desktop, HSHELL_WINDOWACTIVATED, ActiveTaskHwnd);
             }
         }
-        else if (ShouldChangeFocus)
+        else if (ShouldChangeFocus && IptFocusWindow != Target->hWnd)
         {
-            if (IptFocusWindow != Target->hWnd)
+            OldFocusHwnd = IptFocusWindow;
+            NewFocusHwnd = Target->hWnd;
+        }
+
+        if (FgChanged)
+        {
+            if (PrevFgHwnd != NULL && PrevFgHwnd != ActiveTop->hWnd)
             {
-                OldFocusHwnd = IptFocusWindow;
-                NewFocusHwnd = Target->hWnd;
+                MsgPostToWindow(PrevFgHwnd, WM_NCACTIVATE, FALSE, 0, FALSE);
             }
+            MsgPostToWindow(ActiveTop->hWnd, WM_NCACTIVATE, TRUE, 0, FALSE);
         }
 
         if (NewFocusHwnd != NULL)
@@ -2711,39 +3387,42 @@ UserProcessMousePacket(
         {
             WndDereference(TopWnd);
         }
-
-        MsgPostMouseMessage(Target->hWnd, WM_LBUTTONDOWN, gMouseButtonState, ClientLParam);
     }
 
+    /* Kirim koordinat LAYAR di lParam; msg.c yang akan menerjemahkan via WM_NCHITTEST */
+    LONG_PTR ScreenLParam = ((LONG_PTR)(SHORT)gCursorY << 16) | ((ULONG_PTR)(USHORT)gCursorX);
+
+    if (Moved)
+    {
+        MsgPostMouseMessage(Target->hWnd, WM_MOUSEMOVE, gMouseButtonState, ScreenLParam);
+    }
+    if (Mou->ButtonFlags & MOUSE_LEFT_BUTTON_DOWN)
+    {
+        MsgPostMouseMessage(Target->hWnd, WM_LBUTTONDOWN, gMouseButtonState, ScreenLParam);
+    }
     if (Mou->ButtonFlags & MOUSE_LEFT_BUTTON_UP)
     {
-        MsgPostMouseMessage(Target->hWnd, WM_LBUTTONUP, gMouseButtonState, ClientLParam);
+        MsgPostMouseMessage(Target->hWnd, WM_LBUTTONUP, gMouseButtonState, ScreenLParam);
     }
-
     if (Mou->ButtonFlags & MOUSE_RIGHT_BUTTON_DOWN)
     {
-        MsgPostMouseMessage(Target->hWnd, WM_RBUTTONDOWN, gMouseButtonState, ClientLParam);
+        MsgPostMouseMessage(Target->hWnd, WM_RBUTTONDOWN, gMouseButtonState, ScreenLParam);
     }
-
     if (Mou->ButtonFlags & MOUSE_RIGHT_BUTTON_UP)
     {
-        MsgPostMouseMessage(Target->hWnd, WM_RBUTTONUP, gMouseButtonState, ClientLParam);
+        MsgPostMouseMessage(Target->hWnd, WM_RBUTTONUP, gMouseButtonState, ScreenLParam);
     }
-
     if (Mou->ButtonFlags & MOUSE_MIDDLE_BUTTON_DOWN)
     {
-        MsgPostMouseMessage(Target->hWnd, WM_MBUTTONDOWN, gMouseButtonState, ClientLParam);
+        MsgPostMouseMessage(Target->hWnd, WM_MBUTTONDOWN, gMouseButtonState, ScreenLParam);
     }
-
     if (Mou->ButtonFlags & MOUSE_MIDDLE_BUTTON_UP)
     {
-        MsgPostMouseMessage(Target->hWnd, WM_MBUTTONUP, gMouseButtonState, ClientLParam);
+        MsgPostMouseMessage(Target->hWnd, WM_MBUTTONUP, gMouseButtonState, ScreenLParam);
     }
-
     if (Mou->ButtonFlags & MOUSE_WHEEL)
     {
-        ULONG_PTR WheelWParam  = ((ULONG_PTR)(USHORT)Mou->ButtonData << 16) | gMouseButtonState;
-        LONG_PTR  ScreenLParam = ((LONG_PTR)(SHORT)gCursorY << 16) | ((ULONG_PTR)(USHORT)gCursorX);
+        ULONG_PTR WheelWParam = ((ULONG_PTR)(USHORT)Mou->ButtonData << 16) | gMouseButtonState;
         MsgPostMouseMessage(Target->hWnd, WM_MOUSEWHEEL, WheelWParam, ScreenLParam);
     }
 
@@ -2761,6 +3440,51 @@ VeaUserBuildHwndList(
     OUT HWND   *phwndFirst,
     OUT PULONG  pcHwndNeeded
 )
+/*++
+
+Routine Description:
+
+    This routine enumerates active windows in top-to-bottom Z-order and fills
+    the caller's buffer with matching window handles. Depending on the
+    parameters, it enumerates either top-level windows belonging to a target
+    desktop or child/descendant windows under a specified parent, optionally
+    filtered by owner thread ID. User-mode output pointers are validated and
+    copied inside a structured exception block.
+
+Arguments:
+
+    hDesktop - Optionally supplies a handle to the desktop whose top-level
+               windows are enumerated when bChildren is FALSE. If NULL, the
+               current thread's desktop or the active desktop is used.
+
+    hwndParent - Optionally supplies the parent window handle when bChildren
+                 is TRUE; all matching descendant windows are included.
+
+    bChildren - Supplies TRUE to enumerate child windows, or FALSE to
+                enumerate top-level windows.
+
+    dwThreadId - Optionally supplies a thread ID to filter windows by owner
+                 thread, or 0 to match all threads.
+
+    cHwndMax - Supplies the maximum number of HWND entries that phwndFirst
+               can hold (capped at MAX_ENUM_WINDOWS).
+
+    phwndFirst - Receives the enumerated window handles. Must be non-NULL if
+                 cHwndMax is greater than 0.
+
+    pcHwndNeeded - Receives the total number of matching window handles
+                   found, even if cHwndMax is too small.
+
+Return Value:
+
+    VEASTATUS - Returns STATUS_SUCCESS if all matching handles fit in the
+                buffer, STATUS_BUFFER_TOO_SMALL if more handles were found
+                than cHwndMax, STATUS_INVALID_PARAMETER for invalid
+                arguments, STATUS_INVALID_HANDLE if hDesktop is invalid,
+                STATUS_INSUFFICIENT_RESOURCES on pool allocation failure, or
+                STATUS_ACCESS_VIOLATION if user-mode buffer access fails.
+
+--*/
 {
     BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
     PDESKTOP_OBJECT TargetDesktop = NULL;
@@ -2933,6 +3657,30 @@ VeaUserGetWindow(
     IN HWND hWnd,
     IN UINT uCmd
 )
+/*++
+
+Routine Description:
+
+    This routine retrieves a handle to a window that has the specified
+    Z-order or ownership relationship (GW_OWNER, GW_CHILD, GW_HWNDFIRST,
+    GW_HWNDLAST, GW_HWNDNEXT, or GW_HWNDPREV) to the given window. Sibling
+    and top-level searches are scoped to the same desktop and parent level
+    under the global window list lock.
+
+Arguments:
+
+    hWnd - Supplies the handle to the reference window.
+
+    uCmd - Supplies the relationship command (GW_*) specifying which related
+           window to retrieve.
+
+Return Value:
+
+    HWND - Returns the handle to the matching related window, or NULL if
+           hWnd is invalid, uCmd is unsupported, or no matching window
+           exists.
+
+--*/
 {
     KIRQL OldIrql;
     PLIST_ENTRY Entry;
@@ -3046,6 +3794,39 @@ VeaUserFindWindowEx(
     IN CONST CHAR *lpszClass,
     IN CONST CHAR *lpszWindow
 )
+/*++
+
+Routine Description:
+
+    This routine searches windows in top-to-bottom Z-order for the first
+    window matching the optional class name and window title strings. If
+    hwndParent is specified, only direct child windows of that parent are
+    searched; otherwise, top-level windows on the current thread's or active
+    desktop are searched. Searching resumes after hwndChildAfter when
+    provided.
+
+Arguments:
+
+    hwndParent - Optionally supplies the parent window whose direct children
+                 are searched, or NULL to search top-level windows.
+
+    hwndChildAfter - Optionally supplies a child/sibling window handle after
+                     which the search begins, or NULL to start from the top
+                     of the Z-order.
+
+    lpszClass - Optionally supplies a null-terminated class name string to
+                match (up to 63 characters), or NULL/empty to match any
+                class.
+
+    lpszWindow - Optionally supplies a null-terminated window title string to
+                 match (up to 63 characters), or NULL to match any title.
+
+Return Value:
+
+    HWND - Returns the handle to the first matching window, or NULL if no
+           match is found or string copy from user mode fails.
+
+--*/
 {
     CHAR LocalClass[64];
     CHAR LocalTitle[64];
@@ -3116,6 +3897,23 @@ VeaUserFindWindowEx(
 HWND
 VEAPI
 VeaUserGetForegroundWindow(VOID)
+/*++
+
+Routine Description:
+
+    This routine retrieves the handle to the current foreground window on
+    the active desktop.
+
+Arguments:
+
+    None.
+
+Return Value:
+
+    HWND - Returns the handle to the active desktop's foreground window, or
+           NULL if there is no active desktop or no valid foreground window.
+
+--*/
 {
     PDESKTOP_OBJECT Desk = GpActiveDesktop;
     HWND FgHwnd = NULL;
@@ -3142,6 +3940,29 @@ VEAPI
 VeaUserSetForegroundWindow(
     IN HWND hWnd
 )
+/*++
+
+Routine Description:
+
+    This routine resolves the top-level ancestor of the specified window,
+    verifies that it resides on the active desktop, brings it to the front
+    of the Z-order, and sets it as both the desktop's foreground and focus
+    window. It marks the previous and new foreground windows for repainting,
+    invalidates child windows, posts WM_KILLFOCUS/WM_SETFOCUS transitions,
+    and notifies the shell hook of window activation.
+
+Arguments:
+
+    hWnd - Supplies the handle to the window (or child window) to bring to
+           the foreground.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE if the window was successfully set as the
+              foreground window; otherwise returns FALSE if the handle is
+              invalid or the window is not on the active desktop.
+
+--*/
 {
     PWND_OBJECT Wnd = WndLookupHandle(hWnd);
     if (!Wnd)
@@ -3199,6 +4020,14 @@ VeaUserSetForegroundWindow(
         MsgPostToWindow(NewFocusHwnd, WM_SETFOCUS, (WPARAM)OldFocusHwnd, 0, FALSE);
     }
 
+    if (TargetTop->Desktop != NULL)
+    {
+        HWND ActiveTaskHwnd = WndIsTaskbarEligible(TargetTop->Desktop, TargetTop)
+                              ? TargetTop->hWnd
+                              : NULL;
+        WndNotifyShellHook(TargetTop->Desktop, HSHELL_WINDOWACTIVATED, ActiveTaskHwnd);
+    }
+
     if (TopWnd) WndDereference(TopWnd);
     WndDereference(Wnd);
     return TRUE;
@@ -3211,6 +4040,31 @@ VeaUserGetWindowText(
     OUT PCHAR lpString,
     IN  INT   nMaxCount
 )
+/*++
+
+Routine Description:
+
+    This routine copies the title text of the specified window into the
+    caller's buffer, truncating to fit within nMaxCount bytes (including the
+    null terminator) and the internal 64-byte title limit. User-mode output
+    buffers are validated and written inside a structured exception block.
+
+Arguments:
+
+    hWnd - Supplies the handle to the window whose title text is retrieved.
+
+    lpString - Receives the null-terminated window title string.
+
+    nMaxCount - Supplies the maximum number of characters to copy into
+                lpString, including the terminating null character.
+
+Return Value:
+
+    INT - Returns the length, in characters, of the copied string excluding
+          the null terminator, or 0 if the window is invalid, parameters are
+          invalid, or copying to user mode fails.
+
+--*/
 {
     CHAR LocalBuf[64];
     BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
@@ -3274,19 +4128,44 @@ VeaUserSetWindowText(
     IN HWND        hWnd,
     IN CONST CHAR *lpString
 )
+/*++
+
+Routine Description:
+
+    This routine updates the title text of the specified window (up to 63
+    characters, or empty if lpString is NULL). If the title changes and the
+    window is effectively visible, it schedules a repaint for child or
+    borderless windows or redraws the title bar for framed windows. For
+    taskbar-eligible windows, it also notifies the shell hook with
+    HSHELL_REDRAW.
+
+Arguments:
+
+    hWnd - Supplies the handle to the window whose title text is updated.
+
+    lpString - Optionally supplies a null-terminated string for the new
+               window title, or NULL to clear the title.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE if the window handle is valid and the operation
+              succeeded; otherwise returns FALSE if copying the string from
+              user mode fails or hWnd is invalid.
+
+--*/
 {
     CHAR LocalBuf[64];
     BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
     KIRQL OldIrql;
 
+    RtlZeroMemory(LocalBuf, sizeof(LocalBuf));
+
     if (lpString != NULL)
     {
         if (!WndCopyStringSafe(LocalBuf, (PCHAR)lpString, sizeof(LocalBuf), IsUser))
+        {
             return FALSE;
-    }
-    else
-    {
-        LocalBuf[0] = '\0';
+        }
     }
 
     PWND_OBJECT Wnd = WndLookupHandle(hWnd);
@@ -3295,20 +4174,45 @@ VeaUserSetWindowText(
         return FALSE;
     }
 
+    BOOLEAN Changed = FALSE;
+    BOOLEAN ShouldRedraw = FALSE;
+    BOOLEAN IsChildOrBorderless = ((Wnd->Style & WS_CHILD) != 0) ||
+                                  ((Wnd->Style & WS_POPUP) && ((Wnd->Style & WS_CAPTION) != WS_CAPTION));
+
     KsAcquireSpinLock(&gWindowListLock, &OldIrql);
-    RtlCopyMemory(Wnd->Title, LocalBuf, sizeof(LocalBuf));
-    BOOLEAN ShouldPaint = WndIsEffectivelyVisibleLocked(Wnd);
-    if (ShouldPaint)
+    if (RtlCompareMemory(Wnd->Title, LocalBuf, sizeof(LocalBuf)) != sizeof(LocalBuf))
     {
-        Wnd->NeedsPaint = TRUE;
+        RtlCopyMemory(Wnd->Title, LocalBuf, sizeof(LocalBuf));
+        Changed = TRUE;
+
+        if (WndIsEffectivelyVisibleLocked(Wnd))
+        {
+            ShouldRedraw = TRUE;
+            if (IsChildOrBorderless)
+            {
+                Wnd->NeedsPaint = TRUE;
+            }
+        }
     }
     KsReleaseSpinLock(&gWindowListLock, OldIrql);
 
-    if (ShouldPaint)
+    if (Changed && ShouldRedraw)
     {
-        MsgNotifyPaint(Wnd->OwnerThread);
+        if (IsChildOrBorderless)
+        {
+            MsgNotifyPaint(Wnd->OwnerThread);
+        }
+        else
+        {
+            WndRedrawTitleBar(Wnd);
+        }
     }
-    
+
+    if (Changed && Wnd->Desktop != NULL && WndIsTaskbarEligible(Wnd->Desktop, Wnd))
+    {
+        WndNotifyShellHook(Wnd->Desktop, HSHELL_REDRAW, Wnd->hWnd);
+    }
+
     WndDereference(Wnd);
     return TRUE;
 }
@@ -3318,6 +4222,23 @@ VEAPI
 VeaUserIsWindow(
     IN HWND hWnd
 )
+/*++
+
+Routine Description:
+
+    This routine checks whether the specified handle refers to a valid,
+    active window object.
+
+Arguments:
+
+    hWnd - Supplies the window handle to validate.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE if hWnd identifies an existing window; otherwise
+              returns FALSE.
+
+--*/
 {
     PWND_OBJECT Wnd = WndLookupHandle(hWnd);
     if (!Wnd)
@@ -3333,6 +4254,25 @@ VEAPI
 VeaUserIsWindowVisible(
     IN HWND hWnd
 )
+/*++
+
+Routine Description:
+
+    This routine determines whether the specified window is effectively
+    visible by verifying that the window and every ancestor in its parent
+    chain (up to 64 levels) have the WS_VISIBLE style set.
+
+Arguments:
+
+    hWnd - Supplies the handle to the window to test.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE if the window and all of its ancestors have
+              WS_VISIBLE set; otherwise returns FALSE if hWnd is invalid or
+              any window in the hierarchy is hidden.
+
+--*/
 {
     KIRQL OldIrql;
     BOOLEAN Visible = TRUE;
@@ -3371,6 +4311,27 @@ VeaUserGetWindowRect(
     IN  HWND  hWnd,
     OUT PRECT lpRect
 )
+/*++
+
+Routine Description:
+
+    This routine retrieves the bounding rectangle of the specified window in
+    screen coordinates. For child windows, the origin is resolved relative
+    to the screen via WndGetClientOriginOnScreen. User-mode output pointers
+    are validated and written inside a structured exception block.
+
+Arguments:
+
+    hWnd - Supplies the handle to the window.
+
+    lpRect - Receives the window's bounding rectangle in screen coordinates.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE on success; otherwise returns FALSE if lpRect is
+              invalid, hWnd is invalid, or copying to user mode fails.
+
+--*/
 {
     RECT LocalRect;
     BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
@@ -3442,6 +4403,28 @@ VeaUserGetClientRect(
     IN  HWND  hWnd,
     OUT PRECT lpRect
 )
+/*++
+
+Routine Description:
+
+    This routine retrieves the dimensions of the specified window's client
+    area with left and top set to 0. For framed top-level windows, the
+    border widths and title bar height are subtracted and clamped to 0.
+    User-mode output pointers are validated and written inside a structured
+    exception block.
+
+Arguments:
+
+    hWnd - Supplies the handle to the window.
+
+    lpRect - Receives the client area rectangle in client coordinates.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE on success; otherwise returns FALSE if lpRect is
+              invalid, hWnd is invalid, or copying to user mode fails.
+
+--*/
 {
     RECT LocalRect;
     BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
@@ -3515,6 +4498,29 @@ VeaUserClientToScreen(
     IN     HWND   hWnd,
     IN OUT PPOINT lpPoint
 )
+/*++
+
+Routine Description:
+
+    This routine converts the specified point from client-area coordinates
+    of the given window to screen coordinates by adding the window's screen
+    client origin. User-mode pointers are validated and accessed inside
+    structured exception blocks.
+
+Arguments:
+
+    hWnd - Supplies the handle to the window whose client area is used for
+           the conversion.
+
+    lpPoint - Supplies the client coordinates and receives the converted
+              screen coordinates.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE on success; otherwise returns FALSE if lpPoint or
+              hWnd is invalid, or user-mode memory access fails.
+
+--*/
 {
     POINT LocalPt;
     BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
@@ -3589,6 +4595,29 @@ VeaUserScreenToClient(
     IN     HWND   hWnd,
     IN OUT PPOINT lpPoint
 )
+/*++
+
+Routine Description:
+
+    This routine converts the specified point from screen coordinates to
+    client-area coordinates of the given window by subtracting the window's
+    screen client origin. User-mode pointers are validated and accessed
+    inside structured exception blocks.
+
+Arguments:
+
+    hWnd - Supplies the handle to the window whose client area is used for
+           the conversion.
+
+    lpPoint - Supplies the screen coordinates and receives the converted
+              client coordinates.
+
+Return Value:
+
+    BOOLEAN - Returns TRUE on success; otherwise returns FALSE if lpPoint or
+              hWnd is invalid, or user-mode memory access fails.
+
+--*/
 {
     POINT LocalPt;
     BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
@@ -3663,6 +4692,25 @@ VeaUserWindowFromPoint(
     IN LONG ScreenX,
     IN LONG ScreenY
 )
+/*++
+
+Routine Description:
+
+    This routine performs a hit test at the specified screen coordinates and
+    returns the handle of the topmost visible window containing that point.
+
+Arguments:
+
+    ScreenX - Supplies the horizontal screen coordinate.
+
+    ScreenY - Supplies the vertical screen coordinate.
+
+Return Value:
+
+    HWND - Returns the handle of the window at the specified point, or NULL
+           if no window is hit.
+
+--*/
 {
     LONG ClientX = 0, ClientY = 0;
     PWND_OBJECT Hit = WndHitTestPoint(ScreenX, ScreenY, &ClientX, &ClientY);
@@ -3681,6 +4729,26 @@ WndGetCaptionButtonVisualState(
     IN HWND  hWnd,
     IN ULONG BtnId
 )
+/*++
+
+Routine Description:
+
+    This routine determines the current visual state (normal, hover, or
+    pressed) of a window's caption bar button based on the global hot and
+    pressed caption tracking state.
+
+Arguments:
+
+    hWnd - Supplies the handle to the window owning the caption button.
+
+    BtnId - Supplies the identifier of the caption button to query.
+
+Return Value:
+
+    ULONG - Returns CAPTION_STATE_PRESSED, CAPTION_STATE_HOVER, or
+            CAPTION_STATE_NORMAL.
+
+--*/
 {
     if (gPressedCaptionWnd == hWnd && gPressedCaptionBtn == BtnId)
     {
@@ -3695,6 +4763,48 @@ WndGetCaptionButtonVisualState(
     }
 
     return CAPTION_STATE_NORMAL;
+}
+
+VOID
+WndScreenToClient(
+    IN     PWND_OBJECT Wnd,
+    IN OUT PPOINT      lpPoint
+)
+/*++
+
+Routine Description:
+
+    This internal routine converts a point from screen coordinates to
+    client-area coordinates for the specified window object by subtracting
+    its screen client origin under the global window list lock.
+
+Arguments:
+
+    Wnd - Supplies a pointer to the target window object.
+
+    lpPoint - Supplies the screen coordinates and receives the converted
+              client coordinates.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    KIRQL OldIrql;
+    LONG OrigX = 0, OrigY = 0;
+
+    if (!Wnd || !lpPoint)
+    {
+        return;
+    }
+
+    KsAcquireSpinLock(&gWindowListLock, &OldIrql);
+    WndGetClientOriginLocked(Wnd, &OrigX, &OrigY);
+    KsReleaseSpinLock(&gWindowListLock, OldIrql);
+
+    lpPoint->x -= OrigX;
+    lpPoint->y -= OrigY;
 }
 
 /* EOF */

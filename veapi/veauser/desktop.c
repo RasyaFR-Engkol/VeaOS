@@ -378,6 +378,7 @@ VeaUserCreateDesktop(
     KsInitializeSpinlock(&NewDesktop->Lock);
     InitializeListHead(&NewDesktop->WindowListHead);
     NewDesktop->ParentWinSta = GpInteractiveWindowStation;
+    NewDesktop->BackgroundColor  = 0xFF008080;
 
     NameLen = (SIZE_T)DesktopAnsi.Length;
     NameBuf = (PCHAR)GDI_POOL_ALLOC(NameLen + 1);

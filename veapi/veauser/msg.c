@@ -22,6 +22,84 @@ LIST_ENTRY gThreadQueueListHead;
 BOOLEAN    gMsgSubsystemReady = FALSE;
 KSPIN_LOCK gThreadQueueListLock;
 
+static BOOLEAN
+MsgIsRawMouseMessage(
+    IN ULONG Message
+)
+{
+    return (Message == WM_MOUSEMOVE ||
+            Message == WM_LBUTTONDOWN ||
+            Message == WM_LBUTTONUP ||
+            Message == WM_RBUTTONDOWN ||
+            Message == WM_RBUTTONUP ||
+            Message == WM_MBUTTONDOWN ||
+            Message == WM_MBUTTONUP);
+}
+
+static VOID
+MsgTranslateMouseForWindow(
+    IN     PWND_OBJECT    TargetWnd,
+    IN OUT PMESSAGE_QUEUE Msg
+)
+{
+    LONG ScreenX = (LONG)(SHORT)(Msg->lParam & 0xFFFF);
+    LONG ScreenY = (LONG)(SHORT)((Msg->lParam >> 16) & 0xFFFF);
+
+    /* Jika window sedang memegang capture, semua pesan mouse langsung masuk sebagai client */
+    if (gCaptureWindow == TargetWnd->hWnd)
+    {
+        POINT Pt = { ScreenX, ScreenY };
+        WndScreenToClient(TargetWnd, &Pt);
+        Msg->lParam = ((LONG_PTR)(SHORT)Pt.y << 16) | ((ULONG_PTR)(USHORT)Pt.x);
+        return;
+    }
+
+    /* Tanya ke WndProc / DefWindowProcA titik kursor kena area apa */
+    LRESULT Hit = WndInvokeUserProc(TargetWnd, WM_NCHITTEST, 0, Msg->lParam);
+
+    /* Beri kesempatan WndProc / DefWindowProcA mengganti bentuk kursor */
+    LONG_PTR CursorLParam = ((LONG_PTR)(USHORT)Msg->message << 16) | ((ULONG_PTR)(USHORT)Hit);
+    WndInvokeUserProc(TargetWnd, WM_SETCURSOR, (WPARAM)TargetWnd->hWnd, CursorLParam);
+
+    /* Jika di dalam Client Area, ubah lParam jadi koordinat relatif client */
+    if (Hit == HTCLIENT)
+    {
+        POINT Pt = { ScreenX, ScreenY };
+        WndScreenToClient(TargetWnd, &Pt);
+        Msg->lParam = ((LONG_PTR)(SHORT)Pt.y << 16) | ((ULONG_PTR)(USHORT)Pt.x);
+        return;
+    }
+
+    /* Jika di Non-Client Area, konversi ke WM_NC* dengan wParam = Hit dan lParam = ScreenXY */
+    Msg->wParam = (ULONG_PTR)Hit;
+
+    switch (Msg->message)
+    {
+        case WM_MOUSEMOVE:   Msg->message = WM_NCMOUSEMOVE;   break;
+        case WM_LBUTTONDOWN: Msg->message = WM_NCLBUTTONDOWN; break;
+        case WM_LBUTTONUP:   Msg->message = WM_NCLBUTTONUP;   break;
+        case WM_RBUTTONDOWN: Msg->message = WM_NCRBUTTONDOWN; break;
+        case WM_RBUTTONUP:   Msg->message = WM_NCRBUTTONUP;   break;
+        case WM_MBUTTONDOWN: Msg->message = WM_NCMBUTTONDOWN; break;
+        case WM_MBUTTONUP:   Msg->message = WM_NCMBUTTONUP;   break;
+        default: break;
+    }
+}
+
+static VOID
+MsgQueryCurrentCursorPos(
+    OUT POINT *Pt
+)
+{
+    if (!Pt)
+    {
+        return;
+    }
+
+    Pt->x = gCursorX;
+    Pt->y = gCursorY;
+}
+
 static VOID
 MsgDereferenceSms(IN PSENT_MESSAGE Sms)
 {
@@ -122,7 +200,7 @@ MsgRecomputeWakeBitsLocked(
     }
 
     /* Pertahankan QS_PAINT jika masih set; dibersihkan saat WndFindPendingPaintWindow kosong */
-    NewBits |= (Queue->WakeBits & QS_PAINT);
+    NewBits |= (Queue->WakeBits & (QS_PAINT | QS_TIMER));
 
     Queue->WakeBits = NewBits;
 }
@@ -307,7 +385,18 @@ MsgInternalReadMessage(
             return STATUS_UNSUCCESSFUL;
         }
 
-        /* Prioritas 1: Posted Messages (PostMessage, WM_CHAR, thread messages) */
+        //
+        // List of the Priority
+        // 1. Posted Message
+        // 2. Hardware Input
+        // 3. WM_QUIT
+        // 4. WM_PAINT
+        // 5. WM_TIMER
+        //
+
+        //
+        // Posted Message
+        // 
         PoppedNode = MsgPopMatchingFromListLocked(
             Queue,
             &Queue->PostListHead,
@@ -317,7 +406,6 @@ MsgInternalReadMessage(
             DoRemove
         );
 
-        /* Prioritas 2: Hardware Input (Mouse & Keyboard) */
         if (!PoppedNode)
         {
             PoppedNode = MsgPopMatchingFromListLocked(
@@ -329,6 +417,10 @@ MsgInternalReadMessage(
                 DoRemove
             );
         }
+
+        //
+        // Posted Message + HW Input
+        // 
 
         if (PoppedNode)
         {
@@ -367,8 +459,15 @@ MsgInternalReadMessage(
                             MSG_POOL_FREE(Stale);
                         }
                     }
+                    
                     continue;
                 }
+
+                if (DoRemove && MsgIsRawMouseMessage(LocalMsg.message))
+                {
+                    MsgTranslateMouseForWindow(TargetWnd, &LocalMsg);
+                }
+                
                 WndDereference(TargetWnd);
             }
 
@@ -376,7 +475,10 @@ MsgInternalReadMessage(
             break;
         }
 
-        /* Prioritas 3: WM_QUIT (disintesis dari bitflag QS_POSTQUIT) */
+        //
+        // WM_QUIT
+        // 
+
         if (Queue->QuitPosted)
         {
             MESSAGE_QUEUE QuitMsg;
@@ -384,6 +486,8 @@ MsgInternalReadMessage(
             QuitMsg.hwnd    = NULL;
             QuitMsg.message = WM_QUIT;
             QuitMsg.wParam  = (ULONG_PTR)Queue->QuitExitCode;
+            QuitMsg.time    = (ULONG)(KsQuerySystemTime() / 10000ULL);
+            MsgQueryCurrentCursorPos(&QuitMsg.pt);
 
             if (MsgMatchesFilter(&QuitMsg, FilterHwnd, MsgMin, MsgMax))
             {
@@ -401,7 +505,10 @@ MsgInternalReadMessage(
 
         KsReleaseSpinLock(&Queue->Lock, OldIrql);
 
-        /* Prioritas 4: Lazy WM_PAINT (di luar Queue->Lock untuk cegah nested lock) */
+        //
+        // WM_PAINT
+        //
+
         if (FilterHwnd != (HWND)-1 &&
             ((MsgMin == 0 && MsgMax == 0) || (WM_PAINT >= MsgMin && WM_PAINT <= MsgMax)))
         {
@@ -411,6 +518,8 @@ MsgInternalReadMessage(
                 RtlZeroMemory(&LocalMsg, sizeof(MESSAGE_QUEUE));
                 LocalMsg.hwnd    = PaintHwnd;
                 LocalMsg.message = WM_PAINT;
+                LocalMsg.time    = (ULONG)(KsQuerySystemTime() / 10000ULL);
+                MsgQueryCurrentCursorPos(&LocalMsg.pt);
                 HasMsg = TRUE;
                 break;
             }
@@ -422,13 +531,30 @@ MsgInternalReadMessage(
             }
         }
 
+        //
+        // WM_TIMER 
+        //
+
+        if (TimerCheckThreadTimers(
+                CurrentThread,
+                Queue,
+                FilterHwnd,
+                MsgMin,
+                MsgMax,
+                DoRemove,
+                &LocalMsg))
+        {
+            MsgQueryCurrentCursorPos(&LocalMsg.pt);
+            HasMsg = TRUE;
+            break;
+        }
+
         if (!Blocking)
         {
             MsgDereferenceQueue(Queue);
             return STATUS_NO_MORE_ENTRIES;
         }
 
-        /* Reset NotificationEvent di bawah Queue->Lock tepat sebelum tidur */
         KsAcquireSpinLock(&Queue->Lock, &OldIrql);
         if (Queue->Destroyed)
         {
@@ -437,12 +563,11 @@ MsgInternalReadMessage(
             return STATUS_UNSUCCESSFUL;
         }
 
-        /* Pastikan tidak ada pesan baru yang menyelip sebelum event di-clear */
         BOOLEAN StillEmpty = IsListEmpty(&Queue->SentListHead) &&
                      IsListEmpty(&Queue->PostListHead) &&
                      IsListEmpty(&Queue->InputListHead) &&
                      !Queue->QuitPosted &&
-                     ((Queue->WakeBits & QS_PAINT) == 0);
+                     ((Queue->WakeBits & (QS_PAINT | QS_TIMER)) == 0);
         
         if (StillEmpty)
         {
@@ -642,6 +767,7 @@ MsgEnqueueThreadMessage(
             {
                 TailNode->Msg.wParam = wParam;
                 TailNode->Msg.lParam = lParam;
+                MsgQueryCurrentCursorPos(&TailNode->Msg.pt);
                 Queue->WakeBits |= WakeBit;
                 KsSetEvent(&Queue->WakeEvent, FALSE);
                 KsReleaseSpinLock(&Queue->Lock, OldIrql);
@@ -666,7 +792,8 @@ MsgEnqueueThreadMessage(
     Node->Msg.message = Message;
     Node->Msg.wParam  = wParam;
     Node->Msg.lParam  = lParam;
-    Node->Msg.time    = 0;
+    Node->Msg.time    = (ULONG)(KsQuerySystemTime() / 10000ULL);
+    MsgQueryCurrentCursorPos(&Node->Msg.pt);
 
     KsAcquireSpinLock(&Queue->Lock, &OldIrql);
 
@@ -814,7 +941,8 @@ VeaUserPeekMessage(
     IN  UINT           wRemoveMsg
 )
 {
-    return MsgInternalReadMessage(UserMsg, hWnd, MsgMin, MsgMax, wRemoveMsg, FALSE);
+    BOOLEAN RemoveMsg = ((wRemoveMsg & PM_REMOVE) != 0) ? TRUE : FALSE;
+    return MsgInternalReadMessage(UserMsg, hWnd, MsgMin, MsgMax, RemoveMsg, FALSE);
 }
 
 BOOLEAN

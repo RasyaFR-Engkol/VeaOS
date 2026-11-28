@@ -220,6 +220,7 @@ UserInitializeWindowStations(VOID)
     DefaultDesk->ParentWinSta = WinSta0;
     KsInitializeSpinlock(&DefaultDesk->Lock);
     InitializeListHead(&DefaultDesk->WindowListHead);
+    DefaultDesk->BackgroundColor = 0xFF008080;
 
     Status = ObInsertObject(DefaultDesk, NULL, VEA_STANDARD_RIGHTS_ALL | 0x01FF, 0, NULL, &GhDefaultDesk);
     if (!VEA_SUCCESS(Status))

@@ -81,10 +81,14 @@ UserThreadCallout(
     }
     else if (Type == VeapiThreadCalloutExit)
     {
-        /* 1. Hancurkan antrean pesan milik thread ini */
+        //
+        // Destroy timer and thread queue
+        //
+        
+        TimerCleanupThreadTimers(Thread);
+
         MsgDestroyThreadQueue(Thread);
 
-        /* 2. Lepas desktop & bebaskan THREADINFO */
         PTHREADINFO pti = (PTHREADINFO)KThread->Win32Thread;
         if (pti != NULL)
         {

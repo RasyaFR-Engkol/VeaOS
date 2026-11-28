@@ -37,6 +37,8 @@ UserInitialize(VOID)
         return Status;
     }
 
+    TimerInitialize();
+
     Status = GdiInitializeFontEngine();
     if (!VEA_SUCCESS(Status))
     {
