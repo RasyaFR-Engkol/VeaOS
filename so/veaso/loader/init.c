@@ -297,6 +297,65 @@ LdrpLoadDependencies(IN PLDR_MODULE Mod)
     return STATUS_SUCCESS;
 }
 
+VEASTATUS
+VEAPI
+LdrLoadDll(
+    IN PCSTR SearchPath OPTIONAL,
+    IN PULONG DllCharacteristics OPTIONAL,
+    IN PANSI_STRING DllName,
+    OUT PVOID *BaseAddress
+)
+{
+    PLDR_MODULE Mod = NULL;
+    PLIST_ENTRY E;
+    VEASTATUS Status;
+
+    (VOID)SearchPath;
+    (VOID)DllCharacteristics;
+
+    if (!DllName || !DllName->Buffer || !BaseAddress)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *BaseAddress = NULL;
+
+    /* 1. Map modul + seluruh dependensi DT_NEEDED-nya (otomatis cek duplikat) */
+    Status = LdrpLoadDependency(DllName->Buffer, &Mod);
+    if (!VEA_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    /* 2. Relokasi hanya modul baru yang belum berstatus LDRP_FLAG_PROCESSED */
+    for (E = LdrpPebLdr.InInitializationOrderModuleList.Flink;
+         E != &LdrpPebLdr.InInitializationOrderModuleList;
+         E = E->Flink)
+    {
+        PLDR_MODULE M = CONTAINING_RECORD(E, LDR_MODULE, InInitializationOrderLinks);
+        if (M->Flags & LDRP_FLAG_PROCESSED)
+        {
+            continue;
+        }
+
+        Status = RtlApplyElfRelocations((PELF32_EHDR)M->Base,
+                                        (ULONG_PTR)M->Base,
+                                        LdrpResolveGlobalSymbol);
+        if (!VEA_SUCCESS(Status))
+        {
+            return Status;
+        }
+
+        M->Flags |= LDRP_FLAG_PROCESSED;
+    }
+
+    /* 3. Jalankan .init / .init_array / DllMain hanya untuk modul baru (belum LDRP_FLAG_INITED) */
+    LdrpRunInitRoutines(NULL);
+
+    *BaseAddress = Mod->Base;
+    return STATUS_SUCCESS;
+}
+
 VOID
 VEAPI
 LdrpInit(

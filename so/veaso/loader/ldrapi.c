@@ -16,32 +16,49 @@
  * REVISION   : Creating file ldrapi.c
  * --------------------------------------------------------------------- */
 
-PVOID
+VEASTATUS
 VEAPI
 LdrGetProcedureAddress(
     IN PVOID BaseAddress,
-    IN PCSTR ProcedureName
+    IN PANSI_STRING Name OPTIONAL,
+    IN ULONG Ordinal OPTIONAL,
+    OUT PVOID *ProcedureAddress
 )
 {
-    /* Tolak handle NULL atau lookup by ordinal (ELF hanya mendukung nama simbol) */
-    if (!BaseAddress || !ProcedureName || IS_INTRESOURCE(ProcedureName))
+    ULONG_PTR SymAddr;
+
+    if (!BaseAddress || !ProcedureAddress)
     {
-        return NULL;
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *ProcedureAddress = NULL;
+
+    /* ELF hanya mendukung lookup by name, tolak lookup by ordinal */
+    if (!Name || !Name->Buffer || Name->Length == 0 || Ordinal != 0)
+    {
+        return STATUS_PROCEDURE_NOT_FOUND;
     }
 
     /* Pastikan BaseAddress benar-benar menunjuk ke ELF32 header yang valid di RAM */
     if (!RtlValidateElfHeader(BaseAddress, sizeof(ELF32_EHDR)))
     {
-        return NULL;
+        return STATUS_INVALID_IMAGE_FORMAT;
     }
 
-    ULONG_PTR SymAddr = RtlGetElfSymbolAddress(
+    SymAddr = RtlGetElfSymbolAddress(
         (PELF32_EHDR)BaseAddress,
         (ULONG_PTR)BaseAddress,
-        ProcedureName
+        Name->Buffer
     );
 
-    return (PVOID)SymAddr;
+    if (!SymAddr)
+    {
+        return STATUS_PROCEDURE_NOT_FOUND;
+    }
+
+    *ProcedureAddress = (PVOID)SymAddr;
+    return STATUS_SUCCESS;
 }
 
 /* EOF */
