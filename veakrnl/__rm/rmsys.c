@@ -24,8 +24,8 @@ extern VEASTATUS VEAPI KsiSystemCallTrampoline(
     IN PULONG_PTR KernelArgs,
     IN ULONG ParamBytes
 );
-extern VOID VEAPI KsiFastCallExitHandler(IN PKTRAP_FRAME Frame);
-extern VOID VEAPI KsiSystemCallReturn(IN PKTRAP_FRAME Frame);
+extern VOID VEAPI NORET KsiFastCallExitHandler(IN PKTRAP_FRAME Frame);
+extern VOID VEAPI NORET KsiSystemCallReturn(IN PKTRAP_FRAME Frame);
 
 NORET
 VOID
