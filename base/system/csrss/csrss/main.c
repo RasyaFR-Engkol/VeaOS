@@ -1,22 +1,22 @@
 /* VeaOS SPDX License ----------------------------------------------------
    SPDX-License-Identifier: GPL-2.0-only
    LICENSE     : GNU General Public License v2.0
-   FILE        : csrss.c
+   FILE        : main.c
    CREATOR     : RasyaFR-Engkol
    MAINTAINER  : VeaOS Team
-   PURPOSE     : CSRSS BASIC
+   PURPOSE     : CSR Main Entry
  ----- Effective since 11-2026 til FOREVER ------------------------------- */
 
-#include "csr.h"
+#include <csr.h>
 
 /* Revision History ------------------------------------------------------
- * DATE       : 17-11-2026
+ * DATE       : 28-11-2026
  * NAME       : RasyaFR-Engkol
- * REVISION   : Creating file csrss.c
+ * REVISION   : Creating file main.c
  * --------------------------------------------------------------------- */
 
-VEASTATUS
-__cdecl
+INT
+VEACDECL
 _main(
     int argc,
     char *argv[],
@@ -36,13 +36,14 @@ _main(
     Status = CsrServerInitialization();
     if (!VEA_SUCCESS(Status))
     {
-        KdPrintf("[CSRSS] Inisialisasi gagal total: 0x%08X\n\r", Status);
-        VzTerminateProcess((HANDLE)-1, Status);
-        return Status;
+        KdPrintf("[CSRSS] CsrServerInitialization gagal: 0x%08X\n\r", Status);
+        VzTerminateProcess(NtCurrentProcess(), Status);
+        return (INT)Status;
     }
 
     CsrRunSbSessionLoop();
-    return STATUS_SUCCESS;
+
+    return 0;
 }
 
 /* EOF */

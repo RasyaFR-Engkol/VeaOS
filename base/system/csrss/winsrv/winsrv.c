@@ -7,22 +7,13 @@
    PURPOSE     : CSR Win Server
  ----- Effective since 11-2026 til FOREVER ------------------------------- */
 
-#include "csr.h"
+#include <csr.h>
 
 /* Revision History ------------------------------------------------------
  * DATE       : 21-11-2026
  * NAME       : RasyaFR-Engkol
  * REVISION   : Creating file winsrv.c
  * --------------------------------------------------------------------- */
-
-enum {
-    WinSrvpAllocConsole = 0,
-    WinSrvpWriteConsole = 1,
-    WinSrvpReadConsole  = 2,
-    WinSrvpExitWindows  = 3,
-    WinSrvpMaxApiNumber
-};
-
 static VEASTATUS
 VEAPI
 WinSrvAllocConsole(
