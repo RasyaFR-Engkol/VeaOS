@@ -75,6 +75,8 @@ RtlNormalizeProcessParams(
     IN OUT PRTL_USER_PROCESS_PARAMETERS Params
 );
 
+#if 0 // see crt_cui.c
+
 static PSTR
 CrtpExtractWinMainCmdLine(
     IN PRTL_USER_PROCESS_PARAMETERS Params
@@ -185,6 +187,8 @@ mainCRTStartup(VOID)
     VzTerminateProcess(NtCurrentProcess(), (VEASTATUS)ExitCode);
 }
 
+#endif
+
 VOID
 VEAPI
 VeaProcessStartup(IN PPEB Peb)
@@ -293,6 +297,8 @@ VeaProcessStartup(IN PPEB Peb)
     }
 }
 
+#if 0 // See crt_gui.c
+
 VOID
 VEAPI
 WinMainCRTStartup(VOID)
@@ -331,5 +337,7 @@ WinMainCRTStartup(VOID)
 
     VzTerminateProcess(NtCurrentProcess(), (VEASTATUS)ExitCode);
 }
+
+#endif
 
 /* EOF */

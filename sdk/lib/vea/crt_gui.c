@@ -8,7 +8,8 @@
  ----- Effective since 11-2026 til FOREVER ------------------------------- */
 
 #include "crt_internal.h"
-#include <psdk/winuser.h>
+#include <userapi.h>
+#include <kernelapi.h>
 
 int
 WINAPI
@@ -91,7 +92,8 @@ WinMainCRTStartup(VOID)
     ExitCode = WinMain(hInstance, NULL, lpCmdLine, nCmdShow);
     CrtpRunFiniArray();
 
-    VzTerminateProcess(NtCurrentProcess(), (VEASTATUS)ExitCode);
+    // Exit via kernelapi
+    ExitProcess(ExitCode);
 
     while (1)
     {

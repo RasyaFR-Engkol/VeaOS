@@ -8,6 +8,8 @@
  ----- Effective since 11-2026 til FOREVER ------------------------------- */
 
 #include "crt_internal.h"
+#include <userapi.h>
+#include <kernelapi.h>
 
 extern int __cdecl main(int argc, char *argv[], char *envp[]);
 
@@ -88,7 +90,8 @@ mainCRTStartup(VOID)
     ExitCode = main(argc, argv, envp);
     CrtpRunFiniArray();
 
-    VzTerminateProcess(NtCurrentProcess(), (VEASTATUS)ExitCode);
+    // Exit via kernelapi
+    ExitProcess(ExitCode);
 
     while (1)
     {
