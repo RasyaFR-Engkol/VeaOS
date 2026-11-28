@@ -345,8 +345,102 @@ WndDrawDefaultTitleIcon(
     WndFillClippedFrameRect(Target, VisRects, VisCount, IconX + 7, IconY + 4, 2, 9, 0xFFF5B800);
 }
 
-VOID
-WndDrawLunaWindowFrame(
+static ULONG
+WndGetCornerBackdropColor(
+    IN PWND_OBJECT Wnd,
+    IN LONG        ScreenX,
+    IN LONG        ScreenY
+)
+{
+    KIRQL OldIrql;
+    PLIST_ENTRY Entry;
+    PWND_OBJECT BelowWnd = NULL;
+    ULONG Color; 
+    if (!Wnd)
+    {
+        return WndGetDesktopBgColor(GpActiveDesktop);
+    }
+
+    Color = WndGetDesktopBgColor(Wnd->Desktop ? Wnd->Desktop : GpActiveDesktop);
+
+    KsAcquireSpinLock(&gWindowListLock, &OldIrql);
+
+    PWND_OBJECT TopSelf = Wnd;
+    ULONG Depth = 0;
+    while (TopSelf && (TopSelf->Style & WS_CHILD) && TopSelf->hWndParent != NULL && Depth < 64)
+    {
+        PWND_OBJECT Parent = WndLookupHandleLocked(TopSelf->hWndParent);
+        if (!Parent) break;
+        TopSelf = Parent;
+        Depth++;
+    }
+
+    if (TopSelf && TopSelf->Magic == WND_OBJECT_MAGIC && TopSelf->Used)
+    {
+        /* Telusuri window di bawah TopSelf dalam Z-order (arah Blink) */
+        for (Entry = TopSelf->GlobalListEntry.Blink;
+             Entry != &gWindowListHead;
+             Entry = Entry->Blink)
+        {
+            PWND_OBJECT Cand = CONTAINING_RECORD(Entry, WND_OBJECT, GlobalListEntry);
+            if (Cand->Magic != WND_OBJECT_MAGIC || !Cand->Used || (Cand->Style & WS_CHILD))
+            {
+                continue;
+            }
+            if (Cand->Desktop != TopSelf->Desktop || !(Cand->Style & WS_VISIBLE))
+            {
+                continue;
+            }
+
+            if (ScreenX >= Cand->X && ScreenX < Cand->X + (LONG)Cand->Width &&
+                ScreenY >= Cand->Y && ScreenY < Cand->Y + (LONG)Cand->Height)
+            {
+                WndReference(Cand);
+                BelowWnd = Cand;
+                break;
+            }
+        }
+    }
+
+    KsReleaseSpinLock(&gWindowListLock, OldIrql);
+
+    if (BelowWnd)
+    {
+        BOOLEAN BelowHasFrame = !((BelowWnd->Style & WS_POPUP) &&
+                                  ((BelowWnd->Style & WS_CAPTION) != WS_CAPTION));
+
+        if (BelowHasFrame && ScreenY < BelowWnd->Y + WND_TITLEBAR_HEIGHT)
+        {
+            BOOLEAN BelowActive = (GpActiveDesktop != NULL &&
+                                   GpActiveDesktop->ForegroundWindow == BelowWnd);
+            Color = BelowActive ? 0xFF3A78E8 : 0xFF82A0CE;
+        }
+        else if (BelowHasFrame &&
+                 (ScreenX < BelowWnd->X + WND_BORDER_WIDTH ||
+                  ScreenX >= BelowWnd->X + (LONG)BelowWnd->Width - WND_BORDER_WIDTH ||
+                  ScreenY >= BelowWnd->Y + (LONG)BelowWnd->Height - WND_BORDER_WIDTH))
+        {
+            BOOLEAN BelowActive = (GpActiveDesktop != NULL &&
+                                   GpActiveDesktop->ForegroundWindow == BelowWnd);
+            Color = BelowActive ? 0xFF245EDC : 0xFF7B99C9;
+        }
+        else if (BelowWnd->hbrBackground != NULL)
+        {
+            GdipResolveBrushColor(BelowWnd->hbrBackground, &Color);
+        }
+        else
+        {
+            Color = 0xFFFFFFFF;
+        }
+
+        WndDereference(BelowWnd);
+    }
+
+    return Color;
+}
+
+static VOID
+WndDrawLunaTitleBar(
     IN PVEAGDI_SURFACE Target,
     IN PWND_OBJECT     Wnd,
     IN CONST RECT     *FrameVis,
@@ -354,27 +448,30 @@ WndDrawLunaWindowFrame(
     IN LONG            SnapX,
     IN LONG            SnapY,
     IN ULONG           SnapW,
-    IN ULONG           SnapH,
     IN BOOLEAN         IsActive
 )
 {
     static const LONG CornerInsets[WND_CORNER_RADIUS] = { 5, 3, 2, 1, 1, 0 };
 
-    if (SnapW < 16 || SnapH < WND_TITLEBAR_HEIGHT + WND_BORDER_WIDTH)
-    {
-        return;
-    }
-
     ULONG OuterOutline = IsActive ? 0xFF15429E : 0xFF5A739E;
     ULONG TopHighlight = IsActive ? 0xFF82BAFF : 0xFFB8CCE8;
     ULONG TitleTop     = IsActive ? 0xFF5498FA : 0xFF96B2DC;
     ULONG TitleBottom  = IsActive ? 0xFF215AD8 : 0xFF6E8EC2;
-    ULONG BorderMain   = IsActive ? 0xFF245EDC : 0xFF7B99C9;
+    ULONG LeftCornerBg  = WndGetCornerBackdropColor(Wnd, SnapX, SnapY);
+    ULONG RightCornerBg = WndGetCornerBackdropColor(Wnd, SnapX + (LONG)SnapW - 1, SnapY);
 
-    /* 1. Titlebar + Rounded Top Corners (Row 0 .. WND_TITLEBAR_HEIGHT - 1) */
+    /* 1. Background Titlebar + Rounded Top Corners */
     for (LONG Row = 0; Row < WND_TITLEBAR_HEIGHT; Row++)
     {
         LONG Inset = (Row < WND_CORNER_RADIUS) ? CornerInsets[Row] : 0;
+        if (Inset > 0)
+        {
+            WndFillClippedFrameRect(Target, FrameVis, FrameVisCount,
+                                    SnapX, SnapY + Row, (ULONG)Inset, 1, LeftCornerBg);
+            WndFillClippedFrameRect(Target, FrameVis, FrameVisCount,
+                                    SnapX + (LONG)SnapW - Inset, SnapY + Row, (ULONG)Inset, 1, RightCornerBg);
+        }
+        
         LONG RowX  = SnapX + Inset;
         LONG RowW  = (LONG)SnapW - (2 * Inset);
         if (RowW <= 2)
@@ -389,7 +486,6 @@ WndDrawLunaWindowFrame(
         }
         else
         {
-            /* Outline kiri & kanan 1px */
             WndFillClippedFrameRect(Target, FrameVis, FrameVisCount,
                                     RowX, SnapY + Row, 1, 1, OuterOutline);
             WndFillClippedFrameRect(Target, FrameVis, FrameVisCount,
@@ -402,7 +498,7 @@ WndDrawLunaWindowFrame(
             }
             else if (Row == WND_TITLEBAR_HEIGHT - 1)
             {
-                FillColor = OuterOutline; /* Garis pemisah tipis antara titlebar & client */
+                FillColor = OuterOutline;
             }
             else
             {
@@ -419,7 +515,7 @@ WndDrawLunaWindowFrame(
         }
     }
 
-    /* 2. Icon 16x16 & Teks Judul di Titlebar */
+    /* 2. Icon 16x16, Teks Judul, dan Caption Buttons */
     LONG IconX = SnapX + 7;
     LONG IconY = SnapY + (WND_TITLEBAR_HEIGHT - 16) / 2;
     WndDrawDefaultTitleIcon(Target, FrameVis, FrameVisCount, IconX, IconY);
@@ -437,27 +533,49 @@ WndDrawLunaWindowFrame(
     {
         WndDrawCaptionButtons(Target, Wnd, FrameVis, FrameVisCount, SnapX, SnapY, SnapW, IsActive);
     }
+}
 
-    /* 3. Border Kiri, Kanan, dan Bawah (tebal WND_BORDER_WIDTH = 3px) */
+VOID
+WndDrawLunaWindowFrame(
+    IN PVEAGDI_SURFACE Target,
+    IN PWND_OBJECT     Wnd,
+    IN CONST RECT     *FrameVis,
+    IN ULONG           FrameVisCount,
+    IN LONG            SnapX,
+    IN LONG            SnapY,
+    IN ULONG           SnapW,
+    IN ULONG           SnapH,
+    IN BOOLEAN         IsActive
+)
+{
+    if (SnapW < 16 || SnapH < WND_TITLEBAR_HEIGHT + WND_BORDER_WIDTH)
+    {
+        return;
+    }
+
+    ULONG OuterOutline = IsActive ? 0xFF15429E : 0xFF5A739E;
+    ULONG BorderMain   = IsActive ? 0xFF245EDC : 0xFF7B99C9;
+
+    /* 1 & 2. Titlebar */
+    WndDrawLunaTitleBar(Target, Wnd, FrameVis, FrameVisCount, SnapX, SnapY, SnapW, IsActive);
+
+    /* 3. Border Kiri, Kanan, dan Bawah */
     LONG BodyY = SnapY + WND_TITLEBAR_HEIGHT;
     ULONG BodyH = (SnapH > WND_TITLEBAR_HEIGHT) ? (SnapH - WND_TITLEBAR_HEIGHT) : 0;
 
     if (BodyH > 0)
     {
-        /* Border Kiri: 1px outline luar + 2px biru utama */
         WndFillClippedFrameRect(Target, FrameVis, FrameVisCount,
                                 SnapX, BodyY, 1, BodyH, OuterOutline);
         WndFillClippedFrameRect(Target, FrameVis, FrameVisCount,
                                 SnapX + 1, BodyY, WND_BORDER_WIDTH - 1, BodyH, BorderMain);
 
-        /* Border Kanan: 2px biru utama + 1px outline luar */
         LONG RightBorderX = SnapX + (LONG)SnapW - WND_BORDER_WIDTH;
         WndFillClippedFrameRect(Target, FrameVis, FrameVisCount,
                                 RightBorderX, BodyY, WND_BORDER_WIDTH - 1, BodyH, BorderMain);
         WndFillClippedFrameRect(Target, FrameVis, FrameVisCount,
                                 SnapX + (LONG)SnapW - 1, BodyY, 1, BodyH, OuterOutline);
 
-        /* Border Bawah: 2px biru utama + 1px outline luar paling bawah */
         LONG BottomBorderY = SnapY + (LONG)SnapH - WND_BORDER_WIDTH;
         ULONG InnerSpanW = (SnapW > 2) ? (SnapW - 2) : 0;
         WndFillClippedFrameRect(Target, FrameVis, FrameVisCount,
@@ -562,6 +680,79 @@ WndRedrawCaptionButtons(
 
     EngHidePointer();
     WndDrawCaptionButtons(Target, Wnd, FrameVis, FrameVisCount, Wnd->X, Wnd->Y, Wnd->Width, IsActive);
+    EngShowPointer();
+
+    for (ULONG i = 0; i < FrameVisCount; i++)
+    {
+        EngPresentRect(
+            FrameVis[i].left,
+            FrameVis[i].top,
+            (ULONG)(FrameVis[i].right - FrameVis[i].left),
+            (ULONG)(FrameVis[i].bottom - FrameVis[i].top)
+        );
+    }
+}
+
+VOID
+WndRedrawTitleBar(
+    IN PWND_OBJECT Wnd
+)
+{
+    PVEAGDI_SURFACE Target = EngGetTargetSurface();
+    KIRQL OldIrql;
+
+    if (!Target || !Wnd || !(Wnd->Style & WS_VISIBLE) || (Wnd->Style & WS_CHILD))
+    {
+        return;
+    }
+
+    if ((Wnd->Style & WS_POPUP) && ((Wnd->Style & WS_CAPTION) != WS_CAPTION))
+    {
+        return;
+    }
+
+    if (GpActiveDesktop != NULL && Wnd->Desktop != GpActiveDesktop)
+    {
+        return;
+    }
+
+    KsAcquireSpinLock(&gWindowListLock, &OldIrql);
+    LONG  SnapX = Wnd->X;
+    LONG  SnapY = Wnd->Y;
+    ULONG SnapW = Wnd->Width;
+    ULONG SnapH = Wnd->Height;
+    KsReleaseSpinLock(&gWindowListLock, OldIrql);
+
+    if (SnapW < 16 || SnapH < WND_TITLEBAR_HEIGHT + WND_BORDER_WIDTH)
+    {
+        return;
+    }
+
+    RECT TitleBounds = {
+        SnapX,
+        SnapY,
+        SnapX + (LONG)SnapW,
+        SnapY + WND_TITLEBAR_HEIGHT
+    };
+
+    RECT FrameVis[MAX_VISIBLE_CLIP_RECTS];
+    ULONG FrameVisCount = WndComputeVisibleRects(
+        Wnd,
+        &TitleBounds,
+        FrameVis,
+        MAX_VISIBLE_CLIP_RECTS
+    );
+
+    if (FrameVisCount == 0)
+    {
+        return;
+    }
+
+    BOOLEAN IsActive = (GpActiveDesktop == NULL ||
+                        GpActiveDesktop->ForegroundWindow == Wnd);
+
+    EngHidePointer();
+    WndDrawLunaTitleBar(Target, Wnd, FrameVis, FrameVisCount, SnapX, SnapY, SnapW, IsActive);
     EngShowPointer();
 
     for (ULONG i = 0; i < FrameVisCount; i++)

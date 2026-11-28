@@ -440,9 +440,12 @@ WndGetClientOriginOnScreen(
 
         if (!(Curr->Style & WS_CHILD))
         {
-            /* Top-level window punya border & titlebar */
-            X += WND_BORDER_WIDTH;
-            Y += WND_TITLEBAR_HEIGHT;
+            /* Top-level window punya border & titlebar hanya jika ber-frame */
+            if (WndHasFrame(Curr))
+            {
+                X += WND_BORDER_WIDTH;
+                Y += WND_TITLEBAR_HEIGHT;
+            }
             break;
         }
 
@@ -684,7 +687,9 @@ VeaUserBeginPaint(
 
         if (WndHasFrame(Wnd))
         {
-            WndDrawLunaWindowFrame(Target, Wnd, FrameVis, FrameVisCount, SnapX, SnapY, SnapW, SnapH, TRUE);
+            BOOLEAN IsActive = (GpActiveDesktop == NULL ||
+                        GpActiveDesktop->ForegroundWindow == Wnd);
+            WndDrawLunaWindowFrame(Target, Wnd, FrameVis, FrameVisCount, SnapX, SnapY, SnapW, SnapH, IsActive);
         }
 
         if (ClientW > 0 && ClientH > 0)
@@ -888,6 +893,8 @@ VeaUserEndPaint(
                 MAX_VISIBLE_CLIP_RECTS
             );
 
+            WndRefreshShadowsOverRect(Wnd, &PresentBounds);
+            
             for (ULONG i = 0; i < PresentCount; i++)
             {
                 EngPresentRect(
@@ -897,8 +904,6 @@ VeaUserEndPaint(
                     (ULONG)(PresentVis[i].bottom - PresentVis[i].top)
                 );
             }
-
-            WndRefreshShadowsOverRect(Wnd, &PresentBounds);
         }
         WndDereference(Wnd);
     }

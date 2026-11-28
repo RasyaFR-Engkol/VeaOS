@@ -10,10 +10,10 @@
 #include <veapi.h>
 
 /* Revision History ------------------------------------------------------
- * DATE       : 22-11-2026
- * NAME       : RasyaFR-Engkol
- * REVISION   : Creating file cursor.c
- * --------------------------------------------------------------------- */
+- DATE       : 22-11-2026
+- NAME       : RasyaFR-Engkol
+- REVISION   : Creating file cursor.c
+- --------------------------------------------------------------------- */
 
 GDI_CURSOR_STATE gCursor = { .ShowCount = 0 };
 KSPIN_LOCK       gCursorLock;
@@ -31,10 +31,120 @@ CurEnsureLock(VOID)
 }
 
 static VOID
+CurPresentClippedRect(
+    IN LONG L,
+    IN LONG T,
+    IN LONG R,
+    IN LONG B
+)
+{
+    LONG ScrW = (LONG)GpPrimaryDisplay.PrimarySurface.Width;
+    LONG ScrH = (LONG)GpPrimaryDisplay.PrimarySurface.Height;
+
+    if (ScrW <= 0 || ScrH <= 0)
+    {
+        return;
+    }
+
+    if (L < 0)    L = 0;
+    if (T < 0)    T = 0;
+    if (R > ScrW) R = ScrW;
+    if (B > ScrH) B = ScrH;
+
+    if (L < R && T < B)
+    {
+        EngPresentRect(L, T, (ULONG)(R - L), (ULONG)(B - T));
+    }
+}
+
+VOID
+VEAPI
+CurCompositeToPrimaryRect(
+    IN LONG  ClipX,
+    IN LONG  ClipY,
+    IN ULONG ClipW,
+    IN ULONG ClipH
+)
+{
+    PVEAGDI_SURFACE Primary = &GpPrimaryDisplay.PrimarySurface;
+    KIRQL OldIrql;
+
+    if (!Primary->Scan0 || ClipW == 0 || ClipH == 0)
+    {
+        return;
+    }
+
+    CurEnsureLock();
+    KsAcquireSpinLock(&gCursorLock, &OldIrql);
+
+    if (!gCursor.HasShape || gCursor.ShowCount < 0)
+    {
+        KsReleaseSpinLock(&gCursorLock, OldIrql);
+        return;
+    }
+
+    LONG CurL = GpPrimaryDisplay.CursorX - gCursor.HotX;
+    LONG CurT = GpPrimaryDisplay.CursorY - gCursor.HotY;
+    LONG CurR = CurL + (LONG)gCursor.Width;
+    LONG CurB = CurT + (LONG)gCursor.Height;
+    LONG InterL = (CurL > ClipX) ? CurL : ClipX;
+    LONG InterT = (CurT > ClipY) ? CurT : ClipY;
+    LONG InterR = (CurR < ClipX + (LONG)ClipW) ? CurR : (ClipX + (LONG)ClipW);
+    LONG InterB = (CurB < ClipY + (LONG)ClipH) ? CurB : (ClipY + (LONG)ClipH);
+    LONG ScrW = (LONG)Primary->Width;
+    LONG ScrH = (LONG)Primary->Height;
+
+    if (InterL < 0)    InterL = 0;
+    if (InterT < 0)    InterT = 0;
+    if (InterR > ScrW) InterR = ScrW;
+    if (InterB > ScrH) InterB = ScrH;
+
+    if (InterL < InterR && InterT < InterB)
+    {
+        for (LONG Py = InterT; Py < InterB; Py++)
+        {
+            ULONG Row = (ULONG)(Py - CurT);
+            PULONG DstRow = (PULONG)((PUCHAR)Primary->Scan0 + (SIZE_T)Py * Primary->Pitch);
+
+            for (LONG Px = InterL; Px < InterR; Px++)
+            {
+                ULONG Col      = (ULONG)(Px - CurL);
+                ULONG SrcPixel = gCursor.Pixels[Row * gCursor.Width + Col];
+                UCHAR Alpha    = (UCHAR)(SrcPixel >> 24);
+
+                if (Alpha == 0) continue;
+
+                if (Alpha == 255)
+                {
+                    DstRow[Px] = SrcPixel;
+                }
+                else
+                {
+                    ULONG DstPx = DstRow[Px];
+                    ULONG InvA  = 255 - Alpha;
+                    ULONG OutR  = (((SrcPixel >> 16) & 0xFF) * Alpha + ((DstPx >> 16) & 0xFF) * InvA + 127) / 255;
+                    ULONG OutG  = (((SrcPixel >> 8)  & 0xFF) * Alpha + ((DstPx >> 8)  & 0xFF) * InvA + 127) / 255;
+                    ULONG OutB  = ((SrcPixel         & 0xFF) * Alpha + (DstPx         & 0xFF) * InvA + 127) / 255;
+                    DstRow[Px]  = 0xFF000000 | (OutR << 16) | (OutG << 8) | OutB;
+                }
+            }
+        }
+    }
+
+    KsReleaseSpinLock(&gCursorLock, OldIrql);
+}
+
+static VOID
 CurHideInternal(VOID)
 {
-    PVEAGDI_SURFACE Primary = EngGetTargetSurface();
+    /* Kalau BackBuffer aktif, kursor tidak pernah digambar ke BackBuffer */
+    if (GpPrimaryDisplay.BackBuffer != NULL)
+    {
+        gCursor.DrawnOnScreen = FALSE;
+        return;
+    }
 
+    PVEAGDI_SURFACE Primary = &GpPrimaryDisplay.PrimarySurface;
     if (!gCursor.DrawnOnScreen || !Primary->Scan0)
     {
         return;
@@ -71,14 +181,14 @@ CurHideInternal(VOID)
 static VOID
 CurShowInternal(VOID)
 {
-    PVEAGDI_SURFACE Primary = EngGetTargetSurface();
-
-    if (gCursor.DrawnOnScreen || !gCursor.HasShape || gCursor.ShowCount < 0)
+    /* Kalau BackBuffer aktif, kursor di-composite lewat EngPresentRect() */
+    if (GpPrimaryDisplay.BackBuffer != NULL)
     {
         return;
     }
 
-    if (!Primary->Scan0)
+    PVEAGDI_SURFACE Primary = &GpPrimaryDisplay.PrimarySurface;
+    if (gCursor.DrawnOnScreen || !gCursor.HasShape || gCursor.ShowCount < 0 || !Primary->Scan0)
     {
         return;
     }
@@ -114,7 +224,6 @@ CurShowInternal(VOID)
                 }
                 else
                 {
-                    /* Alpha blend kalau cursor.bmp punya semi-transparent edge */
                     ULONG DstPx = DstRow[Px];
                     ULONG InvA  = 255 - Alpha;
                     ULONG OutR  = (((SrcPixel >> 16) & 0xFF) * Alpha + ((DstPx >> 16) & 0xFF) * InvA + 127) / 255;
@@ -135,6 +244,11 @@ VOID
 VEAPI
 EngHidePointer(VOID)
 {
+    if (GpPrimaryDisplay.BackBuffer != NULL)
+    {
+        return;
+    }
+
     KIRQL OldIrql;
     CurEnsureLock();
     KsAcquireSpinLock(&gCursorLock, &OldIrql);
@@ -146,6 +260,11 @@ VOID
 VEAPI
 EngShowPointer(VOID)
 {
+    if (GpPrimaryDisplay.BackBuffer != NULL)
+    {
+        return;
+    }
+
     KIRQL OldIrql;
     CurEnsureLock();
     KsAcquireSpinLock(&gCursorLock, &OldIrql);
@@ -161,28 +280,70 @@ EngMovePointer(
 )
 {
     KIRQL OldIrql;
-    LONG OldLeft, OldTop;
+    LONG OldLeft, OldTop, NewLeft, NewTop;
     ULONG CurW, CurH;
+    LONG ScrW = (LONG)GpPrimaryDisplay.PrimarySurface.Width;
+    LONG ScrH = (LONG)GpPrimaryDisplay.PrimarySurface.Height;
+
+    if (NewX < 0) NewX = 0;
+    if (NewY < 0) NewY = 0;
+    if (ScrW > 0 && NewX >= ScrW) NewX = ScrW - 1;
+    if (ScrH > 0 && NewY >= ScrH) NewY = ScrH - 1;
+
+    gCursorX = NewX;
+    gCursorY = NewY;
 
     CurEnsureLock();
     KsAcquireSpinLock(&gCursorLock, &OldIrql);
 
+    if (GpPrimaryDisplay.BackBuffer == NULL)
+    {
+        CurHideInternal();
+        GpPrimaryDisplay.CursorX = NewX;
+        GpPrimaryDisplay.CursorY = NewY;
+        CurShowInternal();
+        KsReleaseSpinLock(&gCursorLock, OldIrql);
+        return;
+    }
+
     OldLeft = gCursor.DrawnX - gCursor.HotX;
     OldTop  = gCursor.DrawnY - gCursor.HotY;
+
+    GpPrimaryDisplay.CursorX = NewX;
+    GpPrimaryDisplay.CursorY = NewY;
+    gCursor.DrawnX           = NewX;
+    gCursor.DrawnY           = NewY;
+
+    NewLeft = NewX - gCursor.HotX;
+    NewTop  = NewY - gCursor.HotY;
     CurW    = gCursor.Width;
     CurH    = gCursor.Height;
 
-    CurHideInternal();
-    GpPrimaryDisplay.CursorX = NewX;
-    GpPrimaryDisplay.CursorY = NewY;
-    CurShowInternal();
-
     KsReleaseSpinLock(&gCursorLock, OldIrql);
 
-    if (CurW > 0 && CurH > 0)
+    if (CurW == 0 || CurH == 0)
     {
-        EngPresentRect(OldLeft, OldTop, CurW, CurH);
-        EngPresentRect(NewX - gCursor.HotX, NewY - gCursor.HotY, CurW, CurH);
+        return;
+    }
+
+    LONG OldRight = OldLeft + (LONG)CurW;
+    LONG OldBot   = OldTop  + (LONG)CurH;
+    LONG NewRight = NewLeft + (LONG)CurW;
+    LONG NewBot   = NewTop  + (LONG)CurH;
+
+    if (OldLeft < NewRight && OldRight > NewLeft &&
+        OldTop  < NewBot   && OldBot   > NewTop)
+    {
+        LONG UnionL = (OldLeft  < NewLeft)  ? OldLeft  : NewLeft;
+        LONG UnionT = (OldTop   < NewTop)   ? OldTop   : NewTop;
+        LONG UnionR = (OldRight > NewRight) ? OldRight : NewRight;
+        LONG UnionB = (OldBot   > NewBot)   ? OldBot   : NewBot;
+        CurPresentClippedRect(UnionL, UnionT, UnionR, UnionB);
+    }
+    else
+    {
+        CurPresentClippedRect(OldLeft, OldTop, OldRight, OldBot);
+        CurPresentClippedRect(NewLeft, NewTop, NewRight, NewBot);
     }
 }
 
@@ -198,6 +359,8 @@ VeaUserSetCursorShape(
 {
     BOOLEAN IsUser = (KeGetPreviousMode() == UserMode);
     KIRQL OldIrql;
+    LONG OldLeft, OldTop, NewLeft, NewTop;
+    ULONG OldW, OldH;
 
     DPRINT("[VEAPI/CUR] VeaUserSetCursorShape: %lux%lu Hot=(%ld,%ld)\n",
            Width, Height, HotX, HotY);
@@ -210,7 +373,6 @@ VeaUserSetCursorShape(
 
     SIZE_T ByteLen = (SIZE_T)(Width * Height * sizeof(ULONG));
 
-    /* Copy dari user-mode di PASSIVE_LEVEL sebelum mengunci gCursorLock */
     if (IsUser)
     {
         if ((ULONG_PTR)PixelsARGB >= (ULONG_PTR)MM_HIGHEST_USER_ADDRESS ||
@@ -237,6 +399,11 @@ VeaUserSetCursorShape(
     CurEnsureLock();
     KsAcquireSpinLock(&gCursorLock, &OldIrql);
 
+    OldLeft = gCursor.DrawnX - gCursor.HotX;
+    OldTop  = gCursor.DrawnY - gCursor.HotY;
+    OldW    = gCursor.Width;
+    OldH    = gCursor.Height;
+
     CurHideInternal();
     gCursor.Width    = Width;
     gCursor.Height   = Height;
@@ -244,9 +411,23 @@ VeaUserSetCursorShape(
     gCursor.HotY     = HotY;
     RtlCopyMemory(gCursor.Pixels, gCursorStagingBuf, ByteLen);
     gCursor.HasShape = TRUE;
+    gCursor.DrawnX   = GpPrimaryDisplay.CursorX;
+    gCursor.DrawnY   = GpPrimaryDisplay.CursorY;
+    NewLeft          = gCursor.DrawnX - HotX;
+    NewTop           = gCursor.DrawnY - HotY;
     CurShowInternal();
 
     KsReleaseSpinLock(&gCursorLock, OldIrql);
+
+    if (GpPrimaryDisplay.BackBuffer != NULL)
+    {
+        if (OldW > 0 && OldH > 0)
+        {
+            CurPresentClippedRect(OldLeft, OldTop, OldLeft + (LONG)OldW, OldTop + (LONG)OldH);
+        }
+        CurPresentClippedRect(NewLeft, NewTop, NewLeft + (LONG)Width, NewTop + (LONG)Height);
+    }
+
     return TRUE;
 }
 
@@ -258,6 +439,9 @@ VeaUserShowCursor(
 {
     KIRQL OldIrql;
     INT NewCount;
+    LONG CurLeft, CurTop;
+    ULONG CurW, CurH;
+    BOOLEAN NeedPresent = FALSE;
 
     CurEnsureLock();
     KsAcquireSpinLock(&gCursorLock, &OldIrql);
@@ -268,6 +452,7 @@ VeaUserShowCursor(
         if (gCursor.ShowCount == 0)
         {
             CurShowInternal();
+            NeedPresent = TRUE;
         }
     }
     else
@@ -276,11 +461,22 @@ VeaUserShowCursor(
         if (gCursor.ShowCount == -1)
         {
             CurHideInternal();
+            NeedPresent = TRUE;
         }
     }
 
     NewCount = gCursor.ShowCount;
+    CurLeft  = GpPrimaryDisplay.CursorX - gCursor.HotX;
+    CurTop   = GpPrimaryDisplay.CursorY - gCursor.HotY;
+    CurW     = gCursor.Width;
+    CurH     = gCursor.Height;
     KsReleaseSpinLock(&gCursorLock, OldIrql);
+
+    if (NeedPresent && GpPrimaryDisplay.BackBuffer != NULL && CurW > 0 && CurH > 0)
+    {
+        CurPresentClippedRect(CurLeft, CurTop, CurLeft + (LONG)CurW, CurTop + (LONG)CurH);
+    }
+
     return NewCount;
 }
 
@@ -360,6 +556,7 @@ VeaUserSetCapture(
         {
             return NULL;
         }
+        WndDereference(Wnd);
     }
 
     gCaptureWindow = hWnd;
@@ -374,4 +571,4 @@ VeaUserReleaseCapture(VOID)
     return TRUE;
 }
 
-/* EOF */   
+/* EOF */

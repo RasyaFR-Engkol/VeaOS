@@ -28,6 +28,35 @@ EngFillRect32(
     IN ULONG Height,
     IN ULONG ColorARGB
 )
+/*++
+
+Routine Description:
+
+    This routine fills a rectangular region on the target 32-bit-per-pixel
+    surface with a solid ARGB color, clipping the rectangle against the
+    surface bounds.
+
+Arguments:
+
+    Surface - Supplies a pointer to the destination GDI surface.
+
+    X - Supplies the starting horizontal coordinate, in pixels, of the
+        rectangle.
+
+    Y - Supplies the starting vertical coordinate, in pixels, of the
+        rectangle.
+
+    Width - Supplies the width, in pixels, of the rectangle to fill.
+
+    Height - Supplies the height, in pixels, of the rectangle to fill.
+
+    ColorARGB - Supplies the 32-bit ARGB fill color value.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!Surface || !Surface->Scan0 || Width == 0 || Height == 0) return;
 
@@ -67,6 +96,28 @@ EngSetPixel32(
     IN LONG Y,
     IN ULONG ColorARGB
 )
+/*++
+
+Routine Description:
+
+    This routine sets the 32-bit ARGB color of a single pixel on the target
+    surface, ignoring coordinates that fall outside the surface bounds.
+
+Arguments:
+
+    Surface - Supplies a pointer to the destination GDI surface.
+
+    X - Supplies the horizontal coordinate, in pixels, of the pixel.
+
+    Y - Supplies the vertical coordinate, in pixels, of the pixel.
+
+    ColorARGB - Supplies the 32-bit ARGB color value to write.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!Surface || !Surface->Scan0) return;
     if (X < 0 || Y < 0 || X >= (LONG)Surface->Width || Y >= (LONG)Surface->Height) return;
@@ -82,6 +133,28 @@ EngGetPixel32(
     IN LONG X,
     IN LONG Y
 )
+/*++
+
+Routine Description:
+
+    This routine retrieves the 32-bit ARGB color value of a single pixel from
+    the target surface.
+
+Arguments:
+
+    Surface - Supplies a pointer to the source GDI surface.
+
+    X - Supplies the horizontal coordinate, in pixels, of the pixel.
+
+    Y - Supplies the vertical coordinate, in pixels, of the pixel.
+
+Return Value:
+
+    ULONG - Returns the 32-bit ARGB color value at the specified coordinates,
+            or 0 if the surface is invalid or the coordinates are out of
+            bounds.
+
+--*/
 {
     if (!Surface || !Surface->Scan0) return 0;
     if (X < 0 || Y < 0 || X >= (LONG)Surface->Width || Y >= (LONG)Surface->Height) return 0;
@@ -100,6 +173,33 @@ EngLineTo32(
     IN LONG Y2,
     IN ULONG ColorARGB
 )
+/*++
+
+Routine Description:
+
+    This routine draws a 32-bit-per-pixel solid line between two endpoints on
+    the target surface, using fast paths for horizontal and vertical lines and
+    Bresenham's algorithm for diagonal lines, with bounds clipping.
+
+Arguments:
+
+    Surface - Supplies a pointer to the destination GDI surface.
+
+    X1 - Supplies the starting horizontal coordinate, in pixels.
+
+    Y1 - Supplies the starting vertical coordinate, in pixels.
+
+    X2 - Supplies the ending horizontal coordinate, in pixels.
+
+    Y2 - Supplies the ending vertical coordinate, in pixels.
+
+    ColorARGB - Supplies the 32-bit ARGB color value used to draw the line.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!Surface || !Surface->Scan0) return;
 
@@ -172,6 +272,33 @@ EngInvertRect32(
     IN ULONG Width,
     IN ULONG Height
 )
+/*++
+
+Routine Description:
+
+    This routine inverts the 24-bit RGB color components of every pixel within
+    a rectangular region on the target surface while preserving each pixel's
+    alpha channel, clipping the region to the surface bounds.
+
+Arguments:
+
+    Surface - Supplies a pointer to the target GDI surface.
+
+    X - Supplies the starting horizontal coordinate, in pixels, of the
+        rectangle.
+
+    Y - Supplies the starting vertical coordinate, in pixels, of the
+        rectangle.
+
+    Width - Supplies the width, in pixels, of the rectangle to invert.
+
+    Height - Supplies the height, in pixels, of the rectangle to invert.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!Surface || !Surface->Scan0) return;
     if (X < 0) { if ((LONG)Width + X <= 0) return; Width += X; X = 0; }
@@ -186,7 +313,6 @@ EngInvertRect32(
         PULONG PixelRow = (PULONG)((PUCHAR)Surface->Scan0 + ((Y + Row) * Surface->Pitch));
         for (ULONG Col = 0; Col < Width; Col++)
         {
-            /* Balik komponen RGB (24-bit bawah), pertahankan byte Alpha */
             PixelRow[X + Col] ^= 0x00FFFFFF;
         }
     }
@@ -204,6 +330,42 @@ EngGradientFill32(
     IN ULONG ColorEndARGB,
     IN BOOLEAN Vertical
 )
+/*++
+
+Routine Description:
+
+    This routine fills a rectangular region on the target surface with a
+    linear 32-bit ARGB color gradient interpolated either vertically or
+    horizontally, clipping pixels that fall outside the surface bounds.
+
+Arguments:
+
+    Surface - Supplies a pointer to the destination GDI surface.
+
+    X - Supplies the starting horizontal coordinate, in pixels, of the
+        rectangle.
+
+    Y - Supplies the starting vertical coordinate, in pixels, of the
+        rectangle.
+
+    Width - Supplies the width, in pixels, of the rectangle to fill.
+
+    Height - Supplies the height, in pixels, of the rectangle to fill.
+
+    ColorStartARGB - Supplies the starting 32-bit ARGB color value (top edge
+                     for vertical gradients, left edge for horizontal).
+
+    ColorEndARGB - Supplies the ending 32-bit ARGB color value (bottom edge
+                   for vertical gradients, right edge for horizontal).
+
+    Vertical - Supplies TRUE to interpolate the gradient from top to bottom,
+               or FALSE to interpolate from left to right.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!Surface || !Surface->Scan0 || Width == 0 || Height == 0) return;
 
@@ -273,6 +435,31 @@ EngPresentRect(
     IN ULONG Width,
     IN ULONG Height
 )
+/*++
+
+Routine Description:
+
+    This routine presents a rectangular region from the primary display's back
+    buffer to the primary surface and composites the cursor over the updated
+    region.
+
+Arguments:
+
+    X - Supplies the starting horizontal coordinate, in pixels, of the region
+        to present.
+
+    Y - Supplies the starting vertical coordinate, in pixels, of the region
+        to present.
+
+    Width - Supplies the width, in pixels, of the region to present.
+
+    Height - Supplies the height, in pixels, of the region to present.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!GpPrimaryDisplay.IsInitialized || !GpPrimaryDisplay.BackBuffer)
     {
@@ -285,6 +472,8 @@ EngPresentRect(
         GpPrimaryDisplay.BackBuffer,
         X, Y
     );
+
+    CurCompositeToPrimaryRect(X, Y, Width, Height);
 }
 
 VOID
@@ -296,6 +485,34 @@ EngFillDesktopRect(
     IN ULONG Height,
     IN ULONG ColorARGB
 )
+/*++
+
+Routine Description:
+
+    This routine fills a rectangular region on the current desktop target
+    surface with a solid 32-bit ARGB color, temporarily hiding the cursor
+    during the draw and presenting the updated region if rendering to an
+    off-screen target.
+
+Arguments:
+
+    X - Supplies the starting horizontal coordinate, in pixels, of the
+        rectangle.
+
+    Y - Supplies the starting vertical coordinate, in pixels, of the
+        rectangle.
+
+    Width - Supplies the width, in pixels, of the rectangle to fill.
+
+    Height - Supplies the height, in pixels, of the rectangle to fill.
+
+    ColorARGB - Supplies the 32-bit ARGB fill color value.
+
+Return Value:
+
+    None.
+
+--*/
 {
     PVEAGDI_SURFACE Target = EngGetTargetSurface();
     if (!Target || !Target->Scan0 || Width == 0 || Height == 0)
@@ -325,6 +542,38 @@ EngBitBlt32(
     IN LONG SrcX,
     IN LONG SrcY
 )
+/*++
+
+Routine Description:
+
+    This routine performs a 32-bit-per-pixel bit-block transfer from a source
+    surface to a destination surface, clipping the transfer rectangle against
+    both surfaces and safely handling overlapping regions within the same
+    surface.
+
+Arguments:
+
+    DstSurface - Supplies a pointer to the destination GDI surface.
+
+    DstX - Supplies the destination horizontal coordinate, in pixels.
+
+    DstY - Supplies the destination vertical coordinate, in pixels.
+
+    Width - Supplies the width, in pixels, of the region to copy.
+
+    Height - Supplies the height, in pixels, of the region to copy.
+
+    SrcSurface - Supplies a pointer to the source GDI surface.
+
+    SrcX - Supplies the source horizontal coordinate, in pixels.
+
+    SrcY - Supplies the source vertical coordinate, in pixels.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!DstSurface || !DstSurface->Scan0 || !SrcSurface || !SrcSurface->Scan0) return;
 
@@ -380,6 +629,41 @@ EngTransparentBlt32(
     IN LONG SrcY,
     IN ULONG TransparentColorRGB
 )
+/*++
+
+Routine Description:
+
+    This routine performs a 32-bit-per-pixel color-keyed bit-block transfer
+    from a source surface to a destination surface with bounds clipping,
+    omitting source pixels whose 24-bit RGB value matches the specified
+    transparent color key.
+
+Arguments:
+
+    DstSurface - Supplies a pointer to the destination GDI surface.
+
+    DstX - Supplies the destination horizontal coordinate, in pixels.
+
+    DstY - Supplies the destination vertical coordinate, in pixels.
+
+    Width - Supplies the width, in pixels, of the region to transfer.
+
+    Height - Supplies the height, in pixels, of the region to transfer.
+
+    SrcSurface - Supplies a pointer to the source GDI surface.
+
+    SrcX - Supplies the source horizontal coordinate, in pixels.
+
+    SrcY - Supplies the source vertical coordinate, in pixels.
+
+    TransparentColorRGB - Supplies the 24-bit RGB color key value to treat as
+                          transparent (upper 8 bits are ignored).
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!DstSurface || !DstSurface->Scan0 || !SrcSurface || !SrcSurface->Scan0) return;
 
@@ -422,6 +706,40 @@ EngAlphaBlend32(
     IN LONG SrcY,
     IN UCHAR ConstantAlpha
 )
+/*++
+
+Routine Description:
+
+    This routine performs a 32-bit-per-pixel alpha-blended bit-block transfer
+    from a source surface to a destination surface with bounds clipping,
+    modulating each source pixel's alpha channel by a constant opacity factor.
+
+Arguments:
+
+    DstSurface - Supplies a pointer to the destination GDI surface.
+
+    DstX - Supplies the destination horizontal coordinate, in pixels.
+
+    DstY - Supplies the destination vertical coordinate, in pixels.
+
+    Width - Supplies the width, in pixels, of the region to blend.
+
+    Height - Supplies the height, in pixels, of the region to blend.
+
+    SrcSurface - Supplies a pointer to the source GDI surface.
+
+    SrcX - Supplies the source horizontal coordinate, in pixels.
+
+    SrcY - Supplies the source vertical coordinate, in pixels.
+
+    ConstantAlpha - Supplies the global opacity multiplier (0 for fully
+                    transparent, 255 for full source per-pixel alpha).
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!DstSurface || !DstSurface->Scan0 || !SrcSurface || !SrcSurface->Scan0) return;
     if (ConstantAlpha == 0) return;
@@ -491,6 +809,40 @@ EngDrawGlyph8x16(
     IN ULONG BkColorARGB,
     IN BOOLEAN TransparentBk
 )
+/*++
+
+Routine Description:
+
+    This routine renders a 1-bit-per-pixel 8x16 monochrome glyph bitmap onto
+    the target surface at the specified coordinates, clipping pixels that fall
+    outside the surface bounds.
+
+Arguments:
+
+    Surface - Supplies a pointer to the destination GDI surface.
+
+    X - Supplies the starting horizontal coordinate, in pixels, on the surface.
+
+    Y - Supplies the starting vertical coordinate, in pixels, on the surface.
+
+    GlyphBitmap - Supplies a 16-byte array representing the 8x16 glyph rows,
+                  ordered from most significant bit (left) to least significant
+                  bit (right).
+
+    TextColorARGB - Supplies the 32-bit ARGB color value used for set glyph
+                    pixels.
+
+    BkColorARGB - Supplies the 32-bit ARGB color value used for unset glyph
+                  pixels when TransparentBk is FALSE.
+
+    TransparentBk - Supplies TRUE to leave background pixels untouched, or
+                    FALSE to fill unset glyph pixels with BkColorARGB.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!Surface || !Surface->Scan0 || !GlyphBitmap) return;
 
@@ -531,6 +883,39 @@ EngDrawGlyphAlpha8(
     IN CONST UCHAR *AlphaBitmap,
     IN ULONG TextColorARGB
 )
+/*++
+
+Routine Description:
+
+    This routine renders an 8-bit alpha-blended glyph bitmap onto the target
+    surface at the specified coordinates, blending the text color over the
+    existing surface pixels with bounds clipping.
+
+Arguments:
+
+    Surface - Supplies a pointer to the destination GDI surface.
+
+    X - Supplies the starting horizontal coordinate, in pixels, on the surface.
+
+    Y - Supplies the starting vertical coordinate, in pixels, on the surface.
+
+    Width - Supplies the width, in pixels, of the alpha bitmap.
+
+    Height - Supplies the height, in pixels, of the alpha bitmap.
+
+    Pitch - Supplies the stride, in bytes, between consecutive rows in the
+            alpha bitmap.
+
+    AlphaBitmap - Supplies a pointer to the 8-bit-per-pixel alpha mask buffer.
+
+    TextColorARGB - Supplies the 32-bit ARGB foreground color value to blend
+                    using the alpha mask.
+
+Return Value:
+
+    None.
+
+--*/
 {
     if (!Surface || !Surface->Scan0 || !AlphaBitmap || Width == 0 || Height == 0) return;
 
@@ -591,6 +976,37 @@ EngSendVideoIoctl(
     OUT PVOID OutputBuffer OPTIONAL,
     IN ULONG OutputLength
 )
+/*++
+
+Routine Description:
+
+    This routine builds and sends a synchronous device I/O control (IOCTL)
+    request to the specified video device object and waits for its completion.
+
+Arguments:
+
+    DeviceObject - Supplies a pointer to the target video device object.
+
+    IoControlCode - Supplies the I/O control code specifying the operation
+                    to be performed by the device driver.
+
+    InputBuffer - Supplies an optional pointer to the buffer containing
+                  input data for the request.
+
+    InputLength - Supplies the length, in bytes, of the input buffer.
+
+    OutputBuffer - Supplies an optional pointer to the buffer that receives
+                   output data from the device driver.
+
+    OutputLength - Supplies the length, in bytes, of the output buffer.
+
+Return Value:
+
+    VEASTATUS - Returns STATUS_INSUFFICIENT_RESOURCES if the OIP could not
+                be allocated; otherwise returns the final completion status
+                from the I/O status block.
+
+--*/
 {
     POIP Oip;
     KEVENT Event;
@@ -724,3 +1140,5 @@ InitVideo(VOID)
 
     return STATUS_SUCCESS;
 }
+
+/* EOF */

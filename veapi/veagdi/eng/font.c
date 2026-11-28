@@ -149,75 +149,6 @@ GdipRegisterFontFaceFromMemory(
 }
 
 static
-INT
-GdipRegisterMemoryFace(
-    IN PVOID     FontBuffer,
-    IN ULONG     FontSize,
-    IN CONST CHAR *FilePath OPTIONAL,
-    IN ULONG     Flags,
-    IN BOOLEAN   IsMemoryFont
-)
-{
-    FT_Face FtFace = NULL;
-    KsWaitForSingleObject(&gFtEngineMutex);
-    FT_Error Err = FT_New_Memory_Face(
-        gFtLibrary,
-        (CONST FT_Byte *)FontBuffer,
-        (FT_Long)FontSize,
-        0,
-        &FtFace
-    );
-    KsReleaseMutex(&gFtEngineMutex, FALSE);
-
-    if (Err != 0 || !FtFace)
-    {
-        return 0;
-    }
-
-    PGDI_LOADED_FACE NewFace = (PGDI_LOADED_FACE)FONT_POOL_ALLOC(sizeof(GDI_LOADED_FACE));
-    if (!NewFace)
-    {
-        KsWaitForSingleObject(&gFtEngineMutex);
-        FT_Done_Face(FtFace);
-        KsReleaseMutex(&gFtEngineMutex, FALSE);
-        return 0;
-    }
-
-    RtlZeroMemory(NewFace, sizeof(GDI_LOADED_FACE));
-    NewFace->Magic        = GDI_FACE_MAGIC;
-    NewFace->RefCount     = 1;
-    NewFace->Flags        = Flags;
-    NewFace->IsMemoryFont = IsMemoryFont;
-    NewFace->OwnerProcess = (IsMemoryFont || (Flags & FR_PRIVATE)) ? (PEPROCESS)PtGetCurrentProcess() : NULL;
-    NewFace->FileBuffer   = FontBuffer;
-    NewFace->FileSize     = FontSize;
-    NewFace->Face         = FtFace;
-    NewFace->Weight       = (FtFace->style_flags & FT_STYLE_FLAG_BOLD) ? FW_BOLD : FW_NORMAL;
-    NewFace->Italic       = ((FtFace->style_flags & FT_STYLE_FLAG_ITALIC) != 0);
-
-    if (FilePath)
-    {
-        RtlCopyMemory(NewFace->FilePath, (PCHAR)FilePath, sizeof(NewFace->FilePath) - 1);
-    }
-
-    if (FtFace->family_name)
-    {
-        /* Copy nama family internal TTF ke struct */
-        for (ULONG i = 0; i < sizeof(NewFace->FamilyName) - 1 && FtFace->family_name[i] != '\0'; i++)
-        {
-            NewFace->FamilyName[i] = FtFace->family_name[i];
-        }
-    }
-
-    KIRQL OldIrql;
-    KsAcquireSpinLock(&gFontListLock, &OldIrql);
-    InsertTailList(&gLoadedFaceList, &NewFace->ListEntry);
-    KsReleaseSpinLock(&gFontListLock, OldIrql);
-
-    return 1; /* Jumlah font face yang berhasil ditambahkan (standar Win32) */
-}
-
-static
 VEASTATUS
 GdipReadFileToBuffer(
     IN CONST CHAR *FilePath,
@@ -911,6 +842,14 @@ GdipDrawTextInternal(
                     Glyph->Pitch,
                     Glyph->AlphaBuffer,
                     ColorARGB
+                );
+
+                GdiAccumulateDirtyRect(
+                    Dc,
+                    (LONG)ScreenGlyphX,
+                    (LONG)ScreenGlyphY,
+                    (LONG)ScreenGlyphX + (LONG)Glyph->Width,
+                    (LONG)ScreenGlyphY + (LONG)Glyph->Rows
                 );
             }
         }

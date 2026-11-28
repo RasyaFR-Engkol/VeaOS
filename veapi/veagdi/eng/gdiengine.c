@@ -85,6 +85,38 @@ GdipInitializeDcManager(VOID)
     gScreenDc = GdipAllocateDc();
 }
 
+VOID
+VEAPI
+GdiAccumulateDirtyRect(
+    IN PGDI_DC_OBJECT Dc,
+    IN LONG           Left,
+    IN LONG           Top,
+    IN LONG           Right,
+    IN LONG           Bottom
+)
+{
+    if (!Dc || Left >= Right || Top >= Bottom)
+    {
+        return;
+    }
+
+    if (!Dc->HasDirty)
+    {
+        Dc->DirtyLeft   = Left;
+        Dc->DirtyTop    = Top;
+        Dc->DirtyRight  = Right;
+        Dc->DirtyBottom = Bottom;
+        Dc->HasDirty    = TRUE;
+    }
+    else
+    {
+        if (Left   < Dc->DirtyLeft)   Dc->DirtyLeft   = Left;
+        if (Top    < Dc->DirtyTop)    Dc->DirtyTop    = Top;
+        if (Right  > Dc->DirtyRight)  Dc->DirtyRight  = Right;
+        if (Bottom > Dc->DirtyBottom) Dc->DirtyBottom = Bottom;
+    }
+}
+
 PGDI_DC_OBJECT
 VEAPI
 VeaGdiGetDc(
@@ -517,6 +549,14 @@ VeaGdiBlit(
                                     &SrcView, SrcX, SrcY, (UCHAR)Value);
                     break;
             }
+
+            GdiAccumulateDirtyRect(
+                Dc,
+                OriginsX[i] + ViewX,
+                OriginsY[i] + ViewY,
+                OriginsX[i] + ViewX + 1,
+                OriginsY[i] + ViewY + 1
+            );
         }
     }
     _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
@@ -557,6 +597,7 @@ GdiCreateWindowDC(
     Dc->ClipBottom = OriginY + (LONG)Height;
     Dc->TextColor  = 0xFF000000;
     Dc->BkColor    = 0xFFFFFFFF;
+    Dc->HasDirty   = FALSE;
 
     return Dc->hDC;
 }
@@ -620,11 +661,13 @@ VeaGdiFillRectInternal(
         if (Width != 0 && Height != 0)
         {
             EngFillRect32(&Views[i], (ULONG)X, (ULONG)Y, Width, Height, ColorARGB);
-            EngPresentRect(
+
+            GdiAccumulateDirtyRect(
+                Dc,
                 OriginsX[i] + X,
                 OriginsY[i] + Y,
-                Width,
-                Height
+                OriginsX[i] + X + (LONG)Width,
+                OriginsY[i] + Y + (LONG)Height
             );
         }
     }
@@ -680,6 +723,13 @@ VeaGdiSetPixel(
         if (VeaGdiMapPoint(Dc, &Views[i], OriginsX[i], OriginsY[i], X, Y, &ViewX, &ViewY))
         {
             EngSetPixel32(&Views[i], ViewX, ViewY, ColorARGB);
+            GdiAccumulateDirtyRect(
+                Dc,
+                OriginsX[i] + ViewX,
+                OriginsY[i] + ViewY,
+                OriginsX[i] + ViewX + 1,
+                OriginsY[i] + ViewY + 1
+            );
             return ColorARGB;
         }
     }
@@ -860,11 +910,12 @@ VeaGdiLineTo(
             LONG MaxX = (LONG)((ViewX1 > ViewX2) ? ViewX1 : ViewX2);
             LONG MaxY = (LONG)((ViewY1 > ViewY2) ? ViewY1 : ViewY2);
 
-            EngPresentRect(
+            GdiAccumulateDirtyRect(
+                Dc,
                 OriginsX[i] + MinX,
                 OriginsY[i] + MinY,
-                (ULONG)(MaxX - MinX + 1),
-                (ULONG)(MaxY - MinY + 1)
+                OriginsX[i] + MaxX + 1,
+                OriginsY[i] + MaxY + 1
             );
         }
     }
@@ -1163,6 +1214,22 @@ VeaUserGetDCEx(
         if (hWnd != NULL && Dc->hWnd != hWnd)
         {
             return NULL;
+        }
+
+        if (Dc->HasDirty)
+        {
+            LONG ScrW = (LONG)GpPrimaryDisplay.PrimarySurface.Width;
+            LONG ScrH = (LONG)GpPrimaryDisplay.PrimarySurface.Height;
+            LONG L = (Dc->DirtyLeft   < 0)    ? 0    : Dc->DirtyLeft;
+            LONG T = (Dc->DirtyTop    < 0)    ? 0    : Dc->DirtyTop;
+            LONG R = (Dc->DirtyRight  > ScrW) ? ScrW : Dc->DirtyRight;
+            LONG B = (Dc->DirtyBottom > ScrH) ? ScrH : Dc->DirtyBottom;
+
+            if (L < R && T < B)
+            {
+                EngPresentRect(L, T, (ULONG)(R - L), (ULONG)(B - T));
+            }
+            Dc->HasDirty = FALSE;
         }
 
         return GdiReleaseWindowDC(hdc) ? (HDC)1 : NULL;
