@@ -187,6 +187,7 @@ KpcpSendMessage(
     KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
     PKPC_PORT_OBJECT Port = NULL;
     PKPC_PORT_OBJECT TargetPort = NULL;
+    PKPC_PORT_OBJECT QueuePort = NULL;
     PKPC_MESSAGE_NODE MsgNode = NULL;
     KIRQL OldIrql;
     VEASTATUS Status;
@@ -298,12 +299,20 @@ KpcpSendMessage(
     // If no waiting for Reply, we can return instead
     //
 
-    KsAcquireSpinLock(&TargetPort->QueueLock, &OldIrql);
-    InsertTailList(&TargetPort->MessageQueueHead, &MsgNode->QueueListEntry);
-    KsReleaseSpinLock(&TargetPort->QueueLock, OldIrql);
+    QueuePort = TargetPort;
+
+    if (TargetPort->Type == KpcServerCommunicationPort &&
+        TargetPort->ServerProcessPort != NULL)
+    {
+        QueuePort = TargetPort->ServerProcessPort;
+    }
+
+    KsAcquireSpinLock(&QueuePort->QueueLock, &OldIrql);
+    InsertTailList(&QueuePort->MessageQueueHead, &MsgNode->QueueListEntry);
+    KsReleaseSpinLock(&QueuePort->QueueLock, OldIrql);
 
     KsReleaseSemaphore(
-        &TargetPort->MesssageSemaphore,
+        &QueuePort->MesssageSemaphore,
         1,
         FALSE
     );

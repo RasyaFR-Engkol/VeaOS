@@ -170,7 +170,7 @@ KpcpReplyPort(
     if (!VEA_SUCCESS(Status)) return Status;
 
     TargetPort = Port->ConnectedPort;
-    if (!TargetPort)
+    if (!TargetPort && Port->Type != KpcUnconnectedServerPort)
     {
         ObDereferenceObject(Port);
         return STATUS_PORT_DISCONNECTED;
@@ -204,12 +204,24 @@ KpcpReplyPort(
 
     PVOID KernelReplyCopy = NULL;
     ULONG ReplyLen = ReplyMessage->TotalLength;
+    PETHREAD ClientThread = (PETHREAD)MsgNode->RequestingThread;
     PEPROCESS ClientProcess = MsgNode->RequestingThread
         ? ((PETHREAD)MsgNode->RequestingThread)->ThreadProcess
-        : TargetPort->CreatorProcess;
+        : (TargetPort ? TargetPort->CreatorProcess : NULL);
+
+    if (!ClientProcess ||
+        ((PKPROCESS)ClientProcess)->DirectoryTableBase == 0 ||
+        (ClientThread && ClientThread->Tcb.State == Terminated))
+    {
+        UlFreePool(MsgNode);
+        ObDereferenceObject(Port);
+        return STATUS_PORT_DISCONNECTED;
+    }
 
     if (MsgNode->ReplyBuffer && ReplyLen > 0)
     {
+        BOOLEAN Attached = FALSE;
+        
         KernelReplyCopy = UlAllocatePoolWithTag(NonPagedPool, ReplyLen, TAG_KPC_MESSAGE);
         if (!KernelReplyCopy)
         {
@@ -231,9 +243,10 @@ KpcpReplyPort(
         }
         _VEA_END;
 
-        if (ClientProcess && ClientProcess != (PEPROCESS)PtGetCurrentProcess())
+        if (ClientProcess != (PEPROCESS)PtGetCurrentProcess())
         {
             PtAttachProcess((PKPROCESS)ClientProcess);
+            Attached = TRUE;
         }
 
         _VEA_TRY
@@ -242,8 +255,7 @@ KpcpReplyPort(
         }
         _VEA_EXCEPT(VEA_EXCEPTION_EXECUTE_HANDLER)
         {
-            if (ClientProcess && ClientProcess != (PEPROCESS)PtGetCurrentProcess())
-                PtDetachProcess();
+            if (Attached) PtDetachProcess();
             UlFreePool(KernelReplyCopy);
             UlFreePool(MsgNode);
             ObDereferenceObject(Port);
@@ -251,10 +263,7 @@ KpcpReplyPort(
         }
         _VEA_END;
 
-        if (ClientProcess && ClientProcess != (PEPROCESS)PtGetCurrentProcess())
-        {
-            PtDetachProcess();
-        }
+        if (Attached) PtDetachProcess();
 
         UlFreePool(KernelReplyCopy);
     }

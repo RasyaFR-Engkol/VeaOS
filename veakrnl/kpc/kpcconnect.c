@@ -101,6 +101,8 @@ KpcpConnectPort(
     ServerCommPort->Type = KpcServerCommunicationPort;
     ServerCommPort->Mode = RequestedMode;
     ServerCommPort->ConnectedPort = ClientCommPort;
+    ServerCommPort->ServerProcessPort = ServerPort;
+    ObReferenceObject(ServerPort);
     ServerCommPort->CreatorProcess = ServerPort->CreatorProcess;
     ServerCommPort->MaxMessageLength = ServerPort->MaxMessageLength;
     ServerCommPort->MaxConnectionInfoLength = ServerPort->MaxConnectionInfoLength;

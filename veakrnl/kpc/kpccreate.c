@@ -98,6 +98,7 @@ KpcpCreatePort(
 
     KsInitializeSpinlock(&Port->QueueLock);
     InitializeListHead(&Port->MessageQueueHead);
+    InitializeListHead(&Port->LpcReplyChain);
     KsInitializeSemaphore(&Port->MesssageSemaphore, 0, 0x7FFFFFFF);
 
     Port->MaxMessageLength = MaxMessageLength;
