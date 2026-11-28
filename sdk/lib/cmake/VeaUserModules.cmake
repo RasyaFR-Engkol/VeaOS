@@ -2,15 +2,44 @@
 # VeaOS User-Mode & Subsystem Build Rules (ReactOS-style CMake Helpers)
 # ==============================================================================
 
-# 1. Konfigurasi NASM & Include Global User-Mode
-set(CMAKE_ASM_NASM_OBJECT_FORMAT elf32)
-enable_language(ASM_NASM)
+# 1. Deteksi Root Directory VeaOS otomatis (aman untuk build internal & eksternal)
+if(NOT DEFINED VEAOS_SOURCE_DIR)
+    set(_VEA_PROBE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+    while(NOT "${_VEA_PROBE_DIR}" STREQUAL "/" AND NOT EXISTS "${_VEA_PROBE_DIR}/sdk/include")
+        get_filename_component(_VEA_PROBE_DIR "${_VEA_PROBE_DIR}" DIRECTORY)
+    endwhile()
+    if(EXISTS "${_VEA_PROBE_DIR}/sdk/include")
+        set(VEAOS_SOURCE_DIR "${_VEA_PROBE_DIR}")
+    else()
+        set(VEAOS_SOURCE_DIR "${CMAKE_SOURCE_DIR}")
+    endif()
+endif()
+
+if(NOT DEFINED VEA_TOOL_DIR)
+    set(VEA_TOOL_DIR "${VEAOS_SOURCE_DIR}/tool")
+endif()
+
+if(NOT DEFINED VEA_COMRC_EXECUTABLE)
+    if(TARGET comrc_tool)
+        set(VEA_COMRC_EXECUTABLE comrc_tool)
+    elseif(EXISTS "${VEAOS_SOURCE_DIR}/build/tool/comrc")
+        set(VEA_COMRC_EXECUTABLE "${VEAOS_SOURCE_DIR}/build/tool/comrc")
+    elseif(EXISTS "${VEAOS_SOURCE_DIR}/build/out/comrc")
+        set(VEA_COMRC_EXECUTABLE "${VEAOS_SOURCE_DIR}/build/out/comrc")
+    endif()
+endif()
+
+# 2. Konfigurasi NASM & Include Global User-Mode
+if(NOT CMAKE_ASM_NASM_COMPILER_LOADED)
+    set(CMAKE_ASM_NASM_OBJECT_FORMAT elf32)
+    enable_language(ASM_NASM)
+endif()
 
 set(VEA_USER_INCLUDES
-    ${CMAKE_SOURCE_DIR}/sdk/include
-    ${CMAKE_SOURCE_DIR}/sdk/include/ndk
-    ${CMAKE_SOURCE_DIR}/sdk/include/psdk
-    ${CMAKE_SOURCE_DIR}/veakrnl/include
+    ${VEAOS_SOURCE_DIR}/sdk/include
+    ${VEAOS_SOURCE_DIR}/sdk/include/ndk
+    ${VEAOS_SOURCE_DIR}/sdk/include/psdk
+    ${VEAOS_SOURCE_DIR}/veakrnl/include
 )
 
 set(VEA_USER_C_FLAGS
@@ -28,41 +57,46 @@ set(VEA_USER_C_FLAGS
     -ferror-limit=0
 )
 
-# 2. Peta Base Address Terpusat (Mirip baseaddress.cmake di ReactOS)
+# 3. Peta Base Address Terpusat
+set(baseaddress_csrsrv   0x75B00000)
+set(baseaddress_basesrv  0x75B40000)
+set(baseaddress_winsrv   0x75B80000)
 set(baseaddress_veaso    0x7C920000)
-set(baseaddress_kernel32 0x7C800000)
+set(baseaddress_kernelapi 0x7C800000)
 set(baseaddress_user32   0x77D40000)
 set(baseaddress_userapi  0x77E00000)
 set(baseaddress_uitheme  0x77C80000)
-set(baseaddress_gdi32    0x77F10000)
+set(baseaddress_gdiapi    0x77F10000)
 
-# 3. Helper: Set Image Base
+# 4. Helper: Set Image Base
 function(set_image_base MODULE BASE_ADDRESS)
     target_link_options(${MODULE} PRIVATE "-Wl,--image-base=${BASE_ADDRESS}")
 endfunction()
 
-# 4. Helper: Set Entry Point
+# 5. Helper: Set Entry Point
 function(set_entrypoint MODULE ENTRYPOINT)
     if(NOT "${ENTRYPOINT}" STREQUAL "0")
         target_link_options(${MODULE} PRIVATE "-Wl,-e,${ENTRYPOINT}")
     endif()
 endfunction()
 
-# 5. Helper: Link Import Libraries (.so)
+# 6. Helper: Link Import Libraries (.so tanpa prefix 'lib')
 function(add_importlibs MODULE)
-    target_link_libraries(${MODULE} PRIVATE ${ARGN})
+    foreach(_LIB ${ARGN})
+        if(TARGET ${_LIB} OR EXISTS "${_LIB}" OR "${_LIB}" MATCHES "^-")
+            target_link_libraries(${MODULE} PRIVATE ${_LIB})
+        elseif("${_LIB}" MATCHES "\\.(so|a)$")
+            target_link_libraries(${MODULE} PRIVATE "-l:${_LIB}")
+        else()
+            target_link_libraries(${MODULE} PRIVATE "-l:${_LIB}.so")
+        endif()
+    endforeach()
 endfunction()
 
-# 6. Fungsi Utama: set_module_type(<target> <type> [ENTRYPOINT <symbol>])
-#    Tipe yang didukung:
-#      - veadll    : Shared library (.so) dengan base address unik & export penuh
-#      - nativeapp : Executable Ring 3 (.elf) seperti smss.elf, csrss.elf, winlogon.elf
-#      - objectlib : Kumpulan objek C/ASM reusable (seperti rtl_user / veacrt)
-#      - staticlib : Static library (.a)
+# 7. Fungsi Utama: set_module_type(<target> <type> [ENTRYPOINT <symbol>])
 function(set_module_type MODULE TYPE)
     cmake_parse_arguments(ARG "" "ENTRYPOINT" "" ${ARGN})
 
-    # Semua tipe modul otomatis dapat include & C flags freestanding VeaOS
     target_compile_definitions(${MODULE} PRIVATE BUILD_USER)
     target_include_directories(${MODULE} PRIVATE ${VEA_USER_INCLUDES})
     target_compile_options(${MODULE} PRIVATE
@@ -78,6 +112,11 @@ function(set_module_type MODULE TYPE)
             list(APPEND _INC_FLAGS "-I${_INC}")
         endforeach()
 
+        set(_COMRC_DEPENDS "")
+        if(TARGET comrc_tool)
+            set(_COMRC_DEPENDS comrc_tool)
+        endif()
+
         foreach(_SRC ${_MOD_SOURCES})
             if("${_SRC}" MATCHES "\\.rc$")
                 set(_HAS_RSRC TRUE)
@@ -85,13 +124,12 @@ function(set_module_type MODULE TYPE)
                 get_filename_component(_RC_NAME "${_SRC}" NAME_WE)
                 set(_RSRC_OBJ "${CMAKE_CURRENT_BINARY_DIR}/${MODULE}_${_RC_NAME}.rsrc.o")
 
-                # Tandai .rc asli agar tidak dilempar mentah ke linker
                 set_source_files_properties("${_SRC}" PROPERTIES HEADER_FILE_ONLY TRUE)
 
                 add_custom_command(
                     OUTPUT "${_RSRC_OBJ}"
                     COMMAND "${VEA_COMRC_EXECUTABLE}" ${_INC_FLAGS} "${_RC_ABS}" -o "${_RSRC_OBJ}"
-                    DEPENDS "${_RC_ABS}" comrc_tool
+                    DEPENDS "${_RC_ABS}" ${_COMRC_DEPENDS}
                     COMMENT "[COMRC] Compiling resource ${_RC_NAME}.rc for ${MODULE}..."
                 )
 
@@ -104,7 +142,6 @@ function(set_module_type MODULE TYPE)
         if(EXISTS "${VEA_TOOL_DIR}/veadll.ld")
             target_link_options(${MODULE} PRIVATE "-Wl,-T,${VEA_TOOL_DIR}/veadll.ld")
         endif()
-        # Pastikan __vea_rsrc_start ikut masuk .dynsym meski targetnya .elf (veagui/nativeapp)
         target_link_options(${MODULE} PRIVATE "-Wl,--export-dynamic")
     endif()
 
@@ -127,6 +164,8 @@ function(set_module_type MODULE TYPE)
         )
 
         target_link_options(${MODULE} PRIVATE
+            --target=i686-pc-linux-gnu
+            -fuse-ld=lld
             -m32
             -shared
             -nostdlib
@@ -150,10 +189,12 @@ function(set_module_type MODULE TYPE)
         )
 
         target_compile_options(${MODULE} PRIVATE
-            $<$<COMPILE_LANGUAGE:C>:-fno-pie>
+            $<$<COMPILE_LANGUAGE:C>:-fno-pic -fno-pie>
         )
 
         target_link_options(${MODULE} PRIVATE
+            --target=i686-pc-linux-gnu
+            -fuse-ld=lld
             -m32
             -no-pie
             -nostdlib
@@ -168,11 +209,12 @@ function(set_module_type MODULE TYPE)
         else()
             set_entrypoint(${MODULE} VeaProcessStartup)
         endif()
-        
+
     elseif("${TYPE}" STREQUAL "objectlib" OR "${TYPE}" STREQUAL "staticlib")
         target_compile_options(${MODULE} PRIVATE
             $<$<COMPILE_LANGUAGE:C>:-fPIC -fvisibility=default>
         )
+
     elseif("${TYPE}" STREQUAL "veacui" OR "${TYPE}" STREQUAL "veagui")
         set_target_properties(${MODULE} PROPERTIES
             SUFFIX ".elf"
@@ -181,10 +223,12 @@ function(set_module_type MODULE TYPE)
         )
 
         target_compile_options(${MODULE} PRIVATE
-            $<$<COMPILE_LANGUAGE:C>:-fno-pie>
+            $<$<COMPILE_LANGUAGE:C>:-fno-pic -fno-pie>
         )
 
         target_link_options(${MODULE} PRIVATE
+            --target=i686-pc-linux-gnu
+            -fuse-ld=lld
             -m32
             -no-pie
             -nostdlib
