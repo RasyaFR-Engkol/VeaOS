@@ -76,4 +76,6 @@ add_library(veaso SHARED
 target_include_directories(veaso PRIVATE ${VEASO_DIR})
 set_module_type(veaso veadll)
 
+add_subdirectory(gdiapi)
 add_subdirectory(userapi)
+add_subdirectory(kernelapi)

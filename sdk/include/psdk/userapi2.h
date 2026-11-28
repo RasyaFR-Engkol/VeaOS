@@ -13,3 +13,5 @@ typedef struct tagPOINT
     LONG x;
     LONG y;
 } POINT, *PPOINT, *LPPOINT;
+
+typedef VOID (CALLBACK *TIMERPROC)(HWND, UINT, UINT_PTR, DWORD);

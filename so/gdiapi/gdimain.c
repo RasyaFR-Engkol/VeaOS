@@ -1,19 +1,18 @@
 /* VeaOS SPDX License ----------------------------------------------------
    SPDX-License-Identifier: GPL-2.0-only
    LICENSE     : GNU General Public License v2.0
-   FILE        : gdi.c
+   FILE        : gdimain.c
    CREATOR     : RasyaFR-Engkol
    MAINTAINER  : VeaOS Team
-   PURPOSE     : GDI Wrapper (FIXME: Put this in GDIAPI)
+   PURPOSE     : GDI Main
  ----- Effective since 11-2026 til FOREVER ------------------------------- */
 
-#include "userapi.h"
-#include <veapi.h>
+#include "gdi.h"
 
 /* Revision History ------------------------------------------------------
- * DATE       : 24-11-2026
+ * DATE       : 26-11-2026
  * NAME       : RasyaFR-Engkol
- * REVISION   : Creating file gdi.c
+ * REVISION   : Creating file gdimain.c
  * --------------------------------------------------------------------- */
 
 HBRUSH
@@ -112,37 +111,6 @@ FrameRect(
     return VeaGdiFrameRect(hdc, (PRECT)lprc, hbr) ? 1 : 0;
 }
 
-DWORD
-WINAPI
-GetClassLongA(
-    IN HWND hWnd,
-    IN INT  nIndex
-)
-{
-    if (!hWnd)
-    {
-        return 0;
-    }
-
-    return (DWORD)VeaUserGetClassLong(hWnd, nIndex);
-}
-
-DWORD
-WINAPI
-SetClassLongA(
-    IN HWND hWnd,
-    IN INT  nIndex,
-    IN LONG dwNewLong
-)
-{
-    if (!hWnd)
-    {
-        return 0;
-    }
-
-    return (DWORD)VeaUserSetClassLong(hWnd, nIndex, dwNewLong);
-}
-
 int WINAPI AddFontResourceExA(PSTR name, DWORD fl, PVOID res)
 {
     return (int)VeaGdiAddFontResourceEx(name, fl, res);
@@ -208,4 +176,54 @@ HFONT WINAPI CreateFontA(
     return CreateFontIndirectA(&lf);
 }
 
-/* EOF */
+BOOL
+WINAPI
+PtInRect(
+    IN CONST RECT *lprc,
+    IN POINT       pt
+)
+{
+    if (!lprc)
+    {
+        return FALSE;
+    }
+
+    return (pt.x >= lprc->left &&
+            pt.x <  lprc->right &&
+            pt.y >= lprc->top &&
+            pt.y <  lprc->bottom) ? TRUE : FALSE;
+}
+
+BOOL
+WINAPI
+DllMain(
+    IN HINSTANCE hinstDLL,
+    IN ULONG     fdwReason,
+    IN PVOID     lpvReserved
+)
+{
+    switch (fdwReason)
+    {
+        case DLL_PROCESS_ATTACH:
+        {
+            return TRUE;
+        }
+
+        case DLL_PROCESS_DETACH:
+        {
+            return TRUE;
+        }
+
+        case DLL_THREAD_ATTACH:
+        {
+            return TRUE;
+        }
+
+        case DLL_THREAD_DETACH:
+        {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}

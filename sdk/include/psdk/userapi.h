@@ -559,6 +559,61 @@ HANDLE WINAPI AddFontMemResourceEx(PVOID pFileView, DWORD cjSize, PVOID pvResrve
 BOOL WINAPI RemoveFontResourceExA(PSTR name, DWORD fl, PVOID res);
 int WINAPI AddFontResourceExA(PSTR name, DWORD fl, PVOID res);
 
+#define SetWindowText SetWindowTextA
+
+UINT_PTR
+WINAPI
+SetTimer(
+    IN HWND hWnd,
+    IN UINT_PTR nIDEvent,
+    IN UINT uElapse,
+    IN TIMERPROC lpTimerFunc
+);
+
+BOOL
+WINAPI
+KillTimer(
+    IN HWND hWnd,
+    IN UINT_PTR uIDEvent
+);
+
+HWND
+WINAPI
+SetCapture(
+    IN HWND hWnd
+);
+
+BOOL
+WINAPI
+ReleaseCapture(VOID);
+
+BOOL
+WINAPI
+SetWindowPos(
+    IN HWND hWnd,
+    IN HWND hWndInsertAfter,
+    IN INT  X,
+    IN INT  Y,
+    IN INT  cx,
+    IN INT  cy,
+    IN UINT uFlags
+);
+
+BOOL
+WINAPI
+MoveWindow(
+    IN HWND hWnd,
+    IN INT  X,
+    IN INT  Y,
+    IN INT  nWidth,
+    IN INT  nHeight,
+    IN BOOL bRepaint
+);
+
+BOOL WINAPI SetTaskmanWindow(IN HWND hWnd);
+BOOL WINAPI RegisterShellHookWindow(IN HWND hWnd);
+BOOL WINAPI DeregisterShellHookWindow(IN HWND hWnd);
+
 #ifdef __cplusplus
 }
 #endif
