@@ -3,10 +3,10 @@
 #include <ndk/pttypes.h>
 #include <procbind.h>
 #include <veastatus.h>
-#include <psdk/msg.h>
 #include <psdk/virtkey.h>
 #include <psdk/winuser.h>
 #include <psdk/resource.h>
+#include <psdk/msg.h>
 #include <userapi.h>
 #include <rtl.h>
 
@@ -42,6 +42,9 @@ typedef struct _USER_CURSOR_OBJECT {
 #define MAX_CTRL_STATES 64
 #define MAX_CTRL_TEXT   128
 
+#define BTN_HOVER_TIMER_ID      0x7F01
+#define BTN_HOVER_CHECK_MS      50
+
 typedef struct _CTRL_STATE {
     LIST_ENTRY ListEntry;
     HWND       hWnd;
@@ -50,10 +53,15 @@ typedef struct _CTRL_STATE {
     ULONG      Style;
     BOOLEAN    IsPressed;
     BOOLEAN    IsFocused;
+    BOOLEAN    IsHovered;
     ULONG      TextLen;
     ULONG      TextCapacity;
     PSTR       Text;
+    BOOLEAN    CaretVisible;
 } CTRL_STATE, *PCTRL_STATE;
+
+#define EDIT_CARET_TIMER_ID   1
+#define EDIT_CARET_BLINK_MS   500
 
 CONST RESOURCE_DATA_ENTRY *
 VEAPI
@@ -81,15 +89,37 @@ UserSizeofResource(
 extern CONST UCHAR VeaResourceStart[];
 extern HMODULE gUserApiModule;
 
-PVOID
+VEASTATUS
 VEAPI
 LdrGetProcedureAddress(
     IN PVOID BaseAddress,
-    IN PCSTR ProcedureName
+    IN PANSI_STRING Name OPTIONAL,
+    IN ULONG Ordinal OPTIONAL,
+    OUT PVOID *ProcedureAddress
 );
 
 #define IDB_DEFAULT_CURSOR  101
 #define IDB_16X16_CURSOR    102
 #define IDB_32X32_CURSOR    103
+
+VOID
+UserDefDoSizeMoveLoop(
+    IN HWND   hWnd,
+    IN WPARAM SysCmd,
+    IN LPARAM lParam
+);
+
+VOID
+UserDefTrackCaptionButton(
+    IN HWND   hWnd,
+    IN WPARAM HitCode
+);
+
+LRESULT
+UserDefNcHitTest(
+    IN HWND hWnd,
+    IN LONG ScreenX,
+    IN LONG ScreenY
+);
 
 /* EOF */

@@ -173,13 +173,42 @@ GetProcAddress(
     IN PCSTR   lpProcName
 )
 {
-    if (!hModule)
+    ANSI_STRING ProcName;
+    PANSI_STRING pProcName = NULL;
+    ULONG Ordinal = 0;
+    PVOID ProcAddr = NULL;
+    VEASTATUS Status;
+
+    if (!lpProcName)
     {
-        /* Default ke image base executable utama (0x00400000 di VeaUserModules.cmake) */
-        hModule = (HMODULE)0x00400000UL;
+        return NULL;
     }
 
-    return (FARPROC)LdrGetProcedureAddress((PVOID)hModule, lpProcName);
+    if (!hModule)
+    {
+        PPEB Peb = NtCurrentPeb();
+        hModule = (Peb && Peb->ImageBaseAddress)
+            ? (HMODULE)Peb->ImageBaseAddress
+            : (HMODULE)0x00400000UL;
+    }
+
+    if (IS_INTRESOURCE(lpProcName))
+    {
+        Ordinal = (ULONG)(ULONG_PTR)lpProcName;
+    }
+    else
+    {
+        RtlInitAnsiString(&ProcName, (PCHAR)lpProcName);
+        pProcName = &ProcName;
+    }
+
+    Status = LdrGetProcedureAddress((PVOID)hModule, pProcName, Ordinal, &ProcAddr);
+    if (!VEA_SUCCESS(Status))
+    {
+        return NULL;
+    }
+
+    return (FARPROC)ProcAddr;
 }
 
 HRSRC

@@ -114,3 +114,36 @@ UserapiRegisterSystemControls(VOID)
     wc.lpszClassName = "BUTTON";
     RegisterClassA(&wc);
 }
+
+DWORD
+WINAPI
+GetClassLongA(
+    IN HWND hWnd,
+    IN INT  nIndex
+)
+{
+    if (!hWnd)
+    {
+        return 0;
+    }
+
+    return (DWORD)VeaUserGetClassLong(hWnd, nIndex);
+}
+
+DWORD
+WINAPI
+SetClassLongA(
+    IN HWND hWnd,
+    IN INT  nIndex,
+    IN LONG dwNewLong
+)
+{
+    if (!hWnd)
+    {
+        return 0;
+    }
+
+    return (DWORD)VeaUserSetClassLong(hWnd, nIndex, dwNewLong);
+}
+
+/* EOF */

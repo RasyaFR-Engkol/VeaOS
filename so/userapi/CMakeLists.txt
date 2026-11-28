@@ -7,7 +7,6 @@ add_library(userapi SHARED
     wnd.c
     resources/userapi.rc
     resource.c
-    gdi.c
 )
 
 set_source_files_properties(resources/icon.asm PROPERTIES
@@ -20,4 +19,4 @@ target_include_directories(userapi PRIVATE
 )
 
 set_module_type(userapi veadll ENTRYPOINT DllMain)
-add_importlibs(userapi veaso)
+add_importlibs(userapi veaso gdiapi)

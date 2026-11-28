@@ -455,4 +455,20 @@ ShowCursor(
     return VeaUserShowCursor(bShow ? TRUE : FALSE);
 }
 
+HWND
+WINAPI
+SetCapture(
+    IN HWND hWnd
+)
+{
+    return VeaUserSetCapture(hWnd);
+}
+
+BOOL
+WINAPI
+ReleaseCapture(VOID)
+{
+    return VeaUserReleaseCapture() ? TRUE : FALSE;
+}
+
 /* EOF */

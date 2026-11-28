@@ -351,4 +351,40 @@ BOOL WINAPI SetWindowPos(
     return VeaUserSetWindowPos(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags) ? TRUE : FALSE;
 }
 
+BOOL
+WINAPI
+MoveWindow(
+    IN HWND hWnd,
+    IN INT  X,
+    IN INT  Y,
+    IN INT  nWidth,
+    IN INT  nHeight,
+    IN BOOL bRepaint
+)
+{
+    UINT Flags = SWP_NOZORDER | SWP_NOACTIVATE;
+
+    if (!bRepaint)
+    {
+        Flags |= SWP_NOREDRAW;
+    }
+
+    return SetWindowPos(hWnd, NULL, X, Y, nWidth, nHeight, Flags);
+}
+
+BOOL WINAPI SetTaskmanWindow(IN HWND hWnd)
+{
+    return VeaUserSetTaskmanWindow(hWnd) ? TRUE : FALSE;
+}
+
+BOOL WINAPI RegisterShellHookWindow(IN HWND hWnd)
+{
+    return VeaUserRegisterShellHookWindow(hWnd) ? TRUE : FALSE;
+}
+
+BOOL WINAPI DeregisterShellHookWindow(IN HWND hWnd)
+{
+    return VeaUserDeregisterShellHookWindow(hWnd) ? TRUE : FALSE;
+}
+
 /* EOF */
